@@ -1,24 +1,22 @@
-# syntax=docker/dockerfile:1
+  # syntax=docker/dockerfile:1
 
-ARG DOTNET_VERSION=8.0
+  FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
+  WORKDIR /src
 
-FROM mcr.microsoft.com/dotnet/sdk:${DOTNET_VERSION} AS build
-WORKDIR /src
+  COPY BybitGridBot.sln .
+  COPY src ./src
+  COPY tests ./tests
 
-COPY BybitGridBot.sln .
-COPY src ./src
-COPY tests ./tests
+  RUN dotnet restore BybitGridBot.sln
+  RUN dotnet publish src/BybitGridBot.App/BybitGridBot.App.csproj -c Release -o /app/publish /p:UseAppHost=false
 
-RUN dotnet restore BybitGridBot.sln
-RUN dotnet publish src/BybitGridBot.App/BybitGridBot.App.csproj -c Release -o /app/publish /p:UseAppHost=false
+  FROM mcr.microsoft.com/dotnet/runtime:8.0 AS final
+  WORKDIR /app
 
-FROM mcr.microsoft.com/dotnet/runtime:${DOTNET_VERSION} AS final
-WORKDIR /app
+  ENV DOTNET_EnableDiagnostics=0
 
-ENV DOTNET_EnableDiagnostics=0
+  COPY --from=build /app/publish .
 
-COPY --from=build /app/publish .
+  VOLUME ["/app/data", "/app/logs"]
 
-VOLUME ["/app/data", "/app/logs"]
-
-ENTRYPOINT ["dotnet", "BybitGridBot.App.dll"]
+  ENTRYPOINT ["dotnet", "BybitGridBot.App.dll"]
