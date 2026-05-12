@@ -11,5 +11,6 @@
 
   <ItemGroup>
     <ProjectReference Include="..\BybitGridBot.Domain\BybitGridBot.Domain.csproj" />
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
   </ItemGroup>
 </Project>
