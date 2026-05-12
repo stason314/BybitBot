@@ -1,3 +1,7 @@
 .env
-Dockerfile
-docker-compose.yml
+bin/
+obj/
+.vs/
+TestResults/
+data/
+logs/

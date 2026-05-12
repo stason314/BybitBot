@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk.Worker">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Serilog.Extensions.Hosting" Version="8.0.0" />
+    <PackageReference Include="Serilog.Settings.Configuration" Version="8.0.0" />
+    <PackageReference Include="Serilog.Sinks.Console" Version="5.0.1" />
+    <PackageReference Include="Serilog.Sinks.File" Version="5.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\BybitGridBot.Bybit\BybitGridBot.Bybit.csproj" />
+    <ProjectReference Include="..\BybitGridBot.Domain\BybitGridBot.Domain.csproj" />
+    <ProjectReference Include="..\BybitGridBot.Notifications\BybitGridBot.Notifications.csproj" />
+    <ProjectReference Include="..\BybitGridBot.Risk\BybitGridBot.Risk.csproj" />
+    <ProjectReference Include="..\BybitGridBot.Storage\BybitGridBot.Storage.csproj" />
+    <ProjectReference Include="..\BybitGridBot.Strategy\BybitGridBot.Strategy.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="appsettings.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+</Project>
