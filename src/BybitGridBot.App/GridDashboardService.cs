@@ -305,7 +305,7 @@ public sealed class GridDashboardService : IGridDashboardService
       color: var(--muted);
       margin-bottom: 6px;
     }
-    input {
+    input, textarea {
       width: 100%;
       padding: 12px 14px;
       border-radius: 14px;
@@ -314,7 +314,36 @@ public sealed class GridDashboardService : IGridDashboardService
       color: var(--ink);
       font: inherit;
     }
+    textarea {
+      min-height: 148px;
+      resize: vertical;
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 13px;
+      line-height: 1.45;
+    }
     .full { grid-column: 1 / -1; }
+    .preset-box {
+      margin-bottom: 16px;
+      padding: 14px;
+      border-radius: 18px;
+      background: rgba(29,35,31,0.04);
+      border: 1px solid rgba(29,35,31,0.08);
+    }
+    .preset-actions {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+      margin-top: 10px;
+    }
+    .secondary-button {
+      background: rgba(29,35,31,0.86);
+      box-shadow: 0 12px 28px rgba(29,35,31,.14);
+    }
+    .preset-hint {
+      color: var(--muted);
+      font-size: 12px;
+    }
     button {
       appearance: none;
       border: 0;
@@ -405,6 +434,14 @@ public sealed class GridDashboardService : IGridDashboardService
       </section>
       <section class="panel section">
         <h2>Runtime Settings</h2>
+        <div class="preset-box">
+          <label for="settingsPreset">Paste Settings Preset</label>
+          <textarea id="settingsPreset" placeholder="Symbol: BILLUSDT&#10;Category: spot&#10;Grid Lower: 1.6&#10;Grid Upper: 2.8&#10;Grid Step: 0.1&#10;Order Size USDT: 20&#10;Stop Lower: 1.5&#10;Stop Upper: 3.0"></textarea>
+          <div class="preset-actions">
+            <button type="button" class="secondary-button" id="applyPreset">Fill Runtime Settings</button>
+            <span class="preset-hint">Review the fields, then press Apply Settings to save.</span>
+          </div>
+        </div>
         <form id="settingsForm">
           <div><label for="symbol">Symbol</label><input id="symbol" name="symbol" placeholder="BILLUSDT" required /></div>
           <div><label for="category">Category</label><input id="category" name="category" value="spot" required /></div>
@@ -458,6 +495,16 @@ public sealed class GridDashboardService : IGridDashboardService
   <script>
     const byId = (id) => document.getElementById(id);
     const settingsFieldIds = ['symbol', 'category', 'lowerPrice', 'upperPrice', 'step', 'orderSizeUsdt', 'stopLowerPrice', 'stopUpperPrice'];
+    const presetLabelToFieldId = {
+      'symbol': 'symbol',
+      'category': 'category',
+      'grid lower': 'lowerPrice',
+      'grid upper': 'upperPrice',
+      'grid step': 'step',
+      'order size usdt': 'orderSizeUsdt',
+      'stop lower': 'stopLowerPrice',
+      'stop upper': 'stopUpperPrice'
+    };
     let settingsFormDirty = false;
 
     const isSettingsFormDirty = () => settingsFormDirty;
@@ -473,6 +520,63 @@ public sealed class GridDashboardService : IGridDashboardService
       byId('orderSizeUsdt').value = settings.orderSizeUsdt;
       byId('stopLowerPrice').value = settings.stopLowerPrice;
       byId('stopUpperPrice').value = settings.stopUpperPrice;
+    };
+    const parseSettingsPreset = (text) => {
+      const parsed = {};
+      const errors = [];
+
+      text.split(/\r?\n/).forEach((line, index) => {
+        const trimmed = line.trim();
+        if (!trimmed) {
+          return;
+        }
+
+        const separatorIndex = trimmed.indexOf(':');
+        if (separatorIndex < 0) {
+          errors.push(`Line ${index + 1}: missing ":" separator.`);
+          return;
+        }
+
+        const label = trimmed.slice(0, separatorIndex).trim().toLowerCase();
+        const value = trimmed.slice(separatorIndex + 1).trim();
+        const fieldId = presetLabelToFieldId[label];
+        if (!fieldId) {
+          errors.push(`Line ${index + 1}: unknown setting "${trimmed.slice(0, separatorIndex).trim()}".`);
+          return;
+        }
+
+        if (!value) {
+          errors.push(`Line ${index + 1}: value is empty.`);
+          return;
+        }
+
+        parsed[fieldId] = value;
+      });
+
+      return { parsed, errors };
+    };
+    const applySettingsPreset = () => {
+      const status = byId('formStatus');
+      const { parsed, errors } = parseSettingsPreset(byId('settingsPreset').value);
+      const missingLabels = Object.entries(presetLabelToFieldId)
+        .filter(([, fieldId]) => !Object.prototype.hasOwnProperty.call(parsed, fieldId))
+        .map(([label]) => label);
+
+      if (errors.length > 0 || missingLabels.length > 0) {
+        status.className = 'status error';
+        status.textContent = [
+          ...errors,
+          ...(missingLabels.length > 0 ? [`Missing settings: ${missingLabels.join(', ')}.`] : [])
+        ].join(' ');
+        return;
+      }
+
+      settingsFieldIds.forEach((fieldId) => {
+        byId(fieldId).value = parsed[fieldId];
+      });
+      setSettingsFormDirty(true);
+      status.className = 'status ok';
+      status.textContent = 'Preset applied to the form. Press Apply Settings to save.';
     };
     const formatNumber = (value) => value === null || value === undefined ? "—" : Number(value).toLocaleString(undefined, { maximumFractionDigits: 8 });
     const formatSigned = (value) => {
@@ -541,6 +645,7 @@ public sealed class GridDashboardService : IGridDashboardService
     settingsFieldIds.forEach((id) => {
       byId(id).addEventListener('input', () => setSettingsFormDirty(true));
     });
+    byId('applyPreset').addEventListener('click', applySettingsPreset);
 
     document.getElementById('settingsForm').addEventListener('submit', async (event) => {
       event.preventDefault();
