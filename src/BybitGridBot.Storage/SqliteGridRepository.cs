@@ -63,12 +63,94 @@ public sealed class SqliteGridRepository : IGridRepository
                 daily_pnl_date TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS runtime_settings (
+                settings_id TEXT NOT NULL PRIMARY KEY,
+                symbol TEXT NOT NULL,
+                category TEXT NOT NULL,
+                lower_price TEXT NOT NULL,
+                upper_price TEXT NOT NULL,
+                step TEXT NOT NULL,
+                order_size_usdt TEXT NOT NULL,
+                stop_lower_price TEXT NOT NULL,
+                stop_upper_price TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
             """;
 
         await using var command = connection.CreateCommand();
         command.CommandText = sql;
         await command.ExecuteNonQueryAsync(cancellationToken);
         _logger.LogInformation("SQLite repository initialized.");
+    }
+
+    public async Task<GridBotSettings?> GetRuntimeSettingsAsync(CancellationToken cancellationToken)
+    {
+        const string sql = """
+            SELECT symbol, category, lower_price, upper_price, step, order_size_usdt, stop_lower_price, stop_upper_price, updated_at
+            FROM runtime_settings
+            WHERE settings_id = 'active'
+            LIMIT 1;
+            """;
+
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return null;
+        }
+
+        return new GridBotSettings
+        {
+            Symbol = reader.GetString(0),
+            Category = reader.GetString(1),
+            LowerPrice = ParseDecimal(reader.GetString(2)),
+            UpperPrice = ParseDecimal(reader.GetString(3)),
+            Step = ParseDecimal(reader.GetString(4)),
+            OrderSizeUsdt = ParseDecimal(reader.GetString(5)),
+            StopLowerPrice = ParseDecimal(reader.GetString(6)),
+            StopUpperPrice = ParseDecimal(reader.GetString(7)),
+            UpdatedAt = DateTimeOffset.Parse(reader.GetString(8), CultureInfo.InvariantCulture)
+        };
+    }
+
+    public async Task SaveRuntimeSettingsAsync(GridBotSettings settings, CancellationToken cancellationToken)
+    {
+        const string sql = """
+            INSERT INTO runtime_settings (
+                settings_id, symbol, category, lower_price, upper_price, step, order_size_usdt, stop_lower_price, stop_upper_price, updated_at
+            )
+            VALUES (
+                'active', $symbol, $category, $lower_price, $upper_price, $step, $order_size_usdt, $stop_lower_price, $stop_upper_price, $updated_at
+            )
+            ON CONFLICT(settings_id) DO UPDATE SET
+                symbol = excluded.symbol,
+                category = excluded.category,
+                lower_price = excluded.lower_price,
+                upper_price = excluded.upper_price,
+                step = excluded.step,
+                order_size_usdt = excluded.order_size_usdt,
+                stop_lower_price = excluded.stop_lower_price,
+                stop_upper_price = excluded.stop_upper_price,
+                updated_at = excluded.updated_at;
+            """;
+
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        command.Parameters.AddWithValue("$symbol", settings.Symbol);
+        command.Parameters.AddWithValue("$category", settings.Category);
+        command.Parameters.AddWithValue("$lower_price", FormatDecimal(settings.LowerPrice));
+        command.Parameters.AddWithValue("$upper_price", FormatDecimal(settings.UpperPrice));
+        command.Parameters.AddWithValue("$step", FormatDecimal(settings.Step));
+        command.Parameters.AddWithValue("$order_size_usdt", FormatDecimal(settings.OrderSizeUsdt));
+        command.Parameters.AddWithValue("$stop_lower_price", FormatDecimal(settings.StopLowerPrice));
+        command.Parameters.AddWithValue("$stop_upper_price", FormatDecimal(settings.StopUpperPrice));
+        command.Parameters.AddWithValue("$updated_at", settings.UpdatedAt.ToString("O", CultureInfo.InvariantCulture));
+        await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
     public async Task<IReadOnlyList<GridLevel>> GetGridLevelsAsync(string symbol, CancellationToken cancellationToken)

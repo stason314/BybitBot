@@ -14,7 +14,7 @@ public sealed class GridBotWorker : BackgroundService
 {
     private readonly AppOptions _appOptions;
     private readonly BybitOptions _bybitOptions;
-    private readonly GridOptions _gridOptions;
+    private readonly GridOptions _defaultGridOptions;
     private readonly IBybitRestClient _bybitRestClient;
     private readonly ILogger<GridBotWorker> _logger;
     private readonly MarketRegimeFilter _marketRegimeFilter;
@@ -23,8 +23,9 @@ public sealed class GridBotWorker : BackgroundService
     private readonly RiskManager _riskManager;
     private readonly RiskOptions _riskOptions;
     private readonly GridStrategy _strategy;
-    private readonly string _baseAsset;
-    private readonly string _quoteAsset;
+    private GridOptions _gridOptions;
+    private string _baseAsset;
+    private string _quoteAsset;
 
     public GridBotWorker(
         IOptions<AppOptions> appOptions,
@@ -41,7 +42,8 @@ public sealed class GridBotWorker : BackgroundService
     {
         _appOptions = appOptions.Value;
         _bybitOptions = bybitOptions.Value;
-        _gridOptions = gridOptions.Value;
+        _defaultGridOptions = gridOptions.Value;
+        _gridOptions = _defaultGridOptions;
         _riskOptions = riskOptions.Value;
         _bybitRestClient = bybitRestClient;
         _strategy = strategy;
@@ -56,6 +58,8 @@ public sealed class GridBotWorker : BackgroundService
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         await _repository.InitializeAsync(stoppingToken);
+        _gridOptions = await EnsureRuntimeGridOptionsAsync(stoppingToken);
+        (_baseAsset, _quoteAsset) = ResolveAssets(_gridOptions.Symbol);
         ValidateStartupConfiguration();
 
         var levels = await EnsureGridLevelsAsync(stoppingToken);
@@ -78,6 +82,14 @@ public sealed class GridBotWorker : BackgroundService
         {
             try
             {
+                if (await RefreshRuntimeConfigurationAsync(stoppingToken))
+                {
+                    ValidateStartupConfiguration();
+                    levels = await EnsureGridLevelsAsync(stoppingToken);
+                    instrument = await _bybitRestClient.GetInstrumentInfoAsync(_gridOptions.Category, _gridOptions.Symbol, stoppingToken);
+                    state = await EnsureBotStateAsync(stoppingToken);
+                }
+
                 state = await RunCycleAsync(state, levels, instrument, stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
@@ -106,6 +118,51 @@ public sealed class GridBotWorker : BackgroundService
     {
         await _notifier.NotifyAsync($"Bybit grid bot stopped. Symbol: `{_gridOptions.Symbol}`", cancellationToken);
         await base.StopAsync(cancellationToken);
+    }
+
+    private async Task<GridOptions> EnsureRuntimeGridOptionsAsync(CancellationToken cancellationToken)
+    {
+        var persisted = await _repository.GetRuntimeSettingsAsync(cancellationToken);
+        if (persisted is null)
+        {
+            persisted = RuntimeGridOptionsFactory.ToRuntimeSettings(_defaultGridOptions);
+            await _repository.SaveRuntimeSettingsAsync(persisted, cancellationToken);
+        }
+
+        return RuntimeGridOptionsFactory.ToGridOptions(persisted, _defaultGridOptions);
+    }
+
+    private async Task<bool> RefreshRuntimeConfigurationAsync(CancellationToken cancellationToken)
+    {
+        var refreshedGridOptions = await EnsureRuntimeGridOptionsAsync(cancellationToken);
+        if (RuntimeGridOptionsFactory.IsSameTradingConfiguration(_gridOptions, refreshedGridOptions))
+        {
+            return false;
+        }
+
+        var previousSymbol = _gridOptions.Symbol;
+        var previousActiveOrders = await _repository.GetActiveOrdersAsync(previousSymbol, cancellationToken);
+
+        foreach (var order in previousActiveOrders)
+        {
+            await CancelManagedOrderAsync(order, cancellationToken);
+        }
+
+        _gridOptions = refreshedGridOptions;
+        (_baseAsset, _quoteAsset) = ResolveAssets(_gridOptions.Symbol);
+
+        _logger.LogInformation(
+            "Runtime grid settings updated. Symbol: {Symbol}, Range: {LowerPrice}-{UpperPrice}, Step: {Step}",
+            _gridOptions.Symbol,
+            _gridOptions.LowerPrice,
+            _gridOptions.UpperPrice,
+            _gridOptions.Step);
+
+        await _notifier.NotifyAsync(
+            $"Runtime settings updated.\nSymbol: `{_gridOptions.Symbol}`\nRange: `{_gridOptions.LowerPrice}`-`{_gridOptions.UpperPrice}`\nStep: `{_gridOptions.Step}`",
+            cancellationToken);
+
+        return true;
     }
 
     private async Task<BotState> RunCycleAsync(

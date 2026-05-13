@@ -6,6 +6,7 @@ Production-ready MVP grid bot for Bybit V5 on .NET 8 with safe default `paper` m
 
 - `paper`, `testnet`, `mainnet` modes
 - spot grid strategy for `BILLUSDT`
+- built-in web dashboard for live monitoring and runtime grid updates
 - SQLite state storage
 - Serilog logs to console and file
 - Telegram notifications
@@ -63,7 +64,13 @@ docker compose config
 docker compose up -d --build
 ```
 
-4. Read logs:
+4. Open the dashboard:
+
+```bash
+http://localhost:8080
+```
+
+5. Read logs:
 
 ```bash
 docker logs -f bybit-bot
@@ -72,15 +79,22 @@ docker logs -f bybit-bot
 ## Deploy On Server
 
 ```bash
-cd /opt/bybit-bot
+cd /opt/bybit-bot/BybitBot
 git pull --ff-only
 docker compose up -d --build
 docker logs -f bybit-bot
 ```
 
+Then open:
+
+```text
+http://SERVER_IP:8080
+```
+
 ## Update
 
 ```bash
+cd /opt/bybit-bot/BybitBot
 git pull --ff-only
 docker compose up -d --build
 ```
@@ -109,10 +123,11 @@ dotnet test
 - `MAX_DAILY_LOSS_USDT`, `MAX_OPEN_ORDERS`, `MAX_POSITION_USDT`, `MIN_ORDER_SIZE_USDT`: risk limits.
 - `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`: only when `TELEGRAM_ENABLED=true`.
 - `SQLITE_PATH`: default container path is `/app/data/bybit-grid-bot.db`.
+- `WEB_PORT`: dashboard HTTP port. Default `8080`.
 
 ## Notes
 
-- The bot does not expose incoming ports.
+- The dashboard exposes one HTTP port for the operator UI. Default is `8080`.
 - `.env` is tracked in git only with safe defaults and blank secrets. Do not commit real API keys or Telegram secrets.
 - `paper` mode uses live Bybit prices but does not send real orders.
 - By default `paper` mode reads public market data from mainnet and keeps private trading disabled.

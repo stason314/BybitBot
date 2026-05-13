@@ -15,4 +15,7 @@ public sealed class AppOptions
 
     [ConfigurationKeyName("LOG_LEVEL")]
     public string LogLevel { get; init; } = "Information";
+
+    [ConfigurationKeyName("WEB_PORT")]
+    public int WebPort { get; init; } = 8080;
 }

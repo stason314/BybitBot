@@ -8,23 +8,26 @@ using Microsoft.Extensions.Options;
 using Serilog;
 using Serilog.Events;
 
-var builder = Host.CreateApplicationBuilder(args);
+var builder = WebApplication.CreateBuilder(args);
 
 builder.Configuration
     .AddJsonFile("appsettings.json", optional: false, reloadOnChange: true)
     .AddEnvironmentVariables();
 
+var webPort = int.TryParse(builder.Configuration["WEB_PORT"], out var configuredWebPort) ? configuredWebPort : 8080;
+builder.WebHost.UseUrls($"http://0.0.0.0:{webPort}");
+
 var logFilePath = Directory.Exists("/app/logs") ? "/app/logs/bot-.log" : Path.Combine("logs", "bot-.log");
 Directory.CreateDirectory(Path.GetDirectoryName(logFilePath) ?? "logs");
 
-Log.Logger = new LoggerConfiguration()
-    .ReadFrom.Configuration(builder.Configuration)
-    .MinimumLevel.Is(ParseLevel(builder.Configuration["LOG_LEVEL"]))
-    .WriteTo.Console()
-    .WriteTo.File(logFilePath, rollingInterval: RollingInterval.Day, retainedFileCountLimit: 14)
-    .CreateLogger();
-
-builder.Services.AddSerilog();
+builder.Host.UseSerilog((context, _, loggerConfiguration) =>
+{
+    loggerConfiguration
+        .ReadFrom.Configuration(context.Configuration)
+        .MinimumLevel.Is(ParseLevel(context.Configuration["LOG_LEVEL"]))
+        .WriteTo.Console()
+        .WriteTo.File(logFilePath, rollingInterval: RollingInterval.Day, retainedFileCountLimit: 14);
+});
 
 builder.Services.AddOptions<AppOptions>().Bind(builder.Configuration);
 builder.Services.AddOptions<BybitOptions>().Bind(builder.Configuration);
@@ -36,8 +39,9 @@ builder.Services.AddSingleton<BybitSigner>();
 builder.Services.AddSingleton<GridStrategy>();
 builder.Services.AddSingleton<RiskManager>();
 builder.Services.AddSingleton<MarketRegimeFilter>();
+builder.Services.AddSingleton<IGridDashboardService, GridDashboardService>();
 
-builder.Services.AddHttpClient<IBybitRestClient, BybitRestClient>((serviceProvider, client) =>
+builder.Services.AddHttpClient<IBybitRestClient, BybitRestClient>(client =>
 {
     client.Timeout = TimeSpan.FromSeconds(30);
 });
@@ -57,7 +61,25 @@ builder.Services.AddSingleton<IGridRepository>(serviceProvider =>
 
 builder.Services.AddHostedService<GridBotWorker>();
 
-await builder.Build().RunAsync();
+var app = builder.Build();
+
+await app.Services.GetRequiredService<IGridRepository>().InitializeAsync(CancellationToken.None);
+
+app.MapGet("/", (IGridDashboardService dashboardService) =>
+    Results.Content(dashboardService.RenderDashboardPage(), "text/html; charset=utf-8"));
+
+app.MapGet("/api/dashboard", async (IGridDashboardService dashboardService, CancellationToken cancellationToken) =>
+    Results.Ok(await dashboardService.GetDashboardAsync(cancellationToken)));
+
+app.MapPost("/api/settings", async (UpdateSettingsRequest request, IGridDashboardService dashboardService, CancellationToken cancellationToken) =>
+{
+    var response = await dashboardService.UpdateSettingsAsync(request, cancellationToken);
+    return response.Success ? Results.Ok(response) : Results.BadRequest(response);
+});
+
+app.MapGet("/health", () => Results.Ok(new { ok = true, time = DateTimeOffset.UtcNow }));
+
+await app.RunAsync();
 
 static LogEventLevel ParseLevel(string? value)
 {

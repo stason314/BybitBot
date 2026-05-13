@@ -5,6 +5,8 @@ namespace BybitGridBot.Storage;
 public interface IGridRepository
 {
     Task InitializeAsync(CancellationToken cancellationToken);
+    Task<GridBotSettings?> GetRuntimeSettingsAsync(CancellationToken cancellationToken);
+    Task SaveRuntimeSettingsAsync(GridBotSettings settings, CancellationToken cancellationToken);
     Task<IReadOnlyList<GridLevel>> GetGridLevelsAsync(string symbol, CancellationToken cancellationToken);
     Task SaveGridLevelsAsync(string symbol, IReadOnlyCollection<GridLevel> levels, CancellationToken cancellationToken);
     Task<IReadOnlyList<GridOrder>> GetOrdersAsync(string symbol, CancellationToken cancellationToken);
