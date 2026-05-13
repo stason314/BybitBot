@@ -77,6 +77,12 @@ app.MapPost("/api/settings", async (UpdateSettingsRequest request, IGridDashboar
     return response.Success ? Results.Ok(response) : Results.BadRequest(response);
 });
 
+app.MapPost("/api/resume", async (IGridDashboardService dashboardService, CancellationToken cancellationToken) =>
+{
+    var response = await dashboardService.ResumeTradingAsync(cancellationToken);
+    return response.Success ? Results.Ok(response) : Results.BadRequest(response);
+});
+
 app.MapGet("/health", () => Results.Ok(new { ok = true, time = DateTimeOffset.UtcNow }));
 
 await app.RunAsync();

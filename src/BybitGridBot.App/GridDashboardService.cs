@@ -10,6 +10,7 @@ public interface IGridDashboardService
 {
     Task<DashboardResponse> GetDashboardAsync(CancellationToken cancellationToken);
     Task<UpdateSettingsResponse> UpdateSettingsAsync(UpdateSettingsRequest request, CancellationToken cancellationToken);
+    Task<UpdateSettingsResponse> ResumeTradingAsync(CancellationToken cancellationToken);
     string RenderDashboardPage();
 }
 
@@ -142,25 +143,74 @@ public sealed class GridDashboardService : IGridDashboardService
             };
         }
 
-        await _repository.SaveRuntimeSettingsAsync(
-            new GridBotSettings
-            {
-                Symbol = symbol,
-                Category = category,
-                LowerPrice = request.LowerPrice,
-                UpperPrice = request.UpperPrice,
-                Step = request.Step,
-                OrderSizeUsdt = request.OrderSizeUsdt,
-                StopLowerPrice = request.StopLowerPrice,
-                StopUpperPrice = request.StopUpperPrice,
-                UpdatedAt = DateTimeOffset.UtcNow
-            },
-            cancellationToken);
+        var settings = new GridBotSettings
+        {
+            Symbol = symbol,
+            Category = category,
+            LowerPrice = request.LowerPrice,
+            UpperPrice = request.UpperPrice,
+            Step = request.Step,
+            OrderSizeUsdt = request.OrderSizeUsdt,
+            StopLowerPrice = request.StopLowerPrice,
+            StopUpperPrice = request.StopUpperPrice,
+            UpdatedAt = DateTimeOffset.UtcNow
+        };
+
+        await _repository.SaveRuntimeSettingsAsync(settings, cancellationToken);
+        var resumeMessage = await TryClearPauseForSettingsAsync(settings, cancellationToken);
 
         return new UpdateSettingsResponse
         {
             Success = true,
-            Message = "Settings saved. The bot will apply them on the next loop."
+            Message = $"Settings saved. The bot will apply them on the next loop.{resumeMessage}"
+        };
+    }
+
+    public async Task<UpdateSettingsResponse> ResumeTradingAsync(CancellationToken cancellationToken)
+    {
+        var runtimeSettings = await _repository.GetRuntimeSettingsAsync(cancellationToken)
+            ?? RuntimeGridOptionsFactory.ToRuntimeSettings(_defaultGridOptions);
+        var state = await _repository.GetBotStateAsync(runtimeSettings.Symbol, cancellationToken);
+        if (state is null)
+        {
+            return new UpdateSettingsResponse
+            {
+                Success = false,
+                Message = "Cannot resume trading.",
+                Errors = [$"No bot state exists for {runtimeSettings.Symbol} yet."]
+            };
+        }
+
+        if (!state.IsPaused)
+        {
+            return new UpdateSettingsResponse
+            {
+                Success = true,
+                Message = $"Trading is already active for {runtimeSettings.Symbol}."
+            };
+        }
+
+        var currentPrice = await GetCurrentOrLastPriceAsync(runtimeSettings.Category, runtimeSettings.Symbol, state.LastObservedPrice, cancellationToken);
+        var resumeBlockReason = GetResumeBlockReason(runtimeSettings, currentPrice);
+        if (resumeBlockReason is not null)
+        {
+            return new UpdateSettingsResponse
+            {
+                Success = false,
+                Message = "Cannot resume trading.",
+                Errors = [resumeBlockReason]
+            };
+        }
+
+        state.IsPaused = false;
+        state.PauseReason = null;
+        state.UpdatedAt = DateTimeOffset.UtcNow;
+        await _repository.SaveBotStateAsync(state, cancellationToken);
+
+        return new UpdateSettingsResponse
+        {
+            Success = true,
+            Message = $"Trading resumed for {runtimeSettings.Symbol}. The bot will continue on the next loop."
         };
     }
 
@@ -344,6 +394,27 @@ public sealed class GridDashboardService : IGridDashboardService
       color: var(--muted);
       font-size: 12px;
     }
+    .pause-box {
+      margin-top: 18px;
+      padding: 14px;
+      border-radius: 18px;
+      background: rgba(177,54,34,0.09);
+      border: 1px solid rgba(177,54,34,0.16);
+    }
+    .pause-box strong {
+      display: block;
+      margin-bottom: 6px;
+      color: var(--danger);
+      font-size: 13px;
+      letter-spacing: .04em;
+      text-transform: uppercase;
+    }
+    .pause-box p {
+      margin: 0 0 12px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.45;
+    }
     button {
       appearance: none;
       border: 0;
@@ -430,6 +501,11 @@ public sealed class GridDashboardService : IGridDashboardService
           <div class="badge">Symbol <strong id="heroSymbol">-</strong></div>
           <div class="badge">Price <strong id="heroPrice">-</strong></div>
           <div class="badge">Last sync <strong id="heroUpdated">-</strong></div>
+        </div>
+        <div class="pause-box" id="pauseBox" hidden>
+          <strong>Trading paused</strong>
+          <p id="pauseReason">-</p>
+          <button type="button" class="secondary-button" id="resumeTrading">Resume Trading</button>
         </div>
       </section>
       <section class="panel section">
@@ -596,6 +672,8 @@ public sealed class GridDashboardService : IGridDashboardService
       byId('heroSymbol').textContent = data.settings.symbol;
       byId('heroPrice').textContent = formatNumber(data.state.currentPrice);
       byId('heroUpdated').textContent = formatDate(data.generatedAt);
+      byId('pauseBox').hidden = !data.state.isPaused;
+      byId('pauseReason').textContent = data.state.pauseReason || 'Trading is paused.';
 
       if (forceSettingsRefresh || !isSettingsFormDirty()) {
         updateSettingsForm(data.settings);
@@ -646,6 +724,16 @@ public sealed class GridDashboardService : IGridDashboardService
       byId(id).addEventListener('input', () => setSettingsFormDirty(true));
     });
     byId('applyPreset').addEventListener('click', applySettingsPreset);
+    byId('resumeTrading').addEventListener('click', async () => {
+      const response = await fetch('/api/resume', { method: 'POST' });
+      const result = await response.json();
+      const status = byId('formStatus');
+      status.className = `status ${response.ok ? 'ok' : 'error'}`;
+      status.textContent = response.ok ? result.message : (result.errors?.join(' | ') || result.message || 'Failed to resume trading.');
+      if (response.ok) {
+        await loadDashboard({ forceSettingsRefresh: true });
+      }
+    });
 
     document.getElementById('settingsForm').addEventListener('submit', async (event) => {
       event.preventDefault();
@@ -725,6 +813,62 @@ public sealed class GridDashboardService : IGridDashboardService
         }
 
         return errors;
+    }
+
+    private async Task<string> TryClearPauseForSettingsAsync(GridBotSettings settings, CancellationToken cancellationToken)
+    {
+        var state = await _repository.GetBotStateAsync(settings.Symbol, cancellationToken);
+        if (state is null || !state.IsPaused)
+        {
+            return string.Empty;
+        }
+
+        var currentPrice = await GetCurrentOrLastPriceAsync(settings.Category, settings.Symbol, state.LastObservedPrice, cancellationToken);
+        var resumeBlockReason = GetResumeBlockReason(settings, currentPrice);
+        if (resumeBlockReason is not null)
+        {
+            return $" Bot remains paused: {resumeBlockReason}";
+        }
+
+        state.IsPaused = false;
+        state.PauseReason = null;
+        state.UpdatedAt = DateTimeOffset.UtcNow;
+        await _repository.SaveBotStateAsync(state, cancellationToken);
+
+        return $" Pause cleared for {settings.Symbol}.";
+    }
+
+    private async Task<decimal?> GetCurrentOrLastPriceAsync(string category, string symbol, decimal? fallbackPrice, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var ticker = await _bybitRestClient.GetTickerAsync(category, symbol, cancellationToken);
+            return ticker.LastPrice;
+        }
+        catch
+        {
+            return fallbackPrice;
+        }
+    }
+
+    private static string? GetResumeBlockReason(GridBotSettings settings, decimal? currentPrice)
+    {
+        if (currentPrice is null)
+        {
+            return null;
+        }
+
+        if (currentPrice < settings.StopLowerPrice)
+        {
+            return $"Current price {currentPrice} is below Stop Lower {settings.StopLowerPrice}. Update settings first or wait for price recovery.";
+        }
+
+        if (currentPrice > settings.StopUpperPrice)
+        {
+            return $"Current price {currentPrice} is above Stop Upper {settings.StopUpperPrice}. Update settings first or wait for price recovery.";
+        }
+
+        return null;
     }
 
     private static DashboardOrderItem MapOrder(GridOrder order)

@@ -90,6 +90,7 @@ public sealed class GridBotWorker : BackgroundService
                     state = await EnsureBotStateAsync(stoppingToken);
                 }
 
+                state = await EnsureBotStateAsync(stoppingToken);
                 state = await RunCycleAsync(state, levels, instrument, stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
