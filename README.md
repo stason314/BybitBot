@@ -5,7 +5,7 @@ Production-ready MVP grid bot for Bybit V5 on .NET 8 with safe default `paper` m
 ## Features
 
 - `paper`, `testnet`, `mainnet` modes
-- spot grid strategy for `TONUSDT`
+- spot grid strategy for `BILLUSDT`
 - SQLite state storage
 - Serilog logs to console and file
 - Telegram notifications
@@ -103,7 +103,7 @@ dotnet test
 - `BYBIT_API_KEY`, `BYBIT_API_SECRET`: required for `testnet` and `mainnet`.
 - `BYBIT_MARKET_DATA_BASE_URL`: public market data endpoint. Default is mainnet `https://api.bybit.com`, which keeps `paper` mode tied to real prices.
 - `BYBIT_TRADING_BASE_URL`: private trading endpoint. Default testnet value is `https://api-testnet.bybit.com`.
-- `SYMBOL`, `CATEGORY`: default `TONUSDT` / `spot`.
+- `SYMBOL`, `CATEGORY`: default `BILLUSDT` / `spot`.
 - `GRID_LOWER_PRICE`, `GRID_UPPER_PRICE`, `GRID_STEP`, `ORDER_SIZE_USDT`: core grid setup.
 - `STOP_LOWER_PRICE`, `STOP_UPPER_PRICE`: hard stop zone.
 - `MAX_DAILY_LOSS_USDT`, `MAX_OPEN_ORDERS`, `MAX_POSITION_USDT`, `MIN_ORDER_SIZE_USDT`: risk limits.
@@ -117,6 +117,7 @@ dotnet test
 - `paper` mode uses live Bybit prices but does not send real orders.
 - By default `paper` mode reads public market data from mainnet and keeps private trading disabled.
 - `testnet` mode uses the trading endpoint for both market data and order placement unless you override `BYBIT_MARKET_DATA_BASE_URL`.
+- The default `BILLUSDT` paper grid is intentionally conservative: `0.10-0.15` with stop bounds `0.09/0.16`. Recalibrate before live use.
 - Existing live orders are synchronized from Bybit on startup to avoid duplicates by `orderLinkId`.
 - For spot grids, initial sell levels require base asset inventory. In `paper` mode the bot can bootstrap inventory automatically on first initialization if needed.
 

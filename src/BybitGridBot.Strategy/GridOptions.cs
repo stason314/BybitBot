@@ -7,7 +7,7 @@ public sealed class GridOptions
 {
     [ConfigurationKeyName("SYMBOL")]
     [Required]
-    public string Symbol { get; init; } = "TONUSDT";
+    public string Symbol { get; init; } = "BILLUSDT";
 
     [ConfigurationKeyName("CATEGORY")]
     [Required]
@@ -15,25 +15,25 @@ public sealed class GridOptions
 
     [ConfigurationKeyName("GRID_LOWER_PRICE")]
     [Range(typeof(decimal), "0.00000001", "999999999")]
-    public decimal LowerPrice { get; init; } = 2.30m;
+    public decimal LowerPrice { get; init; } = 0.10m;
 
     [ConfigurationKeyName("GRID_UPPER_PRICE")]
     [Range(typeof(decimal), "0.00000001", "999999999")]
-    public decimal UpperPrice { get; init; } = 2.60m;
+    public decimal UpperPrice { get; init; } = 0.15m;
 
     [ConfigurationKeyName("GRID_STEP")]
     [Range(typeof(decimal), "0.00000001", "999999999")]
-    public decimal Step { get; init; } = 0.05m;
+    public decimal Step { get; init; } = 0.01m;
 
     [ConfigurationKeyName("ORDER_SIZE_USDT")]
     [Range(typeof(decimal), "0.00000001", "999999999")]
     public decimal OrderSizeUsdt { get; init; } = 20m;
 
     [ConfigurationKeyName("STOP_LOWER_PRICE")]
-    public decimal StopLowerPrice { get; init; } = 2.25m;
+    public decimal StopLowerPrice { get; init; } = 0.09m;
 
     [ConfigurationKeyName("STOP_UPPER_PRICE")]
-    public decimal StopUpperPrice { get; init; } = 2.65m;
+    public decimal StopUpperPrice { get; init; } = 0.16m;
 
     [ConfigurationKeyName("MARKET_FILTER_ENABLED")]
     public bool MarketFilterEnabled { get; init; } = true;
