@@ -29,7 +29,7 @@ Production-ready MVP grid bot for Bybit V5 on .NET 8 with safe default `paper` m
 
 ## Local Run
 
-1. Create `.env` from `.env.example`.
+1. Use the tracked `.env` as the default paper config, or copy `.env.example` if you want to rebuild it manually.
 2. Restore packages:
 
 ```bash
@@ -50,7 +50,7 @@ dotnet run --project src/BybitGridBot.App
 
 ## Docker
 
-1. Create `.env` from `.env.example`.
+1. The repository already contains a safe default `.env` for `paper` mode. Keep API keys empty in git.
 2. Validate config:
 
 ```bash
@@ -113,7 +113,7 @@ dotnet test
 ## Notes
 
 - The bot does not expose incoming ports.
-- `.env` is ignored by git and must stay local.
+- `.env` is tracked in git only with safe defaults and blank secrets. Do not commit real API keys or Telegram secrets.
 - `paper` mode uses live Bybit prices but does not send real orders.
 - By default `paper` mode reads public market data from mainnet and keeps private trading disabled.
 - `testnet` mode uses the trading endpoint for both market data and order placement unless you override `BYBIT_MARKET_DATA_BASE_URL`.
