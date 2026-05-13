@@ -98,7 +98,7 @@ public sealed class SqliteGridRepository : IGridRepository
     public async Task SaveGridLevelsAsync(string symbol, IReadOnlyCollection<GridLevel> levels, CancellationToken cancellationToken)
     {
         await using var connection = await OpenConnectionAsync(cancellationToken);
-        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken);
 
         var deleteCommand = connection.CreateCommand();
         deleteCommand.Transaction = transaction;
