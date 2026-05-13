@@ -39,8 +39,6 @@ builder.Services.AddSingleton<MarketRegimeFilter>();
 
 builder.Services.AddHttpClient<IBybitRestClient, BybitRestClient>((serviceProvider, client) =>
 {
-    var options = serviceProvider.GetRequiredService<IOptions<BybitOptions>>().Value;
-    client.BaseAddress = new Uri($"{options.BaseUrl.TrimEnd('/')}/");
     client.Timeout = TimeSpan.FromSeconds(30);
 });
 

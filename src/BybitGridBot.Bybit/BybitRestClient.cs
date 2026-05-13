@@ -306,8 +306,9 @@ public sealed class BybitRestClient : IBybitRestClient
         object? body)
     {
         var queryString = BuildQueryString(query);
-        var uri = string.IsNullOrWhiteSpace(queryString) ? path : $"{path}?{queryString}";
-        var request = new HttpRequestMessage(method, uri);
+        var relativeUri = string.IsNullOrWhiteSpace(queryString) ? path : $"{path}?{queryString}";
+        var baseUrl = signed ? _options.ResolvePrivateBaseUrl() : _options.ResolvePublicBaseUrl();
+        var request = new HttpRequestMessage(method, new Uri(new Uri($"{baseUrl}/"), relativeUri.TrimStart('/')));
         var bodyJson = body is null ? string.Empty : JsonSerializer.Serialize(body, SerializerOptions);
 
         if (method != HttpMethod.Get && body is not null)

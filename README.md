@@ -101,6 +101,8 @@ dotnet test
 
 - `TRADING_MODE`: keep `paper` by default. Use `testnet` for real testnet orders. Use `mainnet` only intentionally.
 - `BYBIT_API_KEY`, `BYBIT_API_SECRET`: required for `testnet` and `mainnet`.
+- `BYBIT_MARKET_DATA_BASE_URL`: public market data endpoint. Default is mainnet `https://api.bybit.com`, which keeps `paper` mode tied to real prices.
+- `BYBIT_TRADING_BASE_URL`: private trading endpoint. Default testnet value is `https://api-testnet.bybit.com`.
 - `SYMBOL`, `CATEGORY`: default `TONUSDT` / `spot`.
 - `GRID_LOWER_PRICE`, `GRID_UPPER_PRICE`, `GRID_STEP`, `ORDER_SIZE_USDT`: core grid setup.
 - `STOP_LOWER_PRICE`, `STOP_UPPER_PRICE`: hard stop zone.
@@ -113,6 +115,8 @@ dotnet test
 - The bot does not expose incoming ports.
 - `.env` is ignored by git and must stay local.
 - `paper` mode uses live Bybit prices but does not send real orders.
+- By default `paper` mode reads public market data from mainnet and keeps private trading disabled.
+- `testnet` mode uses the trading endpoint for both market data and order placement unless you override `BYBIT_MARKET_DATA_BASE_URL`.
 - Existing live orders are synchronized from Bybit on startup to avoid duplicates by `orderLinkId`.
 - For spot grids, initial sell levels require base asset inventory. In `paper` mode the bot can bootstrap inventory automatically on first initialization if needed.
 
