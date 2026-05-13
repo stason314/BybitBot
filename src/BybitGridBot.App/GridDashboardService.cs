@@ -8,9 +8,10 @@ namespace BybitGridBot.App;
 
 public interface IGridDashboardService
 {
-    Task<DashboardResponse> GetDashboardAsync(CancellationToken cancellationToken);
+    Task<DashboardResponse> GetDashboardAsync(string? symbol, CancellationToken cancellationToken);
     Task<UpdateSettingsResponse> UpdateSettingsAsync(UpdateSettingsRequest request, CancellationToken cancellationToken);
-    Task<UpdateSettingsResponse> ResumeTradingAsync(CancellationToken cancellationToken);
+    Task<UpdateSettingsResponse> DeleteSettingsAsync(string symbol, CancellationToken cancellationToken);
+    Task<UpdateSettingsResponse> ResumeTradingAsync(string? symbol, CancellationToken cancellationToken);
     string RenderDashboardPage();
 }
 
@@ -36,10 +37,26 @@ public sealed class GridDashboardService : IGridDashboardService
         _strategy = strategy;
     }
 
-    public async Task<DashboardResponse> GetDashboardAsync(CancellationToken cancellationToken)
+    private async Task<IReadOnlyList<GridBotSettings>> EnsureRuntimeSettingsProfilesAsync(CancellationToken cancellationToken)
     {
-        var runtimeSettings = await _repository.GetRuntimeSettingsAsync(cancellationToken)
-            ?? RuntimeGridOptionsFactory.ToRuntimeSettings(_defaultGridOptions);
+        var profiles = await _repository.GetRuntimeSettingsProfilesAsync(cancellationToken);
+        if (profiles.Count > 0)
+        {
+            return profiles;
+        }
+
+        var defaultSettings = RuntimeGridOptionsFactory.ToRuntimeSettings(_defaultGridOptions);
+        await _repository.SaveRuntimeSettingsAsync(defaultSettings, cancellationToken);
+        return [defaultSettings];
+    }
+
+    public async Task<DashboardResponse> GetDashboardAsync(string? symbol, CancellationToken cancellationToken)
+    {
+        var profiles = await EnsureRuntimeSettingsProfilesAsync(cancellationToken);
+        var selectedSymbol = NormalizeOptionalSymbol(symbol);
+        var runtimeSettings = selectedSymbol is null
+            ? profiles[0]
+            : profiles.FirstOrDefault(profile => string.Equals(profile.Symbol, selectedSymbol, StringComparison.OrdinalIgnoreCase)) ?? profiles[0];
         var gridOptions = RuntimeGridOptionsFactory.ToGridOptions(runtimeSettings, _defaultGridOptions);
         var state = await _repository.GetBotStateAsync(gridOptions.Symbol, cancellationToken)
             ?? new BotState
@@ -81,6 +98,14 @@ public sealed class GridDashboardService : IGridDashboardService
 
         return new DashboardResponse
         {
+            Profiles = profiles
+                .Select(profile => new DashboardProfileItem
+                {
+                    Symbol = profile.Symbol,
+                    Category = profile.Category,
+                    IsSelected = string.Equals(profile.Symbol, runtimeSettings.Symbol, StringComparison.OrdinalIgnoreCase)
+                })
+                .ToArray(),
             Settings = new DashboardSettings
             {
                 Symbol = gridOptions.Symbol,
@@ -162,20 +187,73 @@ public sealed class GridDashboardService : IGridDashboardService
         return new UpdateSettingsResponse
         {
             Success = true,
+            Symbol = symbol,
             Message = $"Settings saved. The bot will apply them on the next loop.{resumeMessage}"
         };
     }
 
-    public async Task<UpdateSettingsResponse> ResumeTradingAsync(CancellationToken cancellationToken)
+    public async Task<UpdateSettingsResponse> DeleteSettingsAsync(string symbol, CancellationToken cancellationToken)
     {
-        var runtimeSettings = await _repository.GetRuntimeSettingsAsync(cancellationToken)
-            ?? RuntimeGridOptionsFactory.ToRuntimeSettings(_defaultGridOptions);
+        var normalizedSymbol = NormalizeSymbol(symbol);
+        var profiles = await EnsureRuntimeSettingsProfilesAsync(cancellationToken);
+        if (profiles.Count <= 1)
+        {
+            return new UpdateSettingsResponse
+            {
+                Success = false,
+                Symbol = normalizedSymbol,
+                Message = "Cannot delete settings.",
+                Errors = ["At least one runtime settings profile must remain."]
+            };
+        }
+
+        var existing = await _repository.GetRuntimeSettingsAsync(normalizedSymbol, cancellationToken);
+        if (existing is null)
+        {
+            return new UpdateSettingsResponse
+            {
+                Success = false,
+                Symbol = normalizedSymbol,
+                Message = "Cannot delete settings.",
+                Errors = [$"Runtime settings profile {normalizedSymbol} does not exist."]
+            };
+        }
+
+        await _repository.DeleteRuntimeSettingsAsync(normalizedSymbol, cancellationToken);
+
+        return new UpdateSettingsResponse
+        {
+            Success = true,
+            Symbol = normalizedSymbol,
+            Message = $"Settings profile {normalizedSymbol} deleted. Active orders will be cancelled on the next bot loop."
+        };
+    }
+
+    public async Task<UpdateSettingsResponse> ResumeTradingAsync(string? symbol, CancellationToken cancellationToken)
+    {
+        var profiles = await EnsureRuntimeSettingsProfilesAsync(cancellationToken);
+        var selectedSymbol = NormalizeOptionalSymbol(symbol);
+        var runtimeSettings = selectedSymbol is null
+            ? profiles[0]
+            : profiles.FirstOrDefault(profile => string.Equals(profile.Symbol, selectedSymbol, StringComparison.OrdinalIgnoreCase));
+        if (runtimeSettings is null)
+        {
+            return new UpdateSettingsResponse
+            {
+                Success = false,
+                Symbol = selectedSymbol,
+                Message = "Cannot resume trading.",
+                Errors = [$"Runtime settings profile {selectedSymbol} does not exist."]
+            };
+        }
+
         var state = await _repository.GetBotStateAsync(runtimeSettings.Symbol, cancellationToken);
         if (state is null)
         {
             return new UpdateSettingsResponse
             {
                 Success = false,
+                Symbol = runtimeSettings.Symbol,
                 Message = "Cannot resume trading.",
                 Errors = [$"No bot state exists for {runtimeSettings.Symbol} yet."]
             };
@@ -186,6 +264,7 @@ public sealed class GridDashboardService : IGridDashboardService
             return new UpdateSettingsResponse
             {
                 Success = true,
+                Symbol = runtimeSettings.Symbol,
                 Message = $"Trading is already active for {runtimeSettings.Symbol}."
             };
         }
@@ -197,6 +276,7 @@ public sealed class GridDashboardService : IGridDashboardService
             return new UpdateSettingsResponse
             {
                 Success = false,
+                Symbol = runtimeSettings.Symbol,
                 Message = "Cannot resume trading.",
                 Errors = [resumeBlockReason]
             };
@@ -210,6 +290,7 @@ public sealed class GridDashboardService : IGridDashboardService
         return new UpdateSettingsResponse
         {
             Success = true,
+            Symbol = runtimeSettings.Symbol,
             Message = $"Trading resumed for {runtimeSettings.Symbol}. The bot will continue on the next loop."
         };
     }
@@ -343,6 +424,44 @@ public sealed class GridDashboardService : IGridDashboardService
       margin: 0 0 18px;
       font: 700 22px/1.05 "Space Grotesk", "IBM Plex Sans", sans-serif;
       letter-spacing: -0.03em;
+    }
+    .profile-tabs {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-bottom: 16px;
+    }
+    .profile-tab {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 9px 10px 9px 12px;
+      border-radius: 999px;
+      background: rgba(29,35,31,0.07);
+      color: var(--ink);
+      border: 1px solid transparent;
+      box-shadow: none;
+      letter-spacing: 0;
+    }
+    .profile-tab.active {
+      background: rgba(198,103,47,0.14);
+      border-color: rgba(198,103,47,0.28);
+      color: var(--accent);
+    }
+    .profile-tab.new {
+      background: rgba(23,102,78,0.12);
+      color: var(--accent-2);
+    }
+    .profile-tab .close-tab {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 18px;
+      height: 18px;
+      border-radius: 999px;
+      background: rgba(29,35,31,0.12);
+      font-size: 14px;
+      line-height: 1;
     }
     form {
       display: grid;
@@ -509,6 +628,7 @@ public sealed class GridDashboardService : IGridDashboardService
         </div>
       </section>
       <section class="panel section">
+        <div class="profile-tabs" id="profileTabs"></div>
         <h2>Runtime Settings</h2>
         <div class="preset-box">
           <label for="settingsPreset">Paste Settings Preset</label>
@@ -581,6 +701,19 @@ public sealed class GridDashboardService : IGridDashboardService
       'stop lower': 'stopLowerPrice',
       'stop upper': 'stopUpperPrice'
     };
+    const defaultNewSettings = {
+      symbol: '',
+      category: 'spot',
+      lowerPrice: '',
+      upperPrice: '',
+      step: '',
+      orderSizeUsdt: '',
+      stopLowerPrice: '',
+      stopUpperPrice: ''
+    };
+    let selectedSymbol = new URLSearchParams(window.location.search).get('symbol')?.toUpperCase() || null;
+    let isCreatingNewProfile = false;
+    let profileCache = [];
     let settingsFormDirty = false;
 
     const isSettingsFormDirty = () => settingsFormDirty;
@@ -596,6 +729,32 @@ public sealed class GridDashboardService : IGridDashboardService
       byId('orderSizeUsdt').value = settings.orderSizeUsdt;
       byId('stopLowerPrice').value = settings.stopLowerPrice;
       byId('stopUpperPrice').value = settings.stopUpperPrice;
+    };
+    const escapeHtml = (value) => String(value)
+      .replaceAll('&', '&amp;')
+      .replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;')
+      .replaceAll('"', '&quot;')
+      .replaceAll("'", '&#039;');
+    const updateSelectedSymbolUrl = () => {
+      const url = new URL(window.location.href);
+      if (selectedSymbol) {
+        url.searchParams.set('symbol', selectedSymbol);
+      } else {
+        url.searchParams.delete('symbol');
+      }
+      window.history.replaceState({}, '', url);
+    };
+    const renderProfileTabs = (profiles) => {
+      profileCache = profiles;
+      byId('profileTabs').innerHTML = [
+        ...profiles.map(profile => `
+          <button type="button" class="profile-tab ${profile.isSelected && !isCreatingNewProfile ? 'active' : ''}" data-action="select-profile" data-symbol="${escapeHtml(profile.symbol)}">
+            ${escapeHtml(profile.symbol)}
+            <span class="close-tab" data-action="delete-profile" data-symbol="${escapeHtml(profile.symbol)}">x</span>
+          </button>`),
+        `<button type="button" class="profile-tab new ${isCreatingNewProfile ? 'active' : ''}" data-action="new-profile">+ New Config</button>`
+      ].join('');
     };
     const parseSettingsPreset = (text) => {
       const parsed = {};
@@ -664,8 +823,16 @@ public sealed class GridDashboardService : IGridDashboardService
 
     async function loadDashboard(options = {}) {
       const forceSettingsRefresh = Boolean(options.forceSettingsRefresh);
-      const response = await fetch('/api/dashboard', { cache: 'no-store' });
+      const dashboardUrl = selectedSymbol && !isCreatingNewProfile
+        ? `/api/dashboard?symbol=${encodeURIComponent(selectedSymbol)}`
+        : '/api/dashboard';
+      const response = await fetch(dashboardUrl, { cache: 'no-store' });
       const data = await response.json();
+      if (!isCreatingNewProfile) {
+        selectedSymbol = data.settings.symbol;
+        updateSelectedSymbolUrl();
+      }
+      renderProfileTabs(data.profiles);
 
       byId('modePill').textContent = `${data.state.tradingMode} mode`;
       byId('modePill').className = data.state.isPaused ? 'pill paused' : 'pill';
@@ -724,8 +891,56 @@ public sealed class GridDashboardService : IGridDashboardService
       byId(id).addEventListener('input', () => setSettingsFormDirty(true));
     });
     byId('applyPreset').addEventListener('click', applySettingsPreset);
+    byId('profileTabs').addEventListener('click', async (event) => {
+      const actionTarget = event.target.closest('[data-action]');
+      if (!actionTarget) {
+        return;
+      }
+
+      const action = actionTarget.dataset.action;
+      const symbol = actionTarget.dataset.symbol;
+      if (action === 'select-profile' && symbol) {
+        selectedSymbol = symbol.toUpperCase();
+        isCreatingNewProfile = false;
+        setSettingsFormDirty(false);
+        updateSelectedSymbolUrl();
+        await loadDashboard({ forceSettingsRefresh: true });
+        return;
+      }
+
+      if (action === 'delete-profile' && symbol) {
+        event.stopPropagation();
+        const response = await fetch(`/api/settings/${encodeURIComponent(symbol)}`, { method: 'DELETE' });
+        const result = await response.json();
+        const status = byId('formStatus');
+        status.className = `status ${response.ok ? 'ok' : 'error'}`;
+        status.textContent = response.ok ? result.message : (result.errors?.join(' | ') || result.message || 'Failed to delete settings.');
+        if (response.ok) {
+          if (selectedSymbol === symbol.toUpperCase()) {
+            selectedSymbol = null;
+          }
+          isCreatingNewProfile = false;
+          setSettingsFormDirty(false);
+          updateSelectedSymbolUrl();
+          await loadDashboard({ forceSettingsRefresh: true });
+        }
+        return;
+      }
+
+      if (action === 'new-profile') {
+        selectedSymbol = null;
+        isCreatingNewProfile = true;
+        updateSettingsForm(defaultNewSettings);
+        setSettingsFormDirty(true);
+        updateSelectedSymbolUrl();
+        renderProfileTabs(profileCache);
+        byId('formStatus').className = 'status';
+        byId('formStatus').textContent = 'Fill the new config and press Apply Settings to create a profile.';
+      }
+    });
     byId('resumeTrading').addEventListener('click', async () => {
-      const response = await fetch('/api/resume', { method: 'POST' });
+      const resumeUrl = selectedSymbol ? `/api/resume?symbol=${encodeURIComponent(selectedSymbol)}` : '/api/resume';
+      const response = await fetch(resumeUrl, { method: 'POST' });
       const result = await response.json();
       const status = byId('formStatus');
       status.className = `status ${response.ok ? 'ok' : 'error'}`;
@@ -758,6 +973,9 @@ public sealed class GridDashboardService : IGridDashboardService
       status.className = `status ${response.ok ? 'ok' : 'error'}`;
       status.textContent = response.ok ? result.message : (result.errors?.join(' | ') || result.message || 'Failed to save settings.');
       if (response.ok) {
+        selectedSymbol = (result.symbol || payload.symbol).toUpperCase();
+        isCreatingNewProfile = false;
+        updateSelectedSymbolUrl();
         setSettingsFormDirty(false);
         await loadDashboard({ forceSettingsRefresh: true });
       }
@@ -870,6 +1088,11 @@ public sealed class GridDashboardService : IGridDashboardService
 
         return null;
     }
+
+    private static string NormalizeSymbol(string symbol) => symbol.Trim().ToUpperInvariant();
+
+    private static string? NormalizeOptionalSymbol(string? symbol) =>
+        string.IsNullOrWhiteSpace(symbol) ? null : NormalizeSymbol(symbol);
 
     private static DashboardOrderItem MapOrder(GridOrder order)
     {

@@ -4,6 +4,8 @@ namespace BybitGridBot.App;
 
 public sealed class DashboardResponse
 {
+    public required IReadOnlyList<DashboardProfileItem> Profiles { get; init; }
+
     public required DashboardSettings Settings { get; init; }
 
     public required DashboardState State { get; init; }
@@ -15,6 +17,15 @@ public sealed class DashboardResponse
     public required IReadOnlyList<decimal> GridLevels { get; init; }
 
     public DateTimeOffset GeneratedAt { get; init; }
+}
+
+public sealed class DashboardProfileItem
+{
+    public required string Symbol { get; init; }
+
+    public required string Category { get; init; }
+
+    public bool IsSelected { get; init; }
 }
 
 public sealed class DashboardSettings
@@ -114,6 +125,8 @@ public sealed class UpdateSettingsRequest
 public sealed class UpdateSettingsResponse
 {
     public bool Success { get; init; }
+
+    public string? Symbol { get; init; }
 
     public required string Message { get; init; }
 

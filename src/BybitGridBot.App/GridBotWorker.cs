@@ -23,6 +23,7 @@ public sealed class GridBotWorker : BackgroundService
     private readonly RiskManager _riskManager;
     private readonly RiskOptions _riskOptions;
     private readonly GridStrategy _strategy;
+    private readonly Dictionary<string, GridOptions> _runningProfiles = new(StringComparer.OrdinalIgnoreCase);
     private GridOptions _gridOptions;
     private string _baseAsset;
     private string _quoteAsset;
@@ -58,40 +59,48 @@ public sealed class GridBotWorker : BackgroundService
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         await _repository.InitializeAsync(stoppingToken);
-        _gridOptions = await EnsureRuntimeGridOptionsAsync(stoppingToken);
-        (_baseAsset, _quoteAsset) = ResolveAssets(_gridOptions.Symbol);
-        ValidateStartupConfiguration();
+        ValidateAccountConfiguration();
 
-        var levels = await EnsureGridLevelsAsync(stoppingToken);
-        var instrument = await _bybitRestClient.GetInstrumentInfoAsync(_gridOptions.Category, _gridOptions.Symbol, stoppingToken);
-        var state = await EnsureBotStateAsync(stoppingToken);
-
-        _logger.LogInformation("Starting Bybit grid bot. Mode: {TradingMode}, Symbol: {Symbol}", _appOptions.TradingMode, _gridOptions.Symbol);
+        _logger.LogInformation("Starting Bybit grid bot. Mode: {TradingMode}", _appOptions.TradingMode);
         if (_appOptions.TradingMode == TradingMode.Mainnet)
         {
             _logger.LogWarning("MAINNET MODE ENABLED. Real orders can be submitted to Bybit.");
         }
 
         await _notifier.NotifyAsync(
-            $"Bybit grid bot started.\nMode: `{_appOptions.TradingMode}`\nSymbol: `{_gridOptions.Symbol}`",
+            $"Bybit grid bot started.\nMode: `{_appOptions.TradingMode}`",
             stoppingToken);
 
-        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(_gridOptions.BotLoopIntervalSeconds));
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(_defaultGridOptions.BotLoopIntervalSeconds));
 
         while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
-                if (await RefreshRuntimeConfigurationAsync(stoppingToken))
-                {
-                    ValidateStartupConfiguration();
-                    levels = await EnsureGridLevelsAsync(stoppingToken);
-                    instrument = await _bybitRestClient.GetInstrumentInfoAsync(_gridOptions.Category, _gridOptions.Symbol, stoppingToken);
-                    state = await EnsureBotStateAsync(stoppingToken);
-                }
+                var profiles = await EnsureRuntimeGridProfilesAsync(stoppingToken);
+                await CancelRemovedProfilesAsync(profiles, stoppingToken);
 
-                state = await EnsureBotStateAsync(stoppingToken);
-                state = await RunCycleAsync(state, levels, instrument, stoppingToken);
+                foreach (var profile in profiles)
+                {
+                    try
+                    {
+                        await RunProfileCycleAsync(profile, stoppingToken);
+                    }
+                    catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                    {
+                        throw;
+                    }
+                    catch (BybitApiException exception)
+                    {
+                        _logger.LogError(exception, "Bybit API error for {Symbol} {RetCode}: {RetMsg}", profile.Symbol, exception.RetCode, exception.RetMsg);
+                        await _notifier.NotifyAsync($"Bybit API error for `{profile.Symbol}`: `{exception.RetCode}` {exception.RetMsg}", stoppingToken);
+                    }
+                    catch (Exception exception)
+                    {
+                        _logger.LogError(exception, "Unhandled bot loop error for {Symbol}.", profile.Symbol);
+                        await _notifier.NotifyAsync($"Bot loop error for `{profile.Symbol}`: `{exception.Message}`", stoppingToken);
+                    }
+                }
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -117,53 +126,86 @@ public sealed class GridBotWorker : BackgroundService
 
     public override async Task StopAsync(CancellationToken cancellationToken)
     {
-        await _notifier.NotifyAsync($"Bybit grid bot stopped. Symbol: `{_gridOptions.Symbol}`", cancellationToken);
+        await _notifier.NotifyAsync("Bybit grid bot stopped.", cancellationToken);
         await base.StopAsync(cancellationToken);
     }
 
-    private async Task<GridOptions> EnsureRuntimeGridOptionsAsync(CancellationToken cancellationToken)
+    private async Task<IReadOnlyList<GridBotSettings>> EnsureRuntimeGridProfilesAsync(CancellationToken cancellationToken)
     {
-        var persisted = await _repository.GetRuntimeSettingsAsync(cancellationToken);
-        if (persisted is null)
+        var persisted = await _repository.GetRuntimeSettingsProfilesAsync(cancellationToken);
+        if (persisted.Count > 0)
         {
-            persisted = RuntimeGridOptionsFactory.ToRuntimeSettings(_defaultGridOptions);
-            await _repository.SaveRuntimeSettingsAsync(persisted, cancellationToken);
+            return persisted;
         }
 
-        return RuntimeGridOptionsFactory.ToGridOptions(persisted, _defaultGridOptions);
+        var defaultSettings = RuntimeGridOptionsFactory.ToRuntimeSettings(_defaultGridOptions);
+        await _repository.SaveRuntimeSettingsAsync(defaultSettings, cancellationToken);
+        return [defaultSettings];
     }
 
-    private async Task<bool> RefreshRuntimeConfigurationAsync(CancellationToken cancellationToken)
+    private async Task CancelRemovedProfilesAsync(IReadOnlyCollection<GridBotSettings> profiles, CancellationToken cancellationToken)
     {
-        var refreshedGridOptions = await EnsureRuntimeGridOptionsAsync(cancellationToken);
-        if (RuntimeGridOptionsFactory.IsSameTradingConfiguration(_gridOptions, refreshedGridOptions))
-        {
-            return false;
-        }
+        var activeSymbols = profiles.Select(profile => profile.Symbol).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var removedSymbols = _runningProfiles.Keys.Where(symbol => !activeSymbols.Contains(symbol)).ToArray();
 
-        var previousSymbol = _gridOptions.Symbol;
-        var previousActiveOrders = await _repository.GetActiveOrdersAsync(previousSymbol, cancellationToken);
-
-        foreach (var order in previousActiveOrders)
+        foreach (var symbol in removedSymbols)
         {
-            await CancelManagedOrderAsync(order, cancellationToken);
+            _gridOptions = _runningProfiles[symbol];
+            (_baseAsset, _quoteAsset) = ResolveAssets(_gridOptions.Symbol);
+
+            var activeOrders = await _repository.GetActiveOrdersAsync(symbol, cancellationToken);
+            foreach (var order in activeOrders)
+            {
+                await CancelManagedOrderAsync(order, cancellationToken);
+            }
+
+            _runningProfiles.Remove(symbol);
+            _logger.LogInformation("Runtime grid profile removed. Symbol: {Symbol}", symbol);
+            await _notifier.NotifyAsync($"Runtime profile removed. Symbol: `{symbol}`. Active orders cancelled.", cancellationToken);
         }
+    }
+
+    private async Task RunProfileCycleAsync(GridBotSettings profile, CancellationToken cancellationToken)
+    {
+        var refreshedGridOptions = RuntimeGridOptionsFactory.ToGridOptions(profile, _defaultGridOptions);
+        var isKnownProfile = _runningProfiles.TryGetValue(refreshedGridOptions.Symbol, out var previousGridOptions);
 
         _gridOptions = refreshedGridOptions;
         (_baseAsset, _quoteAsset) = ResolveAssets(_gridOptions.Symbol);
+        ValidateStartupConfiguration();
 
-        _logger.LogInformation(
-            "Runtime grid settings updated. Symbol: {Symbol}, Range: {LowerPrice}-{UpperPrice}, Step: {Step}",
-            _gridOptions.Symbol,
-            _gridOptions.LowerPrice,
-            _gridOptions.UpperPrice,
-            _gridOptions.Step);
+        if (isKnownProfile && previousGridOptions is not null &&
+            !RuntimeGridOptionsFactory.IsSameTradingConfiguration(previousGridOptions, refreshedGridOptions))
+        {
+            var activeOrders = await _repository.GetActiveOrdersAsync(_gridOptions.Symbol, cancellationToken);
+            foreach (var order in activeOrders)
+            {
+                await CancelManagedOrderAsync(order, cancellationToken);
+            }
 
-        await _notifier.NotifyAsync(
-            $"Runtime settings updated.\nSymbol: `{_gridOptions.Symbol}`\nRange: `{_gridOptions.LowerPrice}`-`{_gridOptions.UpperPrice}`\nStep: `{_gridOptions.Step}`",
-            cancellationToken);
+            _logger.LogInformation(
+                "Runtime grid settings updated. Symbol: {Symbol}, Range: {LowerPrice}-{UpperPrice}, Step: {Step}",
+                _gridOptions.Symbol,
+                _gridOptions.LowerPrice,
+                _gridOptions.UpperPrice,
+                _gridOptions.Step);
 
-        return true;
+            await _notifier.NotifyAsync(
+                $"Runtime settings updated.\nSymbol: `{_gridOptions.Symbol}`\nRange: `{_gridOptions.LowerPrice}`-`{_gridOptions.UpperPrice}`\nStep: `{_gridOptions.Step}`",
+                cancellationToken);
+        }
+        else if (!isKnownProfile)
+        {
+            _logger.LogInformation("Runtime grid profile activated. Symbol: {Symbol}", _gridOptions.Symbol);
+            await _notifier.NotifyAsync($"Runtime profile activated. Symbol: `{_gridOptions.Symbol}`", cancellationToken);
+        }
+
+        _runningProfiles[_gridOptions.Symbol] = _gridOptions;
+
+        var levels = await EnsureGridLevelsAsync(cancellationToken);
+        var instrument = await _bybitRestClient.GetInstrumentInfoAsync(_gridOptions.Category, _gridOptions.Symbol, cancellationToken);
+        var state = await EnsureBotStateAsync(cancellationToken);
+        await RunCycleAsync(state, levels, instrument, cancellationToken);
     }
 
     private async Task<BotState> RunCycleAsync(
@@ -844,6 +886,20 @@ public sealed class GridBotWorker : BackgroundService
     }
 
     private decimal CalculateFee(decimal tradedNotional) => tradedNotional * (_gridOptions.FeePercent / 100m);
+
+    private void ValidateAccountConfiguration()
+    {
+        if (_appOptions.TradingMode is TradingMode.Testnet or TradingMode.Mainnet &&
+            (string.IsNullOrWhiteSpace(_bybitOptions.ApiKey) || string.IsNullOrWhiteSpace(_bybitOptions.ApiSecret)))
+        {
+            throw new InvalidOperationException("BYBIT_API_KEY and BYBIT_API_SECRET must be configured for testnet/mainnet.");
+        }
+
+        if (_appOptions.TradingMode == TradingMode.Mainnet)
+        {
+            _logger.LogWarning("Bot is configured for mainnet trading.");
+        }
+    }
 
     private void ValidateStartupConfiguration()
     {

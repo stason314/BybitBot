@@ -76,6 +76,13 @@ public sealed class SqliteGridRepository : IGridRepository
                 stop_upper_price TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+
+            UPDATE OR IGNORE runtime_settings
+            SET settings_id = symbol
+            WHERE settings_id = 'active';
+
+            DELETE FROM runtime_settings
+            WHERE settings_id = 'active';
             """;
 
         await using var command = connection.CreateCommand();
@@ -89,7 +96,7 @@ public sealed class SqliteGridRepository : IGridRepository
         const string sql = """
             SELECT symbol, category, lower_price, upper_price, step, order_size_usdt, stop_lower_price, stop_upper_price, updated_at
             FROM runtime_settings
-            WHERE settings_id = 'active'
+            ORDER BY symbol
             LIMIT 1;
             """;
 
@@ -103,18 +110,52 @@ public sealed class SqliteGridRepository : IGridRepository
             return null;
         }
 
-        return new GridBotSettings
+        return ReadRuntimeSettings(reader);
+    }
+
+    public async Task<GridBotSettings?> GetRuntimeSettingsAsync(string symbol, CancellationToken cancellationToken)
+    {
+        const string sql = """
+            SELECT symbol, category, lower_price, upper_price, step, order_size_usdt, stop_lower_price, stop_upper_price, updated_at
+            FROM runtime_settings
+            WHERE settings_id = $settings_id
+            LIMIT 1;
+            """;
+
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        command.Parameters.AddWithValue("$settings_id", symbol);
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
         {
-            Symbol = reader.GetString(0),
-            Category = reader.GetString(1),
-            LowerPrice = ParseDecimal(reader.GetString(2)),
-            UpperPrice = ParseDecimal(reader.GetString(3)),
-            Step = ParseDecimal(reader.GetString(4)),
-            OrderSizeUsdt = ParseDecimal(reader.GetString(5)),
-            StopLowerPrice = ParseDecimal(reader.GetString(6)),
-            StopUpperPrice = ParseDecimal(reader.GetString(7)),
-            UpdatedAt = DateTimeOffset.Parse(reader.GetString(8), CultureInfo.InvariantCulture)
-        };
+            return null;
+        }
+
+        return ReadRuntimeSettings(reader);
+    }
+
+    public async Task<IReadOnlyList<GridBotSettings>> GetRuntimeSettingsProfilesAsync(CancellationToken cancellationToken)
+    {
+        const string sql = """
+            SELECT symbol, category, lower_price, upper_price, step, order_size_usdt, stop_lower_price, stop_upper_price, updated_at
+            FROM runtime_settings
+            ORDER BY symbol;
+            """;
+
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        var result = new List<GridBotSettings>();
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            result.Add(ReadRuntimeSettings(reader));
+        }
+
+        return result;
     }
 
     public async Task SaveRuntimeSettingsAsync(GridBotSettings settings, CancellationToken cancellationToken)
@@ -124,7 +165,7 @@ public sealed class SqliteGridRepository : IGridRepository
                 settings_id, symbol, category, lower_price, upper_price, step, order_size_usdt, stop_lower_price, stop_upper_price, updated_at
             )
             VALUES (
-                'active', $symbol, $category, $lower_price, $upper_price, $step, $order_size_usdt, $stop_lower_price, $stop_upper_price, $updated_at
+                $settings_id, $symbol, $category, $lower_price, $upper_price, $step, $order_size_usdt, $stop_lower_price, $stop_upper_price, $updated_at
             )
             ON CONFLICT(settings_id) DO UPDATE SET
                 symbol = excluded.symbol,
@@ -141,6 +182,7 @@ public sealed class SqliteGridRepository : IGridRepository
         await using var connection = await OpenConnectionAsync(cancellationToken);
         await using var command = connection.CreateCommand();
         command.CommandText = sql;
+        command.Parameters.AddWithValue("$settings_id", settings.Symbol);
         command.Parameters.AddWithValue("$symbol", settings.Symbol);
         command.Parameters.AddWithValue("$category", settings.Category);
         command.Parameters.AddWithValue("$lower_price", FormatDecimal(settings.LowerPrice));
@@ -150,6 +192,17 @@ public sealed class SqliteGridRepository : IGridRepository
         command.Parameters.AddWithValue("$stop_lower_price", FormatDecimal(settings.StopLowerPrice));
         command.Parameters.AddWithValue("$stop_upper_price", FormatDecimal(settings.StopUpperPrice));
         command.Parameters.AddWithValue("$updated_at", settings.UpdatedAt.ToString("O", CultureInfo.InvariantCulture));
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    public async Task DeleteRuntimeSettingsAsync(string symbol, CancellationToken cancellationToken)
+    {
+        const string sql = "DELETE FROM runtime_settings WHERE settings_id = $settings_id;";
+
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        command.Parameters.AddWithValue("$settings_id", symbol);
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
@@ -428,6 +481,22 @@ public sealed class SqliteGridRepository : IGridRepository
         command.Parameters.AddWithValue("$daily_pnl_date", state.DailyPnlDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
         command.Parameters.AddWithValue("$updated_at", state.UpdatedAt.ToString("O", CultureInfo.InvariantCulture));
         await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    private static GridBotSettings ReadRuntimeSettings(SqliteDataReader reader)
+    {
+        return new GridBotSettings
+        {
+            Symbol = reader.GetString(0),
+            Category = reader.GetString(1),
+            LowerPrice = ParseDecimal(reader.GetString(2)),
+            UpperPrice = ParseDecimal(reader.GetString(3)),
+            Step = ParseDecimal(reader.GetString(4)),
+            OrderSizeUsdt = ParseDecimal(reader.GetString(5)),
+            StopLowerPrice = ParseDecimal(reader.GetString(6)),
+            StopUpperPrice = ParseDecimal(reader.GetString(7)),
+            UpdatedAt = DateTimeOffset.Parse(reader.GetString(8), CultureInfo.InvariantCulture)
+        };
     }
 
     private async Task<List<GridOrder>> ReadOrdersAsync(SqliteCommand command, CancellationToken cancellationToken)

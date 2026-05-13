@@ -68,8 +68,8 @@ await app.Services.GetRequiredService<IGridRepository>().InitializeAsync(Cancell
 app.MapGet("/", (IGridDashboardService dashboardService) =>
     Results.Content(dashboardService.RenderDashboardPage(), "text/html; charset=utf-8"));
 
-app.MapGet("/api/dashboard", async (IGridDashboardService dashboardService, CancellationToken cancellationToken) =>
-    Results.Ok(await dashboardService.GetDashboardAsync(cancellationToken)));
+app.MapGet("/api/dashboard", async (string? symbol, IGridDashboardService dashboardService, CancellationToken cancellationToken) =>
+    Results.Ok(await dashboardService.GetDashboardAsync(symbol, cancellationToken)));
 
 app.MapPost("/api/settings", async (UpdateSettingsRequest request, IGridDashboardService dashboardService, CancellationToken cancellationToken) =>
 {
@@ -77,9 +77,15 @@ app.MapPost("/api/settings", async (UpdateSettingsRequest request, IGridDashboar
     return response.Success ? Results.Ok(response) : Results.BadRequest(response);
 });
 
-app.MapPost("/api/resume", async (IGridDashboardService dashboardService, CancellationToken cancellationToken) =>
+app.MapDelete("/api/settings/{symbol}", async (string symbol, IGridDashboardService dashboardService, CancellationToken cancellationToken) =>
 {
-    var response = await dashboardService.ResumeTradingAsync(cancellationToken);
+    var response = await dashboardService.DeleteSettingsAsync(symbol, cancellationToken);
+    return response.Success ? Results.Ok(response) : Results.BadRequest(response);
+});
+
+app.MapPost("/api/resume", async (string? symbol, IGridDashboardService dashboardService, CancellationToken cancellationToken) =>
+{
+    var response = await dashboardService.ResumeTradingAsync(symbol, cancellationToken);
     return response.Success ? Results.Ok(response) : Results.BadRequest(response);
 });
 
