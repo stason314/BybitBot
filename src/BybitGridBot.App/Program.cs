@@ -89,6 +89,12 @@ app.MapPost("/api/resume", async (string? symbol, IGridDashboardService dashboar
     return response.Success ? Results.Ok(response) : Results.BadRequest(response);
 });
 
+app.MapPost("/api/orders/cancel-active", async (string? symbol, IGridDashboardService dashboardService, CancellationToken cancellationToken) =>
+{
+    var response = await dashboardService.CancelActiveOrdersAsync(symbol, cancellationToken);
+    return response.Success ? Results.Ok(response) : Results.BadRequest(response);
+});
+
 app.MapGet("/health", () => Results.Ok(new { ok = true, time = DateTimeOffset.UtcNow }));
 
 await app.RunAsync();

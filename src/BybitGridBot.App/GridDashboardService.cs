@@ -12,6 +12,7 @@ public interface IGridDashboardService
     Task<UpdateSettingsResponse> UpdateSettingsAsync(UpdateSettingsRequest request, CancellationToken cancellationToken);
     Task<UpdateSettingsResponse> DeleteSettingsAsync(string symbol, CancellationToken cancellationToken);
     Task<UpdateSettingsResponse> ResumeTradingAsync(string? symbol, CancellationToken cancellationToken);
+    Task<UpdateSettingsResponse> CancelActiveOrdersAsync(string? symbol, CancellationToken cancellationToken);
     string RenderDashboardPage();
 }
 
@@ -301,6 +302,45 @@ public sealed class GridDashboardService : IGridDashboardService
         };
     }
 
+    public async Task<UpdateSettingsResponse> CancelActiveOrdersAsync(string? symbol, CancellationToken cancellationToken)
+    {
+        var profiles = await EnsureRuntimeSettingsProfilesAsync(cancellationToken);
+        var selectedSymbol = NormalizeOptionalSymbol(symbol);
+        var runtimeSettings = selectedSymbol is null
+            ? profiles[0]
+            : profiles.FirstOrDefault(profile => string.Equals(profile.Symbol, selectedSymbol, StringComparison.OrdinalIgnoreCase));
+        if (runtimeSettings is null)
+        {
+            return new UpdateSettingsResponse
+            {
+                Success = false,
+                Symbol = selectedSymbol,
+                Message = "Cannot cancel active orders.",
+                Errors = [$"Runtime settings profile {selectedSymbol} does not exist."]
+            };
+        }
+
+        var activeOrders = await _repository.GetActiveOrdersAsync(runtimeSettings.Symbol, cancellationToken);
+        foreach (var order in activeOrders)
+        {
+            if (_appOptions.TradingMode != TradingMode.Paper)
+            {
+                await _bybitRestClient.CancelOrderAsync(order.Category, order.Symbol, order.BybitOrderId, order.OrderLinkId, cancellationToken);
+            }
+
+            order.Status = OrderStatus.Cancelled;
+            order.UpdatedAt = DateTimeOffset.UtcNow;
+            await _repository.UpsertOrderAsync(order, cancellationToken);
+        }
+
+        return new UpdateSettingsResponse
+        {
+            Success = true,
+            Symbol = runtimeSettings.Symbol,
+            Message = $"Cancelled {activeOrders.Count} active orders for {runtimeSettings.Symbol}."
+        };
+    }
+
     public string RenderDashboardPage() => """
 <!DOCTYPE html>
 <html lang="en">
@@ -576,6 +616,10 @@ public sealed class GridDashboardService : IGridDashboardService
     }
     .status.error { color: var(--danger); }
     .status.ok { color: var(--accent-2); }
+    .danger-button {
+      background: linear-gradient(135deg, var(--danger), #d76545);
+      box-shadow: 0 14px 32px rgba(177,54,34,.18);
+    }
     table {
       width: 100%;
       border-collapse: collapse;
@@ -682,7 +726,10 @@ public sealed class GridDashboardService : IGridDashboardService
         <div class="grid-list" id="gridLevels"></div>
       </section>
       <section class="panel section">
-        <h2>Active Orders</h2>
+        <div class="section-head">
+          <h2>Active Orders</h2>
+          <button type="button" class="danger-button compact-button" id="cancelActiveOrders">Cancel Active</button>
+        </div>
         <div style="overflow:auto;">
           <table>
             <thead>
@@ -902,6 +949,30 @@ public sealed class GridDashboardService : IGridDashboardService
         ...rows
       ].map(row => row.map(csvEscape).join(',')).join('\n');
     };
+    const writeClipboard = async (text) => {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+        return;
+      }
+
+      const textarea = document.createElement('textarea');
+      textarea.value = text;
+      textarea.setAttribute('readonly', '');
+      textarea.style.position = 'fixed';
+      textarea.style.left = '-9999px';
+      textarea.style.top = '0';
+      document.body.appendChild(textarea);
+      textarea.focus();
+      textarea.select();
+
+      try {
+        if (!document.execCommand('copy')) {
+          throw new Error('Browser refused clipboard copy.');
+        }
+      } finally {
+        document.body.removeChild(textarea);
+      }
+    };
     const copyLastHourHistory = async () => {
       const status = byId('formStatus');
       const csv = buildLastHourHistoryCsv();
@@ -911,10 +982,22 @@ public sealed class GridDashboardService : IGridDashboardService
         return;
       }
 
-      await navigator.clipboard.writeText(csv);
+      await writeClipboard(csv);
       const copiedRows = Math.max(0, csv.split('\n').length - 1);
       status.className = 'status ok';
       status.textContent = `Copied ${copiedRows} history rows from the last hour.`;
+    };
+    const cancelActiveOrders = async () => {
+      const status = byId('formStatus');
+      const symbol = selectedSymbol || latestDashboardData?.settings?.symbol;
+      const cancelUrl = symbol ? `/api/orders/cancel-active?symbol=${encodeURIComponent(symbol)}` : '/api/orders/cancel-active';
+      const response = await fetch(cancelUrl, { method: 'POST' });
+      const result = await response.json();
+      status.className = `status ${response.ok ? 'ok' : 'error'}`;
+      status.textContent = response.ok ? result.message : (result.errors?.join(' | ') || result.message || 'Failed to cancel active orders.');
+      if (response.ok) {
+        await loadDashboard({ forceSettingsRefresh: true });
+      }
     };
 
     async function loadDashboard(options = {}) {
@@ -991,6 +1074,12 @@ public sealed class GridDashboardService : IGridDashboardService
     byId('applyPreset').addEventListener('click', applySettingsPreset);
     byId('copyLastHourHistory').addEventListener('click', () => {
       copyLastHourHistory().catch((error) => {
+        byId('formStatus').className = 'status error';
+        byId('formStatus').textContent = error.message;
+      });
+    });
+    byId('cancelActiveOrders').addEventListener('click', () => {
+      cancelActiveOrders().catch((error) => {
         byId('formStatus').className = 'status error';
         byId('formStatus').textContent = error.message;
       });
