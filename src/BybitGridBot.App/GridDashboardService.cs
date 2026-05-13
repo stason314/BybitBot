@@ -95,6 +95,7 @@ public sealed class GridDashboardService : IGridDashboardService
             ? 0m
             : state.BaseAssetQuantity * (currentPrice.Value - state.AverageEntryPrice);
         var estimatedTotalEquity = state.QuoteAssetBalance + (currentPrice ?? 0m) * state.BaseAssetQuantity;
+        var generatedAt = DateTimeOffset.UtcNow;
 
         return new DashboardResponse
         {
@@ -117,6 +118,11 @@ public sealed class GridDashboardService : IGridDashboardService
                 StopLowerPrice = gridOptions.StopLowerPrice,
                 StopUpperPrice = gridOptions.StopUpperPrice
             },
+            Runtime = new DashboardRuntime
+            {
+                StartedAt = runtimeSettings.UpdatedAt,
+                ActiveTime = generatedAt - runtimeSettings.UpdatedAt
+            },
             State = new DashboardState
             {
                 TradingMode = _appOptions.TradingMode.ToString().ToLowerInvariant(),
@@ -135,7 +141,7 @@ public sealed class GridDashboardService : IGridDashboardService
             Orders = orders,
             ActiveOrders = activeOrders,
             GridLevels = levels.Select(level => level.Price).ToArray(),
-            GeneratedAt = DateTimeOffset.UtcNow
+            GeneratedAt = generatedAt
         };
     }
 
@@ -420,6 +426,15 @@ public sealed class GridDashboardService : IGridDashboardService
     .section {
       padding: 22px;
     }
+    .section-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+      flex-wrap: wrap;
+      margin-bottom: 18px;
+    }
+    .section-head h2 { margin-bottom: 0; }
     h2 {
       margin: 0 0 18px;
       font: 700 22px/1.05 "Space Grotesk", "IBM Plex Sans", sans-serif;
@@ -508,6 +523,11 @@ public sealed class GridDashboardService : IGridDashboardService
     .secondary-button {
       background: rgba(29,35,31,0.86);
       box-shadow: 0 12px 28px rgba(29,35,31,.14);
+    }
+    .compact-button {
+      padding: 10px 13px;
+      border-radius: 12px;
+      font-size: 12px;
     }
     .preset-hint {
       color: var(--muted);
@@ -619,6 +639,7 @@ public sealed class GridDashboardService : IGridDashboardService
         <div class="badge-row">
           <div class="badge">Symbol <strong id="heroSymbol">-</strong></div>
           <div class="badge">Price <strong id="heroPrice">-</strong></div>
+          <div class="badge">Active <strong id="heroActiveTime">-</strong></div>
           <div class="badge">Last sync <strong id="heroUpdated">-</strong></div>
         </div>
         <div class="pause-box" id="pauseBox" hidden>
@@ -674,7 +695,10 @@ public sealed class GridDashboardService : IGridDashboardService
     </div>
 
     <section class="panel section" style="margin-top:20px;">
-      <h2>Order History</h2>
+      <div class="section-head">
+        <h2>Order History</h2>
+        <button type="button" class="secondary-button compact-button" id="copyLastHourHistory">Copy Last Hour</button>
+      </div>
       <div style="overflow:auto;">
         <table>
           <thead>
@@ -714,6 +738,7 @@ public sealed class GridDashboardService : IGridDashboardService
     let selectedSymbol = new URLSearchParams(window.location.search).get('symbol')?.toUpperCase() || null;
     let isCreatingNewProfile = false;
     let profileCache = [];
+    let latestDashboardData = null;
     let settingsFormDirty = false;
 
     const isSettingsFormDirty = () => settingsFormDirty;
@@ -820,6 +845,77 @@ public sealed class GridDashboardService : IGridDashboardService
       return `<span class="value ${cls}">${number.toLocaleString(undefined, { maximumFractionDigits: 8 })}</span>`;
     };
     const formatDate = (value) => value ? new Date(value).toLocaleString() : "—";
+    const csvEscape = (value) => {
+      const text = String(value ?? '');
+      return /[",\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
+    };
+    const formatDuration = (value) => {
+      const totalSeconds = Math.max(0, Math.floor((typeof value === 'string' ? parseTimeSpanSeconds(value) : Number(value ?? 0))));
+      const days = Math.floor(totalSeconds / 86400);
+      const hours = Math.floor((totalSeconds % 86400) / 3600);
+      const minutes = Math.floor((totalSeconds % 3600) / 60);
+      const seconds = totalSeconds % 60;
+      if (days > 0) {
+        return `${days}d ${hours}h ${minutes}m`;
+      }
+      if (hours > 0) {
+        return `${hours}h ${minutes}m`;
+      }
+      return `${minutes}m ${seconds}s`;
+    };
+    const parseTimeSpanSeconds = (value) => {
+      const match = /^(-?\d+)\.(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?$|^(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?$/.exec(value);
+      if (!match) {
+        return 0;
+      }
+      if (match[1] !== undefined) {
+        return (Number(match[1]) * 86400) + (Number(match[2]) * 3600) + (Number(match[3]) * 60) + Number(match[4]);
+      }
+      return (Number(match[5]) * 3600) + (Number(match[6]) * 60) + Number(match[7]);
+    };
+    const buildLastHourHistoryCsv = () => {
+      if (!latestDashboardData) {
+        return '';
+      }
+
+      const cutoff = Date.now() - 60 * 60 * 1000;
+      const rows = latestDashboardData.orders
+        .filter(order => {
+          const timestamp = new Date(order.filledAt || order.updatedAt || order.createdAt).getTime();
+          return Number.isFinite(timestamp) && timestamp >= cutoff;
+        })
+        .map(order => [
+          formatDate(order.filledAt || order.updatedAt || order.createdAt),
+          order.symbol,
+          order.side,
+          order.price,
+          order.quantity,
+          order.filledQuantity,
+          order.status,
+          order.realizedPnl,
+          order.feePaid,
+          order.orderLinkId
+        ]);
+
+      return [
+        ['Time', 'Symbol', 'Side', 'Price', 'Qty', 'Filled', 'Status', 'Realized PnL', 'Fee', 'Order'],
+        ...rows
+      ].map(row => row.map(csvEscape).join(',')).join('\n');
+    };
+    const copyLastHourHistory = async () => {
+      const status = byId('formStatus');
+      const csv = buildLastHourHistoryCsv();
+      if (!csv) {
+        status.className = 'status error';
+        status.textContent = 'No dashboard data loaded yet.';
+        return;
+      }
+
+      await navigator.clipboard.writeText(csv);
+      const copiedRows = Math.max(0, csv.split('\n').length - 1);
+      status.className = 'status ok';
+      status.textContent = `Copied ${copiedRows} history rows from the last hour.`;
+    };
 
     async function loadDashboard(options = {}) {
       const forceSettingsRefresh = Boolean(options.forceSettingsRefresh);
@@ -828,6 +924,7 @@ public sealed class GridDashboardService : IGridDashboardService
         : '/api/dashboard';
       const response = await fetch(dashboardUrl, { cache: 'no-store' });
       const data = await response.json();
+      latestDashboardData = data;
       if (!isCreatingNewProfile) {
         selectedSymbol = data.settings.symbol;
         updateSelectedSymbolUrl();
@@ -838,6 +935,7 @@ public sealed class GridDashboardService : IGridDashboardService
       byId('modePill').className = data.state.isPaused ? 'pill paused' : 'pill';
       byId('heroSymbol').textContent = data.settings.symbol;
       byId('heroPrice').textContent = formatNumber(data.state.currentPrice);
+      byId('heroActiveTime').textContent = formatDuration(data.runtime.activeTime);
       byId('heroUpdated').textContent = formatDate(data.generatedAt);
       byId('pauseBox').hidden = !data.state.isPaused;
       byId('pauseReason').textContent = data.state.pauseReason || 'Trading is paused.';
@@ -891,6 +989,12 @@ public sealed class GridDashboardService : IGridDashboardService
       byId(id).addEventListener('input', () => setSettingsFormDirty(true));
     });
     byId('applyPreset').addEventListener('click', applySettingsPreset);
+    byId('copyLastHourHistory').addEventListener('click', () => {
+      copyLastHourHistory().catch((error) => {
+        byId('formStatus').className = 'status error';
+        byId('formStatus').textContent = error.message;
+      });
+    });
     byId('profileTabs').addEventListener('click', async (event) => {
       const actionTarget = event.target.closest('[data-action]');
       if (!actionTarget) {

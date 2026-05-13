@@ -8,6 +8,8 @@ public sealed class DashboardResponse
 
     public required DashboardSettings Settings { get; init; }
 
+    public required DashboardRuntime Runtime { get; init; }
+
     public required DashboardState State { get; init; }
 
     public required IReadOnlyList<DashboardOrderItem> Orders { get; init; }
@@ -17,6 +19,13 @@ public sealed class DashboardResponse
     public required IReadOnlyList<decimal> GridLevels { get; init; }
 
     public DateTimeOffset GeneratedAt { get; init; }
+}
+
+public sealed class DashboardRuntime
+{
+    public DateTimeOffset StartedAt { get; init; }
+
+    public TimeSpan ActiveTime { get; init; }
 }
 
 public sealed class DashboardProfileItem
