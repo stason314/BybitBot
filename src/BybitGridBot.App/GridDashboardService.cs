@@ -457,6 +457,23 @@ public sealed class GridDashboardService : IGridDashboardService
 
   <script>
     const byId = (id) => document.getElementById(id);
+    const settingsFieldIds = ['symbol', 'category', 'lowerPrice', 'upperPrice', 'step', 'orderSizeUsdt', 'stopLowerPrice', 'stopUpperPrice'];
+    let settingsFormDirty = false;
+
+    const isSettingsFormDirty = () => settingsFormDirty;
+    const setSettingsFormDirty = (isDirty) => {
+      settingsFormDirty = isDirty;
+    };
+    const updateSettingsForm = (settings) => {
+      byId('symbol').value = settings.symbol;
+      byId('category').value = settings.category;
+      byId('lowerPrice').value = settings.lowerPrice;
+      byId('upperPrice').value = settings.upperPrice;
+      byId('step').value = settings.step;
+      byId('orderSizeUsdt').value = settings.orderSizeUsdt;
+      byId('stopLowerPrice').value = settings.stopLowerPrice;
+      byId('stopUpperPrice').value = settings.stopUpperPrice;
+    };
     const formatNumber = (value) => value === null || value === undefined ? "—" : Number(value).toLocaleString(undefined, { maximumFractionDigits: 8 });
     const formatSigned = (value) => {
       const number = Number(value ?? 0);
@@ -465,7 +482,8 @@ public sealed class GridDashboardService : IGridDashboardService
     };
     const formatDate = (value) => value ? new Date(value).toLocaleString() : "—";
 
-    async function loadDashboard() {
+    async function loadDashboard(options = {}) {
+      const forceSettingsRefresh = Boolean(options.forceSettingsRefresh);
       const response = await fetch('/api/dashboard', { cache: 'no-store' });
       const data = await response.json();
 
@@ -475,14 +493,10 @@ public sealed class GridDashboardService : IGridDashboardService
       byId('heroPrice').textContent = formatNumber(data.state.currentPrice);
       byId('heroUpdated').textContent = formatDate(data.generatedAt);
 
-      byId('symbol').value = data.settings.symbol;
-      byId('category').value = data.settings.category;
-      byId('lowerPrice').value = data.settings.lowerPrice;
-      byId('upperPrice').value = data.settings.upperPrice;
-      byId('step').value = data.settings.step;
-      byId('orderSizeUsdt').value = data.settings.orderSizeUsdt;
-      byId('stopLowerPrice').value = data.settings.stopLowerPrice;
-      byId('stopUpperPrice').value = data.settings.stopUpperPrice;
+      if (forceSettingsRefresh || !isSettingsFormDirty()) {
+        updateSettingsForm(data.settings);
+        setSettingsFormDirty(false);
+      }
 
       byId('stats').innerHTML = [
         ['Current Price', formatNumber(data.state.currentPrice)],
@@ -524,6 +538,10 @@ public sealed class GridDashboardService : IGridDashboardService
             </tr>`).join('');
     }
 
+    settingsFieldIds.forEach((id) => {
+      byId(id).addEventListener('input', () => setSettingsFormDirty(true));
+    });
+
     document.getElementById('settingsForm').addEventListener('submit', async (event) => {
       event.preventDefault();
       const payload = {
@@ -547,7 +565,8 @@ public sealed class GridDashboardService : IGridDashboardService
       status.className = `status ${response.ok ? 'ok' : 'error'}`;
       status.textContent = response.ok ? result.message : (result.errors?.join(' | ') || result.message || 'Failed to save settings.');
       if (response.ok) {
-        await loadDashboard();
+        setSettingsFormDirty(false);
+        await loadDashboard({ forceSettingsRefresh: true });
       }
     });
 
