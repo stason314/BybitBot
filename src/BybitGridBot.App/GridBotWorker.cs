@@ -886,6 +886,16 @@ public sealed class GridBotWorker : BackgroundService
             return;
         }
 
+        if (!IsAtLeastOneStepAway(filledOrder.Side, filledOrder.Price, nextLevel.Price))
+        {
+            _logger.LogInformation(
+                "Follow-up order at {NextPrice} skipped after {Side} fill at {FillPrice} because it is not at least one grid step away.",
+                nextLevel.Price,
+                filledOrder.Side,
+                filledOrder.Price);
+            return;
+        }
+
         var activeOrders = await _repository.GetActiveOrdersAsync(_gridOptions.Symbol, cancellationToken);
         if (HasActiveOrderAtLevel(activeOrders, nextLevel.Price) ||
             await _repository.GetActiveOrderAtLevelAsync(
@@ -1204,6 +1214,14 @@ public sealed class GridBotWorker : BackgroundService
         activeOrders.Any(order => order.IsActive && order.Price == price);
 
     private sealed record CachedFeeRate(decimal FeeRate, DateTimeOffset ExpiresAt);
+
+    private bool IsAtLeastOneStepAway(TradeSide filledSide, decimal fillPrice, decimal nextPrice)
+    {
+        var minStep = _gridOptions.Step * 0.999m;
+        return filledSide == TradeSide.Buy
+            ? nextPrice - fillPrice >= minStep
+            : fillPrice - nextPrice >= minStep;
+    }
 
     private void ValidateAccountConfiguration()
     {
