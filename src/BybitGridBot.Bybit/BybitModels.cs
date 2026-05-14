@@ -8,6 +8,7 @@ public interface IBybitRestClient
 {
     Task<BybitTicker> GetTickerAsync(string category, string symbol, CancellationToken cancellationToken);
     Task<BybitWalletBalance> GetWalletBalanceAsync(CancellationToken cancellationToken, params string[] coins);
+    Task<BybitFeeRate> GetFeeRateAsync(string category, string symbol, CancellationToken cancellationToken);
     Task<BybitOrderAck> CreateOrderAsync(BybitCreateOrderRequest request, CancellationToken cancellationToken);
     Task<BybitOrderAck> CancelOrderAsync(string category, string symbol, string? orderId, string? orderLinkId, CancellationToken cancellationToken);
     Task<IReadOnlyList<BybitOrderSnapshot>> GetOpenOrdersAsync(string category, string symbol, CancellationToken cancellationToken);
@@ -78,6 +79,8 @@ public sealed class BybitWalletBalance
 public sealed record BybitWalletCoin(string Coin, decimal WalletBalance, decimal Locked, decimal Equity);
 
 public sealed record BybitOrderAck(string OrderId, string OrderLinkId);
+
+public sealed record BybitFeeRate(string Symbol, decimal MakerFeeRate, decimal TakerFeeRate);
 
 public sealed class BybitOrderSnapshot
 {
@@ -219,6 +222,24 @@ internal sealed class BybitOrdersResult
 {
     [JsonPropertyName("list")]
     public List<BybitOrderItem> List { get; init; } = [];
+}
+
+internal sealed class BybitFeeRateResult
+{
+    [JsonPropertyName("list")]
+    public List<BybitFeeRateItem> List { get; init; } = [];
+}
+
+internal sealed class BybitFeeRateItem
+{
+    [JsonPropertyName("symbol")]
+    public string Symbol { get; init; } = string.Empty;
+
+    [JsonPropertyName("makerFeeRate")]
+    public string MakerFeeRate { get; init; } = "0";
+
+    [JsonPropertyName("takerFeeRate")]
+    public string TakerFeeRate { get; init; } = "0";
 }
 
 internal sealed class BybitOrderItem

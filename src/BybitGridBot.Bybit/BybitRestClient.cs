@@ -91,6 +91,29 @@ public sealed class BybitRestClient : IBybitRestClient
         };
     }
 
+    public async Task<BybitFeeRate> GetFeeRateAsync(string category, string symbol, CancellationToken cancellationToken)
+    {
+        var result = await SendAsync<BybitFeeRateResult>(
+            HttpMethod.Get,
+            "/v5/account/fee-rate",
+            true,
+            new Dictionary<string, string?>
+            {
+                ["category"] = category,
+                ["symbol"] = symbol
+            },
+            null,
+            cancellationToken);
+
+        var item = result.List.FirstOrDefault()
+            ?? throw new InvalidOperationException($"Fee rate response for {symbol} is empty.");
+
+        return new BybitFeeRate(
+            item.Symbol,
+            BybitModelMapper.ParseDecimal(item.MakerFeeRate),
+            BybitModelMapper.ParseDecimal(item.TakerFeeRate));
+    }
+
     public async Task<BybitOrderAck> CreateOrderAsync(BybitCreateOrderRequest request, CancellationToken cancellationToken)
     {
         var result = await SendAsync<BybitOrderAckResult>(

@@ -23,6 +23,7 @@ public sealed class GridBotWorker : BackgroundService
     private readonly RiskManager _riskManager;
     private readonly RiskOptions _riskOptions;
     private readonly GridStrategy _strategy;
+    private readonly Dictionary<string, CachedFeeRate> _feeRates = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, GridOptions> _runningProfiles = new(StringComparer.OrdinalIgnoreCase);
     private GridOptions _gridOptions;
     private string _baseAsset;
@@ -424,6 +425,17 @@ public sealed class GridBotWorker : BackgroundService
                 continue;
             }
 
+            if (order.Side == TradeSide.Sell &&
+                !await HasMinimumNetProfitAsync(TradeSide.Sell, state.AverageEntryPrice, order.Price, remainingQuantity, 0m, cancellationToken))
+            {
+                await CancelManagedOrderAsync(order, cancellationToken);
+                _logger.LogInformation(
+                    "Paper sell fill at {Price} blocked because expected net profit is below minimum. Average entry: {AverageEntryPrice}",
+                    order.Price,
+                    state.AverageEntryPrice);
+                continue;
+            }
+
             var fillFee = CalculateFee(order.Price * remainingQuantity);
             var pnlDelta = ApplyFillDelta(state, order.Side, remainingQuantity, order.Price, fillFee);
 
@@ -728,7 +740,7 @@ public sealed class GridBotWorker : BackgroundService
                 continue;
             }
 
-            if (!HasMinimumNetProfit(TradeSide.Sell, state.AverageEntryPrice, level.Price, quantity, 0m))
+            if (!await HasMinimumNetProfitAsync(TradeSide.Sell, state.AverageEntryPrice, level.Price, quantity, 0m, cancellationToken))
             {
                 _logger.LogInformation("Sell order at {Price} skipped because net profit is below minimum.", level.Price);
                 continue;
@@ -808,7 +820,7 @@ public sealed class GridBotWorker : BackgroundService
                 continue;
             }
 
-            if (HasMinimumNetProfit(TradeSide.Sell, state.AverageEntryPrice, order.Price, remainingQuantity, 0m))
+            if (await HasMinimumNetProfitAsync(TradeSide.Sell, state.AverageEntryPrice, order.Price, remainingQuantity, 0m, cancellationToken))
             {
                 continue;
             }
@@ -901,7 +913,7 @@ public sealed class GridBotWorker : BackgroundService
                 return;
             }
 
-            if (!HasMinimumNetProfit(TradeSide.Sell, filledOrder.Price, nextLevel.Price, quantity, filledOrder.FeePaid))
+            if (!await HasMinimumNetProfitAsync(TradeSide.Sell, filledOrder.Price, nextLevel.Price, quantity, filledOrder.FeePaid, cancellationToken))
             {
                 _logger.LogInformation(
                     "Follow-up sell order at {Price} skipped after buy because net profit is below minimum.",
@@ -1117,20 +1129,21 @@ public sealed class GridBotWorker : BackgroundService
         return Math.Max(orderSize, 0m);
     }
 
-    private bool HasMinimumNetProfit(
+    private async Task<bool> HasMinimumNetProfitAsync(
         TradeSide closingSide,
         decimal entryPrice,
         decimal exitPrice,
         decimal quantity,
-        decimal knownEntryFee)
+        decimal knownEntryFee,
+        CancellationToken cancellationToken)
     {
         if (quantity <= 0m || entryPrice <= 0m)
         {
             return true;
         }
 
-        var exitFee = CalculateFee(exitPrice * quantity);
-        var entryFee = knownEntryFee > 0m ? knownEntryFee : CalculateFee(entryPrice * quantity);
+        var exitFee = await EstimateFeeAsync(exitPrice * quantity, cancellationToken);
+        var entryFee = knownEntryFee > 0m ? knownEntryFee : await EstimateFeeAsync(entryPrice * quantity, cancellationToken);
         var grossPnl = closingSide == TradeSide.Sell
             ? (exitPrice - entryPrice) * quantity
             : (entryPrice - exitPrice) * quantity;
@@ -1141,8 +1154,56 @@ public sealed class GridBotWorker : BackgroundService
 
     private decimal CalculateFee(decimal tradedNotional) => tradedNotional * (_gridOptions.FeePercent / 100m);
 
+    private async Task<decimal> EstimateFeeAsync(decimal tradedNotional, CancellationToken cancellationToken)
+    {
+        if (_appOptions.TradingMode == TradingMode.Paper)
+        {
+            return CalculateFee(tradedNotional);
+        }
+
+        var feeRate = await GetConservativeFeeRateAsync(cancellationToken);
+        return tradedNotional * feeRate;
+    }
+
+    private async Task<decimal> GetConservativeFeeRateAsync(CancellationToken cancellationToken)
+    {
+        var cachedKey = $"{_gridOptions.Category}:{_gridOptions.Symbol}";
+        if (_feeRates.TryGetValue(cachedKey, out var cachedFeeRate) &&
+            cachedFeeRate.ExpiresAt > DateTimeOffset.UtcNow)
+        {
+            return cachedFeeRate.FeeRate;
+        }
+
+        var fallbackFeeRate = _gridOptions.FeePercent / 100m;
+        try
+        {
+            var bybitFeeRate = await _bybitRestClient.GetFeeRateAsync(_gridOptions.Category, _gridOptions.Symbol, cancellationToken);
+            var conservativeFeeRate = Math.Max(bybitFeeRate.MakerFeeRate, bybitFeeRate.TakerFeeRate);
+            if (conservativeFeeRate <= 0m)
+            {
+                conservativeFeeRate = fallbackFeeRate;
+            }
+
+            _feeRates[cachedKey] = new CachedFeeRate(conservativeFeeRate, DateTimeOffset.UtcNow.AddMinutes(30));
+            return conservativeFeeRate;
+        }
+        catch (Exception exception)
+        {
+            _logger.LogWarning(
+                exception,
+                "Failed to fetch Bybit fee rate for {Symbol}. Falling back to FEE_PERCENT={FeePercent}.",
+                _gridOptions.Symbol,
+                _gridOptions.FeePercent);
+
+            _feeRates[cachedKey] = new CachedFeeRate(fallbackFeeRate, DateTimeOffset.UtcNow.AddMinutes(5));
+            return fallbackFeeRate;
+        }
+    }
+
     private static bool HasActiveOrderAtLevel(IEnumerable<GridOrder> activeOrders, decimal price) =>
         activeOrders.Any(order => order.IsActive && order.Price == price);
+
+    private sealed record CachedFeeRate(decimal FeeRate, DateTimeOffset ExpiresAt);
 
     private void ValidateAccountConfiguration()
     {
