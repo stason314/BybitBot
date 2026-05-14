@@ -1596,11 +1596,15 @@ public sealed class GridBotWorker : BackgroundService
             return;
         }
 
+        var signalPositionQuantity = await GetSignalPositionQuantityAsync(cancellationToken);
         var availableBase = GetAvailableBaseBalance(state, activeOrders, wallet);
-        var quantity = instrument.RoundQuantity(availableBase);
+        var quantity = instrument.RoundQuantity(decimal.Min(availableBase, signalPositionQuantity));
         if (quantity <= 0m || quantity < instrument.MinOrderQty)
         {
-            _logger.LogInformation("Signal sell skipped because base asset inventory is insufficient.");
+            _logger.LogInformation(
+                "Signal sell skipped because signal-owned base inventory is insufficient. Signal quantity: {SignalQuantity}, available base: {AvailableBase}.",
+                signalPositionQuantity,
+                availableBase);
             return;
         }
 
@@ -1633,6 +1637,21 @@ public sealed class GridBotWorker : BackgroundService
         {
             await CancelManagedOrderAsync(order, cancellationToken);
         }
+    }
+
+    private async Task<decimal> GetSignalPositionQuantityAsync(CancellationToken cancellationToken)
+    {
+        var orders = await _repository.GetOrdersAsync(_gridOptions.Symbol, cancellationToken);
+        var signalBuys = orders
+            .Where(order => order.Side == TradeSide.Buy &&
+                string.Equals(order.ParentOrderLinkId, SignalEntryMarker, StringComparison.Ordinal))
+            .Sum(order => order.FilledQuantity);
+        var signalSells = orders
+            .Where(order => order.Side == TradeSide.Sell &&
+                string.Equals(order.ParentOrderLinkId, SignalExitMarker, StringComparison.Ordinal))
+            .Sum(order => order.FilledQuantity);
+
+        return decimal.Max(0m, signalBuys - signalSells);
     }
 
     private async Task EnsureDcaTakeProfitOrderAsync(
