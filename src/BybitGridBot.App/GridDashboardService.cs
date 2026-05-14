@@ -1002,6 +1002,7 @@ public sealed class GridDashboardService : IGridDashboardService
           <input class="hours-input" id="copyHistoryHours" type="number" min="0.1" step="0.5" value="1" aria-label="History hours" />
           <span class="preset-hint">hours</span>
           <button type="button" class="secondary-button compact-button" id="copyLastHistory">Copy Last</button>
+          <button type="button" class="secondary-button compact-button" id="copyDiagnostics">Copy Diagnostics</button>
         </div>
       </div>
       <div style="overflow:auto;">
@@ -1190,6 +1191,72 @@ public sealed class GridDashboardService : IGridDashboardService
       const hours = Number(byId('copyHistoryHours').value);
       return Number.isFinite(hours) && hours > 0 ? hours : 1;
     };
+    const readSettingsFormSnapshot = () => ({
+      symbol: byId('symbol').value,
+      category: byId('category').value,
+      strategyMode: byId('strategyMode').value,
+      strategyType: byId('strategyType').value,
+      strategyConfigJson: byId('strategyConfigJson').value,
+      lowerPrice: Number(byId('lowerPrice').value),
+      upperPrice: Number(byId('upperPrice').value),
+      step: Number(byId('step').value),
+      orderSizeUsdt: Number(byId('orderSizeUsdt').value),
+      stopLowerPrice: Number(byId('stopLowerPrice').value),
+      stopUpperPrice: Number(byId('stopUpperPrice').value),
+      isDirty: isSettingsFormDirty()
+    });
+    const parseStrategyConfigSnapshot = (strategyConfigJson) => {
+      try {
+        return {
+          ok: true,
+          value: JSON.parse(strategyConfigJson || '{}')
+        };
+      } catch (error) {
+        return {
+          ok: false,
+          error: error.message,
+          raw: strategyConfigJson || ''
+        };
+      }
+    };
+    const buildDiagnosticsSnapshot = () => {
+      if (!latestDashboardData) {
+        return '';
+      }
+
+      const formSettings = readSettingsFormSnapshot();
+      return JSON.stringify({
+        schema: 'bybit-grid-bot-diagnostics/v1',
+        copiedAt: new Date().toISOString(),
+        page: {
+          url: window.location.href,
+          selectedSymbol,
+          isCreatingNewProfile
+        },
+        analysisTargets: [
+          'runtime-settings',
+          'strategy-config-json',
+          'signal-bot',
+          'auto-recommendation',
+          'risk-limits',
+          'active-orders',
+          'recent-order-history'
+        ],
+        formSettings,
+        parsedFormStrategyConfig: parseStrategyConfigSnapshot(formSettings.strategyConfigJson),
+        savedSettings: latestDashboardData.settings,
+        parsedSavedStrategyConfig: parseStrategyConfigSnapshot(latestDashboardData.settings?.strategyConfigJson),
+        runtime: latestDashboardData.runtime,
+        state: latestDashboardData.state,
+        marketRegime: latestDashboardData.marketRegime,
+        signalAnalysis: latestDashboardData.signalAnalysis,
+        autoRecommendation: latestDashboardData.autoRecommendation,
+        gridLevels: latestDashboardData.gridLevels,
+        activeOrders: latestDashboardData.activeOrders,
+        recentOrders: latestDashboardData.orders,
+        generatedAt: latestDashboardData.generatedAt
+      }, null, 2);
+    };
     const buildLastHistoryCsv = (hours) => {
       if (!latestDashboardData) {
         return '';
@@ -1258,6 +1325,19 @@ public sealed class GridDashboardService : IGridDashboardService
       const copiedRows = Math.max(0, csv.split('\n').length - 1);
       status.className = 'status ok';
       status.textContent = `Copied ${copiedRows} history rows from the last ${hours} hour(s).`;
+    };
+    const copyDiagnostics = async () => {
+      const status = byId('formStatus');
+      const snapshot = buildDiagnosticsSnapshot();
+      if (!snapshot) {
+        status.className = 'status error';
+        status.textContent = 'No dashboard data loaded yet.';
+        return;
+      }
+
+      await writeClipboard(snapshot);
+      status.className = 'status ok';
+      status.textContent = `Copied diagnostics snapshot for ${latestDashboardData.settings?.symbol || 'current profile'}.`;
     };
     const cancelActiveOrders = async () => {
       const status = byId('formStatus');
@@ -1380,6 +1460,12 @@ public sealed class GridDashboardService : IGridDashboardService
     byId('applyPreset').addEventListener('click', applySettingsPreset);
     byId('copyLastHistory').addEventListener('click', () => {
       copyLastHistory().catch((error) => {
+        byId('formStatus').className = 'status error';
+        byId('formStatus').textContent = error.message;
+      });
+    });
+    byId('copyDiagnostics').addEventListener('click', () => {
+      copyDiagnostics().catch((error) => {
         byId('formStatus').className = 'status error';
         byId('formStatus').textContent = error.message;
       });
