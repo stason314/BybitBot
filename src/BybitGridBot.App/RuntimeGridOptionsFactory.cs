@@ -34,6 +34,7 @@ internal static class RuntimeGridOptionsFactory
             UpperPrice = settings.UpperPrice,
             Step = settings.Step,
             OrderSizeUsdt = settings.OrderSizeUsdt,
+            MinOrderSizeUsdt = defaults.MinOrderSizeUsdt,
             MinNetProfitUsdt = defaults.MinNetProfitUsdt,
             DynamicOrderSizeEnabled = defaults.DynamicOrderSizeEnabled,
             DynamicLowerOrderMultiplier = defaults.DynamicLowerOrderMultiplier,

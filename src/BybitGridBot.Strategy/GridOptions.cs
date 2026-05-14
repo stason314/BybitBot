@@ -29,6 +29,10 @@ public sealed class GridOptions
     [Range(typeof(decimal), "0.00000001", "999999999")]
     public decimal OrderSizeUsdt { get; init; } = 20m;
 
+    [ConfigurationKeyName("MIN_ORDER_SIZE_USDT")]
+    [Range(typeof(decimal), "0.00000001", "999999999")]
+    public decimal MinOrderSizeUsdt { get; init; } = 5m;
+
     [ConfigurationKeyName("MIN_NET_PROFIT_USDT")]
     [Range(typeof(decimal), "0", "999999999")]
     public decimal MinNetProfitUsdt { get; init; } = 0m;

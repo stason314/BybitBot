@@ -49,7 +49,7 @@ public sealed class AutoStrategySelector
                 lower,
                 upper,
                 step,
-                5m,
+                currentOptions.MinOrderSizeUsdt,
                 stopLower,
                 stopUpper,
                 "{}",
@@ -61,7 +61,7 @@ public sealed class AutoStrategySelector
                 lower,
                 upper,
                 step,
-                5m,
+                currentOptions.MinOrderSizeUsdt,
                 stopLower,
                 stopUpper,
                 "{}",
@@ -73,10 +73,10 @@ public sealed class AutoStrategySelector
                 lower,
                 upper,
                 step,
-                orderSize * 0.6m,
+                decimal.Max(currentOptions.MinOrderSizeUsdt, orderSize * 0.6m),
                 stopLower,
                 stopUpper,
-                BuildBtdConfig(orderSize * 0.6m, drawdownPercent, lastPrice, stopLower, stopUpper),
+                BuildBtdConfig(orderSize * 0.6m, currentOptions.MinOrderSizeUsdt, drawdownPercent, lastPrice, stopLower, stopUpper),
                 metrics),
 
             MarketRegimeType.Trend => Build(
@@ -85,10 +85,10 @@ public sealed class AutoStrategySelector
                 lower,
                 upper,
                 step,
-                orderSize * 0.75m,
+                decimal.Max(currentOptions.MinOrderSizeUsdt, orderSize * 0.75m),
                 stopLower,
                 stopUpper,
-                BuildComboConfig(orderSize * 0.75m, lower),
+                BuildComboConfig(orderSize * 0.75m, currentOptions.MinOrderSizeUsdt, lower),
                 metrics),
 
             MarketRegimeType.LowVolatility => Build(
@@ -97,7 +97,7 @@ public sealed class AutoStrategySelector
                 lower,
                 upper,
                 step,
-                orderSize * 0.5m,
+                decimal.Max(currentOptions.MinOrderSizeUsdt, orderSize * 0.5m),
                 stopLower,
                 stopUpper,
                 "{}",
@@ -156,11 +156,11 @@ public sealed class AutoStrategySelector
         Metrics = metrics
     };
 
-    private static string BuildComboConfig(decimal orderSize, decimal dcaBelowPrice)
+    private static string BuildComboConfig(decimal orderSize, decimal minOrderSize, decimal dcaBelowPrice)
     {
         var config = new
         {
-            orderSizeUsdt = decimal.Round(decimal.Max(5m, orderSize), 2, MidpointRounding.AwayFromZero),
+            orderSizeUsdt = decimal.Round(decimal.Max(minOrderSize, orderSize), 2, MidpointRounding.AwayFromZero),
             buyIntervalMinutes = 30,
             maxActiveBuyOrders = 1,
             takeProfitPercent = 1m,
@@ -177,6 +177,7 @@ public sealed class AutoStrategySelector
 
     private static string BuildBtdConfig(
         decimal orderSize,
+        decimal minOrderSize,
         decimal drawdownPercent,
         decimal lastPrice,
         decimal stopLower,
@@ -184,7 +185,7 @@ public sealed class AutoStrategySelector
     {
         var config = new
         {
-            orderSizeUsdt = decimal.Round(decimal.Max(5m, orderSize), 2, MidpointRounding.AwayFromZero),
+            orderSizeUsdt = decimal.Round(decimal.Max(minOrderSize, orderSize), 2, MidpointRounding.AwayFromZero),
             dipPercent = decimal.Round(decimal.Max(0.8m, decimal.Min(3m, drawdownPercent <= 0m ? 1.2m : drawdownPercent)), 2, MidpointRounding.AwayFromZero),
             dipLookbackCandles = 30,
             candleInterval = "1",
@@ -212,7 +213,7 @@ public sealed class AutoStrategySelector
             _ => 1m
         };
 
-        return decimal.Max(5m, options.OrderSizeUsdt * multiplier);
+        return decimal.Max(options.MinOrderSizeUsdt, options.OrderSizeUsdt * multiplier);
     }
 
     private static decimal CalculateAtr(IReadOnlyList<Candle> candles)

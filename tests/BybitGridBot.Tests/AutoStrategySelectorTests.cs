@@ -1,5 +1,6 @@
 using BybitGridBot.Domain;
 using BybitGridBot.Strategy;
+using System.Text.Json;
 
 namespace BybitGridBot.Tests;
 
@@ -94,6 +95,41 @@ public sealed class AutoStrategySelectorTests
 
         Assert.Equal(TradingStrategyType.NoTrade, recommendation.StrategyType);
         Assert.Equal("{}", recommendation.StrategyConfigJson);
+    }
+
+    [Fact]
+    public void Recommend_RespectsConfiguredMinimumOrderSize()
+    {
+        var selector = new AutoStrategySelector();
+        var options = new GridOptions
+        {
+            LowerPrice = 2.0m,
+            UpperPrice = 2.2m,
+            Step = 0.01m,
+            OrderSizeUsdt = 20m,
+            MinOrderSizeUsdt = 15m,
+            StopLowerPrice = 1.9m,
+            StopUpperPrice = 2.3m
+        };
+        var candles = BuildCandles(2.10m, 2.17m, 2.08m, 30);
+
+        var recommendation = selector.Recommend(
+            options,
+            new MarketRegimeAnalysis
+            {
+                Regime = MarketRegimeType.Trend,
+                MovePercent = 1.2m,
+                Recommendation = "Trend up",
+                Support = 2.08m,
+                Resistance = 2.17m
+            },
+            candles);
+
+        using var config = JsonDocument.Parse(recommendation.StrategyConfigJson);
+
+        Assert.Equal(TradingStrategyType.Combo, recommendation.StrategyType);
+        Assert.Equal(15m, recommendation.OrderSizeUsdt);
+        Assert.Equal(15m, config.RootElement.GetProperty("orderSizeUsdt").GetDecimal());
     }
 
     private static IReadOnlyList<Candle> BuildCandles(decimal open, decimal high, decimal low, int count)
