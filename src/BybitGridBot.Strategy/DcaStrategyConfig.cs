@@ -1,6 +1,6 @@
 namespace BybitGridBot.Strategy;
 
-public sealed class DcaStrategyConfig
+public class DcaStrategyConfig
 {
     public decimal? OrderSizeUsdt { get; init; }
 

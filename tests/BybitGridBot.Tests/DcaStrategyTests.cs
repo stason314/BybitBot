@@ -1,5 +1,6 @@
 using BybitGridBot.Domain;
 using BybitGridBot.Strategy;
+using System.Text.Json;
 
 namespace BybitGridBot.Tests;
 
@@ -50,5 +51,24 @@ public sealed class DcaStrategyTests
         var price = strategy.CalculateTakeProfitPrice(2.10m, new DcaStrategyConfig { TakeProfitPercent = 1.5m });
 
         Assert.Equal(2.1315m, price);
+    }
+
+    [Fact]
+    public void ComboStrategyConfig_DeserializesDcaTrigger()
+    {
+        var config = JsonSerializer.Deserialize<ComboStrategyConfig>(
+            """
+            {
+              "orderSizeUsdt": 20,
+              "buyIntervalMinutes": 30,
+              "takeProfitPercent": 1,
+              "dcaBelowPrice": 2.08
+            }
+            """,
+            new JsonSerializerOptions(JsonSerializerDefaults.Web));
+
+        Assert.NotNull(config);
+        Assert.Equal(20m, config.OrderSizeUsdt);
+        Assert.Equal(2.08m, config.DcaBelowPrice);
     }
 }

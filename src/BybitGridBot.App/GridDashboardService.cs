@@ -194,7 +194,7 @@ public sealed class GridDashboardService : IGridDashboardService
 
         if (strategyType is null)
         {
-            errors.Add("Strategy type must be grid or dca.");
+            errors.Add("Strategy type must be grid, dca, or combo.");
         }
 
         if (strategyConfigJson is null)
@@ -786,7 +786,7 @@ public sealed class GridDashboardService : IGridDashboardService
           <div><label for="symbol">Symbol</label><input id="symbol" name="symbol" placeholder="BILLUSDT" required /></div>
           <div><label for="category">Category</label><input id="category" name="category" value="spot" required /></div>
           <div><label for="strategyMode">Strategy Mode</label><select id="strategyMode" name="strategyMode"><option value="manual">manual</option><option value="auto">auto</option></select></div>
-          <div><label for="strategyType">Strategy Type</label><select id="strategyType" name="strategyType"><option value="grid">Grid</option><option value="dca">DCA</option></select></div>
+          <div><label for="strategyType">Strategy Type</label><select id="strategyType" name="strategyType"><option value="grid">Grid</option><option value="dca">DCA</option><option value="combo">Combo Grid + DCA</option></select></div>
           <div><label for="lowerPrice">Grid Lower</label><input id="lowerPrice" name="lowerPrice" type="number" step="0.00000001" required /></div>
           <div><label for="upperPrice">Grid Upper</label><input id="upperPrice" name="upperPrice" type="number" step="0.00000001" required /></div>
           <div><label for="step">Grid Step</label><input id="step" name="step" type="number" step="0.00000001" required /></div>
@@ -1356,6 +1356,7 @@ public sealed class GridDashboardService : IGridDashboardService
         {
             "grid" => TradingStrategyType.Grid,
             "dca" => TradingStrategyType.Dca,
+            "combo" => TradingStrategyType.Combo,
             _ => null
         };
     }

@@ -3,5 +3,6 @@ namespace BybitGridBot.Domain;
 public enum TradingStrategyType
 {
     Grid,
-    Dca
+    Dca,
+    Combo
 }
