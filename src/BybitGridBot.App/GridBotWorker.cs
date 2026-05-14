@@ -15,9 +15,11 @@ public sealed class GridBotWorker : BackgroundService
 {
     private const string BtdEntryMarker = "btd-entry";
     private const string DcaEntryMarker = "dca-entry";
+    private static readonly TimeSpan TimedAutoRecommendationApplyInterval = TimeSpan.FromMinutes(30);
     private static readonly JsonSerializerOptions StrategyJsonOptions = new(JsonSerializerDefaults.Web);
 
     private readonly AppOptions _appOptions;
+    private readonly AutoStrategySelector _autoStrategySelector;
     private readonly BtdStrategy _btdStrategy;
     private readonly BybitOptions _bybitOptions;
     private readonly DcaStrategy _dcaStrategy;
@@ -32,6 +34,7 @@ public sealed class GridBotWorker : BackgroundService
     private readonly RiskOptions _riskOptions;
     private readonly IGridTradingStrategy _strategy;
     private readonly Dictionary<string, CachedFeeRate> _feeRates = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, DateTimeOffset> _lastTimedAutoApplyChecks = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, GridOptions> _runningProfiles = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, GridBotSettings> _runningSettings = new(StringComparer.OrdinalIgnoreCase);
     private GridOptions _gridOptions;
@@ -43,6 +46,7 @@ public sealed class GridBotWorker : BackgroundService
         IOptions<BybitOptions> bybitOptions,
         IOptions<GridOptions> gridOptions,
         IOptions<RiskOptions> riskOptions,
+        AutoStrategySelector autoStrategySelector,
         IBybitRestClient bybitRestClient,
         BtdStrategy btdStrategy,
         DcaStrategy dcaStrategy,
@@ -55,6 +59,7 @@ public sealed class GridBotWorker : BackgroundService
         ILogger<GridBotWorker> logger)
     {
         _appOptions = appOptions.Value;
+        _autoStrategySelector = autoStrategySelector;
         _bybitOptions = bybitOptions.Value;
         _defaultGridOptions = gridOptions.Value;
         _gridOptions = _defaultGridOptions;
@@ -177,6 +182,7 @@ public sealed class GridBotWorker : BackgroundService
 
             _runningProfiles.Remove(symbol);
             _runningSettings.Remove(symbol);
+            _lastTimedAutoApplyChecks.Remove(symbol);
             _logger.LogInformation("Runtime grid profile removed. Symbol: {Symbol}", symbol);
             await _notifier.NotifyAsync($"Runtime profile removed. Symbol: `{symbol}`. Active orders cancelled.", cancellationToken);
         }
@@ -184,6 +190,7 @@ public sealed class GridBotWorker : BackgroundService
 
     private async Task RunProfileCycleAsync(GridBotSettings profile, CancellationToken cancellationToken)
     {
+        profile = await TryApplyTimedAutoRecommendationAsync(profile, cancellationToken);
         var refreshedGridOptions = RuntimeGridOptionsFactory.ToGridOptions(profile, _defaultGridOptions);
         var isKnownProfile = _runningProfiles.TryGetValue(refreshedGridOptions.Symbol, out var previousGridOptions);
         _runningSettings.TryGetValue(refreshedGridOptions.Symbol, out var previousSettings);
@@ -254,6 +261,95 @@ public sealed class GridBotWorker : BackgroundService
         }
 
         await RunCycleAsync(state, levels, instrument, null, cancellationToken);
+    }
+
+    private async Task<GridBotSettings> TryApplyTimedAutoRecommendationAsync(
+        GridBotSettings profile,
+        CancellationToken cancellationToken)
+    {
+        if (profile.StrategySelectionMode != StrategySelectionMode.Auto ||
+            !ShouldRunTimedAutoApplyCheck(profile, DateTimeOffset.UtcNow))
+        {
+            return profile;
+        }
+
+        _lastTimedAutoApplyChecks[profile.Symbol] = DateTimeOffset.UtcNow;
+        var gridOptions = RuntimeGridOptionsFactory.ToGridOptions(profile, _defaultGridOptions);
+        var candles = await _bybitRestClient.GetKlinesAsync(
+            gridOptions.Category,
+            gridOptions.Symbol,
+            "1",
+            120,
+            cancellationToken);
+        if (candles.Count == 0)
+        {
+            _logger.LogInformation("Timed auto-apply skipped for {Symbol}: market data is unavailable.", profile.Symbol);
+            return profile;
+        }
+
+        var regime = _marketRegimeAnalyzer.Analyze(candles);
+        var recommendation = _autoStrategySelector.Recommend(gridOptions, regime, candles);
+        var recommendedSettings = new GridBotSettings
+        {
+            Symbol = profile.Symbol,
+            Category = profile.Category,
+            StrategySelectionMode = StrategySelectionMode.Auto,
+            StrategyType = recommendation.StrategyType,
+            StrategyConfigJson = recommendation.StrategyConfigJson,
+            LowerPrice = recommendation.LowerPrice,
+            UpperPrice = recommendation.UpperPrice,
+            Step = recommendation.Step,
+            OrderSizeUsdt = recommendation.OrderSizeUsdt,
+            StopLowerPrice = recommendation.StopLowerPrice,
+            StopUpperPrice = recommendation.StopUpperPrice,
+            UpdatedAt = DateTimeOffset.UtcNow
+        };
+
+        var state = await _repository.GetBotStateAsync(profile.Symbol, cancellationToken);
+        var activeOrders = await _repository.GetActiveOrdersAsync(profile.Symbol, cancellationToken);
+        var safetyErrors = AutoRecommendationApplySafety.Validate(
+            profile,
+            state,
+            activeOrders,
+            recommendation,
+            recommendedSettings,
+            _riskOptions,
+            _strategy);
+        if (safetyErrors.Count > 0)
+        {
+            _logger.LogInformation(
+                "Timed auto-apply skipped for {Symbol}: {Reasons}",
+                profile.Symbol,
+                string.Join(" | ", safetyErrors));
+            return profile;
+        }
+
+        await _repository.SaveRuntimeSettingsAsync(recommendedSettings, cancellationToken);
+        _logger.LogInformation(
+            "Timed auto-apply updated {Symbol}. Strategy: {Strategy}, Range: {LowerPrice}-{UpperPrice}, Step: {Step}, Order: {OrderSizeUsdt}",
+            recommendedSettings.Symbol,
+            recommendedSettings.StrategyType,
+            recommendedSettings.LowerPrice,
+            recommendedSettings.UpperPrice,
+            recommendedSettings.Step,
+            recommendedSettings.OrderSizeUsdt);
+        await _notifier.NotifyAsync(
+            $"Timed auto recommendation applied.\nSymbol: `{recommendedSettings.Symbol}`\nStrategy: `{recommendedSettings.StrategyType}`\nRange: `{recommendedSettings.LowerPrice}`-`{recommendedSettings.UpperPrice}`\nStep: `{recommendedSettings.Step}`\nOrder: `{recommendedSettings.OrderSizeUsdt}` USDT",
+            cancellationToken);
+
+        return recommendedSettings;
+    }
+
+    private bool ShouldRunTimedAutoApplyCheck(GridBotSettings profile, DateTimeOffset now)
+    {
+        var lastCheck = profile.UpdatedAt;
+        if (_lastTimedAutoApplyChecks.TryGetValue(profile.Symbol, out var cachedCheck) &&
+            cachedCheck > lastCheck)
+        {
+            lastCheck = cachedCheck;
+        }
+
+        return now - lastCheck >= TimedAutoRecommendationApplyInterval;
     }
 
     private async Task<BotState> RunNoTradeCycleAsync(
@@ -1128,13 +1224,16 @@ public sealed class GridBotWorker : BackgroundService
         BybitWalletBalance? wallet,
         CancellationToken cancellationToken)
     {
-        if (activeOrders.Count(order => order.Side == TradeSide.Buy) >= Math.Max(1, config.MaxActiveBuyOrders))
+        var dcaActiveBuyOrders = GetDcaEntryScopeOrders(profile, activeOrders)
+            .Count(order => order.Side == TradeSide.Buy);
+        if (dcaActiveBuyOrders >= Math.Max(1, config.MaxActiveBuyOrders))
         {
             return;
         }
 
         var allOrders = await _repository.GetOrdersAsync(_gridOptions.Symbol, cancellationToken);
-        if (!_dcaStrategy.IsDueForEntry(config, allOrders, DateTimeOffset.UtcNow))
+        var dcaHistoryOrders = GetDcaEntryScopeOrders(profile, allOrders).ToArray();
+        if (!_dcaStrategy.IsDueForEntry(config, dcaHistoryOrders, DateTimeOffset.UtcNow))
         {
             return;
         }
@@ -1741,6 +1840,15 @@ public sealed class GridBotWorker : BackgroundService
         }
 
         return Math.Max(orderSize, 0m);
+    }
+
+    private static IEnumerable<GridOrder> GetDcaEntryScopeOrders(
+        GridBotSettings profile,
+        IEnumerable<GridOrder> orders)
+    {
+        return profile.StrategyType == TradingStrategyType.Combo
+            ? orders.Where(order => string.Equals(order.ParentOrderLinkId, DcaEntryMarker, StringComparison.Ordinal))
+            : orders;
     }
 
     private DcaStrategyConfig ParseDcaStrategyConfig(GridBotSettings profile)

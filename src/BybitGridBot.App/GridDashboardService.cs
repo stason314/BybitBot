@@ -1,6 +1,7 @@
 using System.Text.Json;
 using BybitGridBot.Bybit;
 using BybitGridBot.Domain;
+using BybitGridBot.Risk;
 using BybitGridBot.Storage;
 using BybitGridBot.Strategy;
 using Microsoft.Extensions.Options;
@@ -26,6 +27,7 @@ public sealed class GridDashboardService : IGridDashboardService
     private readonly IBybitRestClient _bybitRestClient;
     private readonly MarketRegimeAnalyzer _marketRegimeAnalyzer;
     private readonly IGridRepository _repository;
+    private readonly RiskOptions _riskOptions;
     private readonly SignalAnalyzer _signalAnalyzer;
     private readonly IGridTradingStrategy _strategy;
 
@@ -36,6 +38,7 @@ public sealed class GridDashboardService : IGridDashboardService
         IBybitRestClient bybitRestClient,
         MarketRegimeAnalyzer marketRegimeAnalyzer,
         IGridRepository repository,
+        IOptions<RiskOptions> riskOptions,
         SignalAnalyzer signalAnalyzer,
         IGridTradingStrategy strategy)
     {
@@ -45,6 +48,7 @@ public sealed class GridDashboardService : IGridDashboardService
         _bybitRestClient = bybitRestClient;
         _marketRegimeAnalyzer = marketRegimeAnalyzer;
         _repository = repository;
+        _riskOptions = riskOptions.Value;
         _signalAnalyzer = signalAnalyzer;
         _strategy = strategy;
     }
@@ -84,10 +88,12 @@ public sealed class GridDashboardService : IGridDashboardService
         }
 
         var orderSourceContext = ResolveOrderSourceContext(runtimeSettings.StrategyType);
-        var orders = (await _repository.GetOrdersAsync(gridOptions.Symbol, cancellationToken))
+        var allOrders = await _repository.GetOrdersAsync(gridOptions.Symbol, cancellationToken);
+        var orderSourceLabels = ResolveOrderSourceLabels(allOrders, orderSourceContext);
+        var orders = allOrders
             .OrderByDescending(order => order.CreatedAt)
             .Take(100)
-            .Select(order => MapOrder(order, orderSourceContext))
+            .Select(order => MapOrder(order, orderSourceContext, orderSourceLabels))
             .ToArray();
         var activeOrders = orders
             .Where(order => order.Status is nameof(OrderStatus.New) or nameof(OrderStatus.PartiallyFilled))
@@ -247,6 +253,8 @@ public sealed class GridDashboardService : IGridDashboardService
         }
 
         var recommendation = _autoStrategySelector.Recommend(gridOptions, AnalyzeMarketRegime(candles), candles);
+        var state = await _repository.GetBotStateAsync(runtimeSettings.Symbol, cancellationToken);
+        var activeOrders = await _repository.GetActiveOrdersAsync(runtimeSettings.Symbol, cancellationToken);
         var recommendedSettings = new GridBotSettings
         {
             Symbol = runtimeSettings.Symbol,
@@ -262,6 +270,24 @@ public sealed class GridDashboardService : IGridDashboardService
             StopUpperPrice = recommendation.StopUpperPrice,
             UpdatedAt = DateTimeOffset.UtcNow
         };
+        var safetyErrors = AutoRecommendationApplySafety.Validate(
+            runtimeSettings,
+            state,
+            activeOrders,
+            recommendation,
+            recommendedSettings,
+            _riskOptions,
+            _strategy);
+        if (safetyErrors.Count > 0)
+        {
+            return new UpdateSettingsResponse
+            {
+                Success = false,
+                Symbol = runtimeSettings.Symbol,
+                Message = "Auto recommendation was not applied by safety checks.",
+                Errors = safetyErrors
+            };
+        }
 
         await _repository.SaveRuntimeSettingsAsync(recommendedSettings, cancellationToken);
         var resumeMessage = await TryClearPauseForSettingsAsync(recommendedSettings, cancellationToken);
@@ -1631,7 +1657,10 @@ public sealed class GridDashboardService : IGridDashboardService
     private static string? NormalizeOptionalSymbol(string? symbol) =>
         string.IsNullOrWhiteSpace(symbol) ? null : NormalizeSymbol(symbol);
 
-    private static DashboardOrderItem MapOrder(GridOrder order, OrderSourceContext sourceContext)
+    private static DashboardOrderItem MapOrder(
+        GridOrder order,
+        OrderSourceContext sourceContext,
+        IReadOnlyDictionary<string, string> sourceLabels)
     {
         return new DashboardOrderItem
         {
@@ -1639,7 +1668,9 @@ public sealed class GridDashboardService : IGridDashboardService
             BybitOrderId = order.BybitOrderId,
             Symbol = order.Symbol,
             Side = order.Side.ToString(),
-            Source = ResolveOrderSource(order, sourceContext),
+            Source = sourceLabels.TryGetValue(order.OrderLinkId, out var sourceLabel)
+                ? sourceLabel
+                : ResolveOrderSource(order, sourceContext),
             Price = order.Price,
             Quantity = order.Quantity,
             FilledQuantity = order.FilledQuantity,
@@ -1658,7 +1689,7 @@ public sealed class GridDashboardService : IGridDashboardService
         {
             TradingStrategyType.Dca => new OrderSourceContext("DCA", "DCA", "DCA"),
             TradingStrategyType.Btd => new OrderSourceContext("BTD", "BTD", "BTD"),
-            TradingStrategyType.Combo => new OrderSourceContext("Combo", "Combo DCA", "Combo BTD"),
+            TradingStrategyType.Combo => new OrderSourceContext("Combo-Grid", "Combo-DCA", "Combo-BTD"),
             TradingStrategyType.NoTrade => new OrderSourceContext("NoTrade", "DCA", "BTD"),
             _ => new OrderSourceContext("Grid", "DCA", "BTD")
         };
@@ -1673,6 +1704,47 @@ public sealed class GridDashboardService : IGridDashboardService
             null or "" => context.DefaultLabel,
             _ => context.DefaultLabel
         };
+    }
+
+    private static IReadOnlyDictionary<string, string> ResolveOrderSourceLabels(
+        IReadOnlyCollection<GridOrder> orders,
+        OrderSourceContext context)
+    {
+        var orderByLinkId = orders.ToDictionary(order => order.OrderLinkId, StringComparer.Ordinal);
+        var labels = new Dictionary<string, string>(StringComparer.Ordinal);
+
+        foreach (var order in orders)
+        {
+            labels[order.OrderLinkId] = ResolveOrderSource(order, context, orderByLinkId, labels);
+        }
+
+        return labels;
+    }
+
+    private static string ResolveOrderSource(
+        GridOrder order,
+        OrderSourceContext context,
+        IReadOnlyDictionary<string, GridOrder> orderByLinkId,
+        IDictionary<string, string> labels)
+    {
+        if (labels.TryGetValue(order.OrderLinkId, out var cachedLabel))
+        {
+            return cachedLabel;
+        }
+
+        var directLabel = ResolveOrderSource(order, context);
+        if (directLabel != context.DefaultLabel || string.IsNullOrWhiteSpace(order.ParentOrderLinkId))
+        {
+            return directLabel;
+        }
+
+        if (!orderByLinkId.TryGetValue(order.ParentOrderLinkId, out var parentOrder))
+        {
+            return directLabel;
+        }
+
+        var parentLabel = ResolveOrderSource(parentOrder, context, orderByLinkId, labels);
+        return parentLabel == context.DefaultLabel ? directLabel : parentLabel;
     }
 
     private sealed record OrderSourceContext(
