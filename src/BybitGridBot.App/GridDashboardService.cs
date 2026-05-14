@@ -26,6 +26,7 @@ public sealed class GridDashboardService : IGridDashboardService
     private readonly IBybitRestClient _bybitRestClient;
     private readonly MarketRegimeAnalyzer _marketRegimeAnalyzer;
     private readonly IGridRepository _repository;
+    private readonly SignalAnalyzer _signalAnalyzer;
     private readonly IGridTradingStrategy _strategy;
 
     public GridDashboardService(
@@ -35,6 +36,7 @@ public sealed class GridDashboardService : IGridDashboardService
         IBybitRestClient bybitRestClient,
         MarketRegimeAnalyzer marketRegimeAnalyzer,
         IGridRepository repository,
+        SignalAnalyzer signalAnalyzer,
         IGridTradingStrategy strategy)
     {
         _appOptions = appOptions.Value;
@@ -43,6 +45,7 @@ public sealed class GridDashboardService : IGridDashboardService
         _bybitRestClient = bybitRestClient;
         _marketRegimeAnalyzer = marketRegimeAnalyzer;
         _repository = repository;
+        _signalAnalyzer = signalAnalyzer;
         _strategy = strategy;
     }
 
@@ -108,6 +111,7 @@ public sealed class GridDashboardService : IGridDashboardService
         var generatedAt = DateTimeOffset.UtcNow;
         var analysisCandles = await GetAnalysisCandlesAsync(gridOptions, cancellationToken);
         var marketRegime = AnalyzeMarketRegime(analysisCandles);
+        var signalAnalysis = AnalyzeSignal(analysisCandles);
         var autoRecommendation = _autoStrategySelector.Recommend(gridOptions, marketRegime, analysisCandles);
 
         return new DashboardResponse
@@ -155,6 +159,7 @@ public sealed class GridDashboardService : IGridDashboardService
                 UpdatedAt = state.UpdatedAt
             },
             MarketRegime = MapMarketRegime(marketRegime),
+            SignalAnalysis = MapSignalAnalysis(signalAnalysis),
             AutoRecommendation = MapAutoRecommendation(autoRecommendation),
             Orders = orders,
             ActiveOrders = activeOrders,
@@ -193,6 +198,21 @@ public sealed class GridDashboardService : IGridDashboardService
         }
 
         return _marketRegimeAnalyzer.Analyze(candles);
+    }
+
+    private SignalAnalysis AnalyzeSignal(IReadOnlyList<Candle> candles)
+    {
+        if (candles.Count == 0)
+        {
+            return new SignalAnalysis
+            {
+                Signal = SignalType.Avoid,
+                Confidence = 0m,
+                Reason = "Signal analysis is unavailable."
+            };
+        }
+
+        return _signalAnalyzer.Analyze(candles);
     }
 
     public async Task<UpdateSettingsResponse> ApplyAutoRecommendationAsync(string? symbol, CancellationToken cancellationToken)
@@ -907,6 +927,16 @@ public sealed class GridDashboardService : IGridDashboardService
 
     <section class="panel section regime-card">
       <div>
+        <div class="label">Signal Analyzer</div>
+        <div class="regime-title" id="signalTitle">-</div>
+        <div class="subtle" id="signalReason">-</div>
+        <div class="regime-meta" id="signalMeta"></div>
+      </div>
+      <div class="badge">Confidence <strong id="signalConfidence">-</strong></div>
+    </section>
+
+    <section class="panel section regime-card">
+      <div>
         <div class="label">Auto Recommendation</div>
         <div class="regime-title" id="autoStrategyTitle">-</div>
         <div class="subtle" id="autoStrategyReason">-</div>
@@ -1248,6 +1278,17 @@ public sealed class GridDashboardService : IGridDashboardService
         ['Volume x', formatNumber(data.marketRegime.volumeRatio)],
         ['Support', formatNumber(data.marketRegime.support)],
         ['Resistance', formatNumber(data.marketRegime.resistance)]
+      ].map(([label, value]) => `<span class="regime-chip">${label}: ${value}</span>`).join('');
+      byId('signalTitle').textContent = data.signalAnalysis.signal;
+      byId('signalReason').textContent = data.signalAnalysis.reason;
+      byId('signalConfidence').textContent = `${formatNumber(Number(data.signalAnalysis.confidence || 0) * 100)}%`;
+      byId('signalMeta').innerHTML = [
+        ['EMA fast', formatNumber(data.signalAnalysis.emaFast)],
+        ['EMA slow', formatNumber(data.signalAnalysis.emaSlow)],
+        ['RSI', formatNumber(data.signalAnalysis.rsi)],
+        ['Bollinger', formatNumber(data.signalAnalysis.bollingerPosition)],
+        ['Volume x', formatNumber(data.signalAnalysis.volumeRatio)],
+        ['Trend', `${formatNumber(data.signalAnalysis.trendStrength)}%`]
       ].map(([label, value]) => `<span class="regime-chip">${label}: ${value}</span>`).join('');
       byId('autoStrategyTitle').textContent = data.autoRecommendation.strategyType;
       byId('autoStrategyReason').textContent = data.autoRecommendation.reason;
@@ -1652,6 +1693,22 @@ public sealed class GridDashboardService : IGridDashboardService
             VolumeRatio = analysis.VolumeRatio,
             Support = analysis.Support,
             Resistance = analysis.Resistance
+        };
+    }
+
+    private static DashboardSignalAnalysis MapSignalAnalysis(SignalAnalysis analysis)
+    {
+        return new DashboardSignalAnalysis
+        {
+            Signal = analysis.Signal.ToString().ToLowerInvariant(),
+            Confidence = analysis.Confidence,
+            Reason = analysis.Reason,
+            EmaFast = analysis.EmaFast,
+            EmaSlow = analysis.EmaSlow,
+            Rsi = analysis.Rsi,
+            BollingerPosition = analysis.BollingerPosition,
+            VolumeRatio = analysis.VolumeRatio,
+            TrendStrength = analysis.TrendStrength
         };
     }
 

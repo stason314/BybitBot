@@ -14,6 +14,8 @@ public sealed class DashboardResponse
 
     public required DashboardMarketRegime MarketRegime { get; init; }
 
+    public required DashboardSignalAnalysis SignalAnalysis { get; init; }
+
     public required DashboardAutoRecommendation AutoRecommendation { get; init; }
 
     public required IReadOnlyList<DashboardOrderItem> Orders { get; init; }
@@ -112,6 +114,27 @@ public sealed class DashboardMarketRegime
     public decimal? Support { get; init; }
 
     public decimal? Resistance { get; init; }
+}
+
+public sealed class DashboardSignalAnalysis
+{
+    public required string Signal { get; init; }
+
+    public decimal Confidence { get; init; }
+
+    public required string Reason { get; init; }
+
+    public decimal EmaFast { get; init; }
+
+    public decimal EmaSlow { get; init; }
+
+    public decimal Rsi { get; init; }
+
+    public decimal BollingerPosition { get; init; }
+
+    public decimal VolumeRatio { get; init; }
+
+    public decimal TrendStrength { get; init; }
 }
 
 public sealed class DashboardAutoRecommendation

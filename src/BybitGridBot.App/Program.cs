@@ -43,6 +43,7 @@ builder.Services.AddSingleton<ITradingStrategy>(serviceProvider => serviceProvid
 builder.Services.AddSingleton<RiskManager>();
 builder.Services.AddSingleton<MarketRegimeFilter>();
 builder.Services.AddSingleton<MarketRegimeAnalyzer>();
+builder.Services.AddSingleton<SignalAnalyzer>();
 builder.Services.AddSingleton<AutoStrategySelector>();
 builder.Services.AddSingleton<IGridDashboardService, GridDashboardService>();
 
