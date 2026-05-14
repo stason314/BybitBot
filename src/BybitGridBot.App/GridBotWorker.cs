@@ -299,6 +299,7 @@ public sealed class GridBotWorker : BackgroundService
         }
 
         var activeGridOrders = await _repository.GetActiveOrdersAsync(_gridOptions.Symbol, cancellationToken);
+        activeGridOrders = await CancelUnprofitableSellOrdersAsync(state, activeGridOrders, cancellationToken);
         activeGridOrders = await ReduceBuyExposureAfterDailyTakeProfitAsync(state, activeGridOrders, cancellationToken);
         var wallet = _appOptions.TradingMode == TradingMode.Paper
             ? null
@@ -773,6 +774,40 @@ public sealed class GridBotWorker : BackgroundService
         return activeOrders.Where(order => order.IsActive).ToArray();
     }
 
+    private async Task<IReadOnlyCollection<GridOrder>> CancelUnprofitableSellOrdersAsync(
+        BotState state,
+        IReadOnlyCollection<GridOrder> activeOrders,
+        CancellationToken cancellationToken)
+    {
+        if (state.AverageEntryPrice <= 0m)
+        {
+            return activeOrders;
+        }
+
+        foreach (var order in activeOrders.Where(order => order.Side == TradeSide.Sell).ToArray())
+        {
+            var remainingQuantity = order.Quantity - order.FilledQuantity;
+            if (remainingQuantity <= 0m)
+            {
+                continue;
+            }
+
+            if (HasMinimumNetProfit(TradeSide.Sell, state.AverageEntryPrice, order.Price, remainingQuantity, 0m))
+            {
+                continue;
+            }
+
+            await CancelManagedOrderAsync(order, cancellationToken);
+            _logger.LogInformation(
+                "Sell order {OrderLinkId} at {Price} cancelled because expected net profit is below minimum. Average entry: {AverageEntryPrice}",
+                order.OrderLinkId,
+                order.Price,
+                state.AverageEntryPrice);
+        }
+
+        return activeOrders.Where(order => order.IsActive).ToArray();
+    }
+
     private async Task EnsureOppositeGridOrderAsync(
         BotState state,
         IReadOnlyList<GridLevel> levels,
@@ -1047,7 +1082,7 @@ public sealed class GridBotWorker : BackgroundService
         decimal quantity,
         decimal knownEntryFee)
     {
-        if (_gridOptions.MinNetProfitUsdt <= 0m || quantity <= 0m || entryPrice <= 0m)
+        if (quantity <= 0m || entryPrice <= 0m)
         {
             return true;
         }
