@@ -758,16 +758,16 @@ public sealed class GridBotWorker : BackgroundService
         }
     }
 
-    private async Task<IReadOnlyCollection<GridOrder>> CleanRiskyActiveOrdersAsync(
+    private async Task<IReadOnlyList<GridOrder>> CleanRiskyActiveOrdersAsync(
         BotState state,
         IReadOnlyCollection<GridOrder> activeOrders,
         CancellationToken cancellationToken)
     {
-        activeOrders = await CancelUnprofitableSellOrdersAsync(state, activeOrders, cancellationToken);
-        activeOrders = await CancelCrossSideOrdersAtSameLevelAsync(activeOrders, cancellationToken);
-        activeOrders = await ReduceBuyExposureAfterDailyTakeProfitAsync(state, activeOrders, cancellationToken);
+        var cleanedOrders = await CancelUnprofitableSellOrdersAsync(state, activeOrders, cancellationToken);
+        cleanedOrders = await CancelCrossSideOrdersAtSameLevelAsync(cleanedOrders, cancellationToken);
+        cleanedOrders = await ReduceBuyExposureAfterDailyTakeProfitAsync(state, cleanedOrders, cancellationToken);
 
-        return activeOrders;
+        return cleanedOrders.ToArray();
     }
 
     private async Task<IReadOnlyCollection<GridOrder>> ReduceBuyExposureAfterDailyTakeProfitAsync(
