@@ -1753,6 +1753,7 @@ public sealed class GridDashboardService : IGridDashboardService
         {
             OrderLinkId = order.OrderLinkId,
             BybitOrderId = order.BybitOrderId,
+            ParentOrderLinkId = order.ParentOrderLinkId,
             Symbol = order.Symbol,
             Side = order.Side.ToString(),
             Source = sourceLabels.TryGetValue(order.OrderLinkId, out var sourceLabel)
@@ -1777,7 +1778,7 @@ public sealed class GridDashboardService : IGridDashboardService
             TradingStrategyType.Dca => new OrderSourceContext("DCA", "DCA", "DCA"),
             TradingStrategyType.Btd => new OrderSourceContext("BTD", "BTD", "BTD"),
             TradingStrategyType.Combo => new OrderSourceContext("Combo-Grid", "Combo-DCA", "Combo-BTD"),
-            TradingStrategyType.Signal => new OrderSourceContext("Signal", "DCA", "BTD"),
+            TradingStrategyType.Signal => new OrderSourceContext("Managed", "DCA", "BTD"),
             TradingStrategyType.NoTrade => new OrderSourceContext("NoTrade", "DCA", "BTD"),
             _ => new OrderSourceContext("Grid", "DCA", "BTD")
         };

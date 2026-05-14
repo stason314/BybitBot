@@ -172,6 +172,8 @@ public sealed class DashboardOrderItem
 
     public string? BybitOrderId { get; init; }
 
+    public string? ParentOrderLinkId { get; init; }
+
     public required string Symbol { get; init; }
 
     public required string Side { get; init; }
