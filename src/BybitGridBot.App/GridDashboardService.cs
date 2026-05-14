@@ -89,6 +89,7 @@ public sealed class GridDashboardService : IGridDashboardService
 
         var orderSourceContext = ResolveOrderSourceContext(runtimeSettings.StrategyType);
         var allOrders = await _repository.GetOrdersAsync(gridOptions.Symbol, cancellationToken);
+        var rawActiveOrders = allOrders.Where(order => order.IsActive).ToArray();
         var orderSourceLabels = ResolveOrderSourceLabels(allOrders, orderSourceContext);
         var orders = allOrders
             .OrderByDescending(order => order.CreatedAt)
@@ -119,6 +120,15 @@ public sealed class GridDashboardService : IGridDashboardService
         var marketRegime = AnalyzeMarketRegime(analysisCandles);
         var signalAnalysis = AnalyzeSignal(analysisCandles);
         var autoRecommendation = _autoStrategySelector.Recommend(gridOptions, marketRegime, analysisCandles);
+        var recommendedSettings = BuildRecommendedSettings(runtimeSettings, autoRecommendation, StrategySelectionMode.Auto, generatedAt);
+        var autoRecommendationSafetyErrors = AutoRecommendationApplySafety.Validate(
+            runtimeSettings,
+            state,
+            rawActiveOrders,
+            autoRecommendation,
+            recommendedSettings,
+            _riskOptions,
+            _strategy);
 
         return new DashboardResponse
         {
@@ -166,7 +176,7 @@ public sealed class GridDashboardService : IGridDashboardService
             },
             MarketRegime = MapMarketRegime(marketRegime),
             SignalAnalysis = MapSignalAnalysis(signalAnalysis),
-            AutoRecommendation = MapAutoRecommendation(autoRecommendation),
+            AutoRecommendation = MapAutoRecommendation(autoRecommendation, autoRecommendationSafetyErrors),
             Orders = orders,
             ActiveOrders = activeOrders,
             GridLevels = levels.Select(level => level.Price).ToArray(),
@@ -255,21 +265,7 @@ public sealed class GridDashboardService : IGridDashboardService
         var recommendation = _autoStrategySelector.Recommend(gridOptions, AnalyzeMarketRegime(candles), candles);
         var state = await _repository.GetBotStateAsync(runtimeSettings.Symbol, cancellationToken);
         var activeOrders = await _repository.GetActiveOrdersAsync(runtimeSettings.Symbol, cancellationToken);
-        var recommendedSettings = new GridBotSettings
-        {
-            Symbol = runtimeSettings.Symbol,
-            Category = runtimeSettings.Category,
-            StrategySelectionMode = StrategySelectionMode.Auto,
-            StrategyType = recommendation.StrategyType,
-            StrategyConfigJson = recommendation.StrategyConfigJson,
-            LowerPrice = recommendation.LowerPrice,
-            UpperPrice = recommendation.UpperPrice,
-            Step = recommendation.Step,
-            OrderSizeUsdt = recommendation.OrderSizeUsdt,
-            StopLowerPrice = recommendation.StopLowerPrice,
-            StopUpperPrice = recommendation.StopUpperPrice,
-            UpdatedAt = DateTimeOffset.UtcNow
-        };
+        var recommendedSettings = BuildRecommendedSettings(runtimeSettings, recommendation, StrategySelectionMode.Auto, DateTimeOffset.UtcNow);
         var safetyErrors = AutoRecommendationApplySafety.Validate(
             runtimeSettings,
             state,
@@ -1882,7 +1878,32 @@ public sealed class GridDashboardService : IGridDashboardService
         };
     }
 
-    private static DashboardAutoRecommendation MapAutoRecommendation(AutoConfigRecommendation recommendation)
+    private static GridBotSettings BuildRecommendedSettings(
+        GridBotSettings currentSettings,
+        AutoConfigRecommendation recommendation,
+        StrategySelectionMode strategySelectionMode,
+        DateTimeOffset updatedAt)
+    {
+        return new GridBotSettings
+        {
+            Symbol = currentSettings.Symbol,
+            Category = currentSettings.Category,
+            StrategySelectionMode = strategySelectionMode,
+            StrategyType = recommendation.StrategyType,
+            StrategyConfigJson = recommendation.StrategyConfigJson,
+            LowerPrice = recommendation.LowerPrice,
+            UpperPrice = recommendation.UpperPrice,
+            Step = recommendation.Step,
+            OrderSizeUsdt = recommendation.OrderSizeUsdt,
+            StopLowerPrice = recommendation.StopLowerPrice,
+            StopUpperPrice = recommendation.StopUpperPrice,
+            UpdatedAt = updatedAt
+        };
+    }
+
+    private static DashboardAutoRecommendation MapAutoRecommendation(
+        AutoConfigRecommendation recommendation,
+        IReadOnlyList<string> applySafetyErrors)
     {
         return new DashboardAutoRecommendation
         {
@@ -1898,7 +1919,9 @@ public sealed class GridDashboardService : IGridDashboardService
             AtrPercent = recommendation.Metrics.AtrPercent,
             DrawdownPercent = recommendation.Metrics.DrawdownPercent,
             Support = recommendation.Metrics.Support,
-            Resistance = recommendation.Metrics.Resistance
+            Resistance = recommendation.Metrics.Resistance,
+            CanApply = applySafetyErrors.Count == 0,
+            ApplySafetyErrors = applySafetyErrors
         };
     }
 }

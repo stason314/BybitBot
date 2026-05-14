@@ -164,6 +164,10 @@ public sealed class DashboardAutoRecommendation
     public decimal Support { get; init; }
 
     public decimal Resistance { get; init; }
+
+    public bool CanApply { get; init; }
+
+    public IReadOnlyList<string> ApplySafetyErrors { get; init; } = [];
 }
 
 public sealed class DashboardOrderItem
