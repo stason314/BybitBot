@@ -18,6 +18,7 @@ Current baseline:
 - `TradingStrategyType.Grid` is the default strategy;
 - `TradingStrategyType.Dca` is supported as a first additional strategy;
 - `TradingStrategyType.Combo` runs grid first and enables DCA accumulation below a configured trigger;
+- `TradingStrategyType.Btd` buys sharp dips only when market regime is not danger;
 - `StrategySelectionMode.Manual` is the default runtime mode;
 - runtime settings persist strategy mode/type/config JSON so future UI and auto-selection can be added without another schema break.
 
@@ -58,7 +59,25 @@ For `Dca`, the existing runtime `Stop Lower` and `Stop Upper` fields act as hard
 
 If `dcaBelowPrice` is omitted, `Combo` starts DCA when price is at or below `Grid Lower`. Grid behavior remains unchanged inside the configured range.
 
+`Btd` uses the same take-profit and order-size fields as `Dca`, but enters only after a configured drop from recent high:
+
+```json
+{
+  "orderSizeUsdt": 20,
+  "dipPercent": 2,
+  "dipLookbackCandles": 30,
+  "candleInterval": "1",
+  "maxBuys": 3,
+  "minMinutesBetweenBuys": 10,
+  "takeProfitPercent": 1.2,
+  "limitOffsetPercent": 0.2,
+  "maxPositionUsdt": 400
+}
+```
+
+`Btd` skips new entries when `MarketRegimeAnalyzer` returns `Danger`. Runtime `Stop Lower` and `Stop Upper` remain hard entry boundaries.
+
 Next steps:
 1. Move remaining grid order-planning details fully behind strategy implementations.
-2. Add auto selector in paper mode first, initially switching only between `Grid`, `Dca`, `Combo`, and `NoTrade`.
+2. Add auto selector in paper mode first, initially switching only between `Grid`, `Dca`, `Combo`, `Btd`, and `NoTrade`.
 3. Add adaptive grid, buy-the-dip, and volume-breakout strategies as separate implementations.

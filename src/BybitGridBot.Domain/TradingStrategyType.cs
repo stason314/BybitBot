@@ -4,5 +4,6 @@ public enum TradingStrategyType
 {
     Grid,
     Dca,
-    Combo
+    Combo,
+    Btd
 }
