@@ -704,6 +704,18 @@ public sealed class GridDashboardService : IGridDashboardService
       gap: 8px;
       align-items: stretch;
     }
+    .history-copy-controls {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .hours-input {
+      width: 86px;
+      padding: 10px 12px;
+      border-radius: 12px;
+      font-size: 12px;
+    }
     .preset-hint {
       color: var(--muted);
       font-size: 12px;
@@ -930,7 +942,11 @@ public sealed class GridDashboardService : IGridDashboardService
     <section class="panel section" style="margin-top:20px;">
       <div class="section-head">
         <h2>Order History</h2>
-        <button type="button" class="secondary-button compact-button" id="copyLastHourHistory">Copy Last Hour</button>
+        <div class="history-copy-controls">
+          <input class="hours-input" id="copyHistoryHours" type="number" min="0.1" step="0.5" value="1" aria-label="History hours" />
+          <span class="preset-hint">hours</span>
+          <button type="button" class="secondary-button compact-button" id="copyLastHistory">Copy Last</button>
+        </div>
       </div>
       <div style="overflow:auto;">
         <table>
@@ -1114,12 +1130,16 @@ public sealed class GridDashboardService : IGridDashboardService
       }
       return (Number(match[5]) * 3600) + (Number(match[6]) * 60) + Number(match[7]);
     };
-    const buildLastHourHistoryCsv = () => {
+    const getCopyHistoryHours = () => {
+      const hours = Number(byId('copyHistoryHours').value);
+      return Number.isFinite(hours) && hours > 0 ? hours : 1;
+    };
+    const buildLastHistoryCsv = (hours) => {
       if (!latestDashboardData) {
         return '';
       }
 
-      const cutoff = Date.now() - 60 * 60 * 1000;
+      const cutoff = Date.now() - hours * 60 * 60 * 1000;
       const rows = latestDashboardData.orders
         .filter(order => {
           const timestamp = new Date(order.filledAt || order.updatedAt || order.createdAt).getTime();
@@ -1168,9 +1188,10 @@ public sealed class GridDashboardService : IGridDashboardService
         document.body.removeChild(textarea);
       }
     };
-    const copyLastHourHistory = async () => {
+    const copyLastHistory = async () => {
       const status = byId('formStatus');
-      const csv = buildLastHourHistoryCsv();
+      const hours = getCopyHistoryHours();
+      const csv = buildLastHistoryCsv(hours);
       if (!csv) {
         status.className = 'status error';
         status.textContent = 'No dashboard data loaded yet.';
@@ -1180,7 +1201,7 @@ public sealed class GridDashboardService : IGridDashboardService
       await writeClipboard(csv);
       const copiedRows = Math.max(0, csv.split('\n').length - 1);
       status.className = 'status ok';
-      status.textContent = `Copied ${copiedRows} history rows from the last hour.`;
+      status.textContent = `Copied ${copiedRows} history rows from the last ${hours} hour(s).`;
     };
     const cancelActiveOrders = async () => {
       const status = byId('formStatus');
@@ -1290,8 +1311,8 @@ public sealed class GridDashboardService : IGridDashboardService
       byId(id).addEventListener('input', () => setSettingsFormDirty(true));
     });
     byId('applyPreset').addEventListener('click', applySettingsPreset);
-    byId('copyLastHourHistory').addEventListener('click', () => {
-      copyLastHourHistory().catch((error) => {
+    byId('copyLastHistory').addEventListener('click', () => {
+      copyLastHistory().catch((error) => {
         byId('formStatus').className = 'status error';
         byId('formStatus').textContent = error.message;
       });
