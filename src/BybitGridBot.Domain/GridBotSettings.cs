@@ -10,6 +10,8 @@ public sealed class GridBotSettings
 
     public TradingStrategyType StrategyType { get; init; } = TradingStrategyType.Grid;
 
+    public string StrategyConfigJson { get; init; } = "{}";
+
     public decimal LowerPrice { get; init; }
 
     public decimal UpperPrice { get; init; }

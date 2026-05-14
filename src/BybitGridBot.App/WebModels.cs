@@ -43,6 +43,12 @@ public sealed class DashboardSettings
 
     public required string Category { get; init; }
 
+    public required string StrategyMode { get; init; }
+
+    public required string StrategyType { get; init; }
+
+    public required string StrategyConfigJson { get; init; }
+
     public decimal LowerPrice { get; init; }
 
     public decimal UpperPrice { get; init; }
@@ -117,6 +123,12 @@ public sealed class UpdateSettingsRequest
     public string Symbol { get; init; } = string.Empty;
 
     public string Category { get; init; } = "spot";
+
+    public string StrategyMode { get; init; } = "manual";
+
+    public string StrategyType { get; init; } = "grid";
+
+    public string StrategyConfigJson { get; init; } = "{}";
 
     public decimal LowerPrice { get; init; }
 

@@ -17,7 +17,7 @@ Strategy responsibilities:
 Current baseline:
 - `TradingStrategyType.Grid` is the only supported strategy;
 - `StrategySelectionMode.Manual` is the default runtime mode;
-- runtime settings already persist strategy mode/type so future UI and auto-selection can be added without another schema break.
+- runtime settings persist strategy mode/type/config JSON so future UI and auto-selection can be added without another schema break.
 
 Next steps:
 1. Move grid order-planning decisions behind a strategy decision interface.

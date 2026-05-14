@@ -514,6 +514,9 @@ public sealed class GridBotWorker : BackgroundService
             {
                 Symbol = _gridOptions.Symbol,
                 Category = _gridOptions.Category,
+                StrategySelectionMode = StrategySelectionMode.Manual,
+                StrategyType = TradingStrategyType.Grid,
+                StrategyConfigJson = "{}",
                 LowerPrice = proposedLower,
                 UpperPrice = proposedUpper,
                 Step = _gridOptions.Step,

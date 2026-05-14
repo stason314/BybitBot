@@ -70,6 +70,7 @@ public sealed class SqliteGridRepository : IGridRepository
                 category TEXT NOT NULL,
                 strategy_selection_mode TEXT NOT NULL DEFAULT 'Manual',
                 strategy_type TEXT NOT NULL DEFAULT 'Grid',
+                strategy_config_json TEXT NOT NULL DEFAULT '{}',
                 lower_price TEXT NOT NULL,
                 upper_price TEXT NOT NULL,
                 step TEXT NOT NULL,
@@ -92,13 +93,14 @@ public sealed class SqliteGridRepository : IGridRepository
         await command.ExecuteNonQueryAsync(cancellationToken);
         await EnsureColumnAsync(connection, "runtime_settings", "strategy_selection_mode", "TEXT NOT NULL DEFAULT 'Manual'", cancellationToken);
         await EnsureColumnAsync(connection, "runtime_settings", "strategy_type", "TEXT NOT NULL DEFAULT 'Grid'", cancellationToken);
+        await EnsureColumnAsync(connection, "runtime_settings", "strategy_config_json", "TEXT NOT NULL DEFAULT '{}'", cancellationToken);
         _logger.LogInformation("SQLite repository initialized.");
     }
 
     public async Task<GridBotSettings?> GetRuntimeSettingsAsync(CancellationToken cancellationToken)
     {
         const string sql = """
-            SELECT symbol, category, strategy_selection_mode, strategy_type, lower_price, upper_price, step, order_size_usdt, stop_lower_price, stop_upper_price, updated_at
+            SELECT symbol, category, strategy_selection_mode, strategy_type, strategy_config_json, lower_price, upper_price, step, order_size_usdt, stop_lower_price, stop_upper_price, updated_at
             FROM runtime_settings
             ORDER BY symbol
             LIMIT 1;
@@ -120,7 +122,7 @@ public sealed class SqliteGridRepository : IGridRepository
     public async Task<GridBotSettings?> GetRuntimeSettingsAsync(string symbol, CancellationToken cancellationToken)
     {
         const string sql = """
-            SELECT symbol, category, strategy_selection_mode, strategy_type, lower_price, upper_price, step, order_size_usdt, stop_lower_price, stop_upper_price, updated_at
+            SELECT symbol, category, strategy_selection_mode, strategy_type, strategy_config_json, lower_price, upper_price, step, order_size_usdt, stop_lower_price, stop_upper_price, updated_at
             FROM runtime_settings
             WHERE settings_id = $settings_id
             LIMIT 1;
@@ -143,7 +145,7 @@ public sealed class SqliteGridRepository : IGridRepository
     public async Task<IReadOnlyList<GridBotSettings>> GetRuntimeSettingsProfilesAsync(CancellationToken cancellationToken)
     {
         const string sql = """
-            SELECT symbol, category, strategy_selection_mode, strategy_type, lower_price, upper_price, step, order_size_usdt, stop_lower_price, stop_upper_price, updated_at
+            SELECT symbol, category, strategy_selection_mode, strategy_type, strategy_config_json, lower_price, upper_price, step, order_size_usdt, stop_lower_price, stop_upper_price, updated_at
             FROM runtime_settings
             ORDER BY symbol;
             """;
@@ -166,16 +168,17 @@ public sealed class SqliteGridRepository : IGridRepository
     {
         const string sql = """
             INSERT INTO runtime_settings (
-                settings_id, symbol, category, strategy_selection_mode, strategy_type, lower_price, upper_price, step, order_size_usdt, stop_lower_price, stop_upper_price, updated_at
+                settings_id, symbol, category, strategy_selection_mode, strategy_type, strategy_config_json, lower_price, upper_price, step, order_size_usdt, stop_lower_price, stop_upper_price, updated_at
             )
             VALUES (
-                $settings_id, $symbol, $category, $strategy_selection_mode, $strategy_type, $lower_price, $upper_price, $step, $order_size_usdt, $stop_lower_price, $stop_upper_price, $updated_at
+                $settings_id, $symbol, $category, $strategy_selection_mode, $strategy_type, $strategy_config_json, $lower_price, $upper_price, $step, $order_size_usdt, $stop_lower_price, $stop_upper_price, $updated_at
             )
             ON CONFLICT(settings_id) DO UPDATE SET
                 symbol = excluded.symbol,
                 category = excluded.category,
                 strategy_selection_mode = excluded.strategy_selection_mode,
                 strategy_type = excluded.strategy_type,
+                strategy_config_json = excluded.strategy_config_json,
                 lower_price = excluded.lower_price,
                 upper_price = excluded.upper_price,
                 step = excluded.step,
@@ -193,6 +196,7 @@ public sealed class SqliteGridRepository : IGridRepository
         command.Parameters.AddWithValue("$category", settings.Category);
         command.Parameters.AddWithValue("$strategy_selection_mode", settings.StrategySelectionMode.ToString());
         command.Parameters.AddWithValue("$strategy_type", settings.StrategyType.ToString());
+        command.Parameters.AddWithValue("$strategy_config_json", string.IsNullOrWhiteSpace(settings.StrategyConfigJson) ? "{}" : settings.StrategyConfigJson);
         command.Parameters.AddWithValue("$lower_price", FormatDecimal(settings.LowerPrice));
         command.Parameters.AddWithValue("$upper_price", FormatDecimal(settings.UpperPrice));
         command.Parameters.AddWithValue("$step", FormatDecimal(settings.Step));
@@ -499,13 +503,14 @@ public sealed class SqliteGridRepository : IGridRepository
             Category = reader.GetString(1),
             StrategySelectionMode = ParseEnum(reader.GetString(2), StrategySelectionMode.Manual),
             StrategyType = ParseEnum(reader.GetString(3), TradingStrategyType.Grid),
-            LowerPrice = ParseDecimal(reader.GetString(4)),
-            UpperPrice = ParseDecimal(reader.GetString(5)),
-            Step = ParseDecimal(reader.GetString(6)),
-            OrderSizeUsdt = ParseDecimal(reader.GetString(7)),
-            StopLowerPrice = ParseDecimal(reader.GetString(8)),
-            StopUpperPrice = ParseDecimal(reader.GetString(9)),
-            UpdatedAt = DateTimeOffset.Parse(reader.GetString(10), CultureInfo.InvariantCulture)
+            StrategyConfigJson = reader.GetString(4),
+            LowerPrice = ParseDecimal(reader.GetString(5)),
+            UpperPrice = ParseDecimal(reader.GetString(6)),
+            Step = ParseDecimal(reader.GetString(7)),
+            OrderSizeUsdt = ParseDecimal(reader.GetString(8)),
+            StopLowerPrice = ParseDecimal(reader.GetString(9)),
+            StopUpperPrice = ParseDecimal(reader.GetString(10)),
+            UpdatedAt = DateTimeOffset.Parse(reader.GetString(11), CultureInfo.InvariantCulture)
         };
     }
 

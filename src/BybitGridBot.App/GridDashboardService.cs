@@ -1,3 +1,4 @@
+using System.Text.Json;
 using BybitGridBot.Bybit;
 using BybitGridBot.Domain;
 using BybitGridBot.Storage;
@@ -112,6 +113,9 @@ public sealed class GridDashboardService : IGridDashboardService
             {
                 Symbol = gridOptions.Symbol,
                 Category = gridOptions.Category,
+                StrategyMode = runtimeSettings.StrategySelectionMode.ToString().ToLowerInvariant(),
+                StrategyType = runtimeSettings.StrategyType.ToString().ToLowerInvariant(),
+                StrategyConfigJson = runtimeSettings.StrategyConfigJson,
                 LowerPrice = gridOptions.LowerPrice,
                 UpperPrice = gridOptions.UpperPrice,
                 Step = gridOptions.Step,
@@ -150,7 +154,25 @@ public sealed class GridDashboardService : IGridDashboardService
     {
         var symbol = request.Symbol.Trim().ToUpperInvariant();
         var category = string.IsNullOrWhiteSpace(request.Category) ? "spot" : request.Category.Trim().ToLowerInvariant();
+        var strategyMode = ParseStrategySelectionMode(request.StrategyMode);
+        var strategyType = ParseTradingStrategyType(request.StrategyType);
+        var strategyConfigJson = NormalizeStrategyConfigJson(request.StrategyConfigJson);
         var errors = ValidateRequest(symbol, category, request);
+        if (strategyMode is null)
+        {
+            errors.Add("Strategy mode must be manual or auto.");
+        }
+
+        if (strategyType is null)
+        {
+            errors.Add("Strategy type must be grid.");
+        }
+
+        if (strategyConfigJson is null)
+        {
+            errors.Add("Strategy config JSON is invalid.");
+        }
+
         if (errors.Count > 0)
         {
             return new UpdateSettingsResponse
@@ -179,6 +201,9 @@ public sealed class GridDashboardService : IGridDashboardService
         {
             Symbol = symbol,
             Category = category,
+            StrategySelectionMode = strategyMode!.Value,
+            StrategyType = strategyType!.Value,
+            StrategyConfigJson = strategyConfigJson!,
             LowerPrice = request.LowerPrice,
             UpperPrice = request.UpperPrice,
             Step = request.Step,
@@ -529,7 +554,7 @@ public sealed class GridDashboardService : IGridDashboardService
       color: var(--muted);
       margin-bottom: 6px;
     }
-    input, textarea {
+    input, select, textarea {
       width: 100%;
       padding: 12px 14px;
       border-radius: 14px;
@@ -706,12 +731,15 @@ public sealed class GridDashboardService : IGridDashboardService
         <form id="settingsForm">
           <div><label for="symbol">Symbol</label><input id="symbol" name="symbol" placeholder="BILLUSDT" required /></div>
           <div><label for="category">Category</label><input id="category" name="category" value="spot" required /></div>
+          <div><label for="strategyMode">Strategy Mode</label><select id="strategyMode" name="strategyMode"><option value="manual">manual</option><option value="auto">auto</option></select></div>
+          <div><label for="strategyType">Strategy Type</label><select id="strategyType" name="strategyType"><option value="grid">Grid</option></select></div>
           <div><label for="lowerPrice">Grid Lower</label><input id="lowerPrice" name="lowerPrice" type="number" step="0.00000001" required /></div>
           <div><label for="upperPrice">Grid Upper</label><input id="upperPrice" name="upperPrice" type="number" step="0.00000001" required /></div>
           <div><label for="step">Grid Step</label><input id="step" name="step" type="number" step="0.00000001" required /></div>
           <div><label for="orderSizeUsdt">Order Size USDT</label><input id="orderSizeUsdt" name="orderSizeUsdt" type="number" step="0.00000001" required /></div>
           <div><label for="stopLowerPrice">Stop Lower</label><input id="stopLowerPrice" name="stopLowerPrice" type="number" step="0.00000001" required /></div>
           <div><label for="stopUpperPrice">Stop Upper</label><input id="stopUpperPrice" name="stopUpperPrice" type="number" step="0.00000001" required /></div>
+          <div class="full"><label for="strategyConfigJson">Strategy Config JSON</label><textarea id="strategyConfigJson" name="strategyConfigJson" rows="3">{}</textarea></div>
           <div class="full"><button type="submit">Apply Settings</button></div>
         </form>
         <div class="status" id="formStatus"></div>
@@ -761,7 +789,7 @@ public sealed class GridDashboardService : IGridDashboardService
 
   <script>
     const byId = (id) => document.getElementById(id);
-    const settingsFieldIds = ['symbol', 'category', 'lowerPrice', 'upperPrice', 'step', 'orderSizeUsdt', 'stopLowerPrice', 'stopUpperPrice'];
+    const settingsFieldIds = ['symbol', 'category', 'strategyMode', 'strategyType', 'lowerPrice', 'upperPrice', 'step', 'orderSizeUsdt', 'stopLowerPrice', 'stopUpperPrice', 'strategyConfigJson'];
     const presetLabelToFieldId = {
       'symbol': 'symbol',
       'category': 'category',
@@ -775,6 +803,9 @@ public sealed class GridDashboardService : IGridDashboardService
     const defaultNewSettings = {
       symbol: '',
       category: 'spot',
+      strategyMode: 'manual',
+      strategyType: 'grid',
+      strategyConfigJson: '{}',
       lowerPrice: '',
       upperPrice: '',
       step: '',
@@ -795,12 +826,15 @@ public sealed class GridDashboardService : IGridDashboardService
     const updateSettingsForm = (settings) => {
       byId('symbol').value = settings.symbol;
       byId('category').value = settings.category;
+      byId('strategyMode').value = settings.strategyMode || 'manual';
+      byId('strategyType').value = settings.strategyType || 'grid';
       byId('lowerPrice').value = settings.lowerPrice;
       byId('upperPrice').value = settings.upperPrice;
       byId('step').value = settings.step;
       byId('orderSizeUsdt').value = settings.orderSizeUsdt;
       byId('stopLowerPrice').value = settings.stopLowerPrice;
       byId('stopUpperPrice').value = settings.stopUpperPrice;
+      byId('strategyConfigJson').value = settings.strategyConfigJson || '{}';
     };
     const escapeHtml = (value) => String(value)
       .replaceAll('&', '&amp;')
@@ -878,7 +912,7 @@ public sealed class GridDashboardService : IGridDashboardService
         return;
       }
 
-      settingsFieldIds.forEach((fieldId) => {
+      Object.values(presetLabelToFieldId).forEach((fieldId) => {
         byId(fieldId).value = parsed[fieldId];
       });
       setSettingsFormDirty(true);
@@ -1148,6 +1182,9 @@ public sealed class GridDashboardService : IGridDashboardService
       const payload = {
         symbol: byId('symbol').value,
         category: byId('category').value,
+        strategyMode: byId('strategyMode').value,
+        strategyType: byId('strategyType').value,
+        strategyConfigJson: byId('strategyConfigJson').value,
         lowerPrice: Number(byId('lowerPrice').value),
         upperPrice: Number(byId('upperPrice').value),
         step: Number(byId('step').value),
@@ -1224,6 +1261,43 @@ public sealed class GridDashboardService : IGridDashboardService
         }
 
         return errors;
+    }
+
+    private static StrategySelectionMode? ParseStrategySelectionMode(string? value)
+    {
+        return value?.Trim().ToLowerInvariant() switch
+        {
+            "manual" => StrategySelectionMode.Manual,
+            "auto" => StrategySelectionMode.Auto,
+            _ => null
+        };
+    }
+
+    private static TradingStrategyType? ParseTradingStrategyType(string? value)
+    {
+        return value?.Trim().ToLowerInvariant() switch
+        {
+            "grid" => TradingStrategyType.Grid,
+            _ => null
+        };
+    }
+
+    private static string? NormalizeStrategyConfigJson(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return "{}";
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(value);
+            return JsonSerializer.Serialize(document.RootElement);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
     }
 
     private async Task<string> TryClearPauseForSettingsAsync(GridBotSettings settings, CancellationToken cancellationToken)

@@ -11,6 +11,9 @@ internal static class RuntimeGridOptionsFactory
         {
             Symbol = options.Symbol,
             Category = options.Category,
+            StrategySelectionMode = StrategySelectionMode.Manual,
+            StrategyType = TradingStrategyType.Grid,
+            StrategyConfigJson = "{}",
             LowerPrice = options.LowerPrice,
             UpperPrice = options.UpperPrice,
             Step = options.Step,
