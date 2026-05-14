@@ -31,6 +31,12 @@ internal static class RuntimeGridOptionsFactory
             UpperPrice = settings.UpperPrice,
             Step = settings.Step,
             OrderSizeUsdt = settings.OrderSizeUsdt,
+            MinNetProfitUsdt = defaults.MinNetProfitUsdt,
+            DynamicOrderSizeEnabled = defaults.DynamicOrderSizeEnabled,
+            DynamicLowerOrderMultiplier = defaults.DynamicLowerOrderMultiplier,
+            DynamicUpperOrderMultiplier = defaults.DynamicUpperOrderMultiplier,
+            DailyTakeProfitUsdt = defaults.DailyTakeProfitUsdt,
+            DailyTakeProfitOrderMultiplier = defaults.DailyTakeProfitOrderMultiplier,
             StopLowerPrice = settings.StopLowerPrice,
             StopUpperPrice = settings.StopUpperPrice,
             MarketFilterEnabled = defaults.MarketFilterEnabled,
@@ -42,6 +48,12 @@ internal static class RuntimeGridOptionsFactory
             BotLoopIntervalSeconds = defaults.BotLoopIntervalSeconds,
             PaperInitialUsdt = defaults.PaperInitialUsdt,
             PaperInitialBaseAssetQuantity = defaults.PaperInitialBaseAssetQuantity,
+            PaperBootstrapInventoryEnabled = defaults.PaperBootstrapInventoryEnabled,
+            AutoRecenterEnabled = defaults.AutoRecenterEnabled,
+            AutoRecenterCandleInterval = defaults.AutoRecenterCandleInterval,
+            AutoRecenterLookbackCandles = defaults.AutoRecenterLookbackCandles,
+            AutoRecenterPaddingSteps = defaults.AutoRecenterPaddingSteps,
+            AutoRecenterMinShiftSteps = defaults.AutoRecenterMinShiftSteps,
             CandleInterval = defaults.CandleInterval
         };
     }

@@ -29,6 +29,29 @@ public sealed class GridOptions
     [Range(typeof(decimal), "0.00000001", "999999999")]
     public decimal OrderSizeUsdt { get; init; } = 20m;
 
+    [ConfigurationKeyName("MIN_NET_PROFIT_USDT")]
+    [Range(typeof(decimal), "0", "999999999")]
+    public decimal MinNetProfitUsdt { get; init; } = 0m;
+
+    [ConfigurationKeyName("DYNAMIC_ORDER_SIZE_ENABLED")]
+    public bool DynamicOrderSizeEnabled { get; init; } = false;
+
+    [ConfigurationKeyName("DYNAMIC_LOWER_ORDER_MULTIPLIER")]
+    [Range(typeof(decimal), "0.00000001", "1000")]
+    public decimal DynamicLowerOrderMultiplier { get; init; } = 1.5m;
+
+    [ConfigurationKeyName("DYNAMIC_UPPER_ORDER_MULTIPLIER")]
+    [Range(typeof(decimal), "0.00000001", "1000")]
+    public decimal DynamicUpperOrderMultiplier { get; init; } = 1m;
+
+    [ConfigurationKeyName("DAILY_TAKE_PROFIT_USDT")]
+    [Range(typeof(decimal), "0", "999999999")]
+    public decimal DailyTakeProfitUsdt { get; init; } = 0m;
+
+    [ConfigurationKeyName("DAILY_TAKE_PROFIT_ORDER_MULTIPLIER")]
+    [Range(typeof(decimal), "0.00000001", "1000")]
+    public decimal DailyTakeProfitOrderMultiplier { get; init; } = 0.5m;
+
     [ConfigurationKeyName("STOP_LOWER_PRICE")]
     public decimal StopLowerPrice { get; init; } = 0.09m;
 
@@ -69,6 +92,27 @@ public sealed class GridOptions
     [Range(typeof(decimal), "0", "999999999")]
     public decimal PaperInitialBaseAssetQuantity { get; init; } = 0m;
 
+    [ConfigurationKeyName("PAPER_BOOTSTRAP_INVENTORY_ENABLED")]
+    public bool PaperBootstrapInventoryEnabled { get; init; } = true;
+
     [ConfigurationKeyName("CANDLE_INTERVAL")]
     public string CandleInterval { get; init; } = "60";
+
+    [ConfigurationKeyName("AUTO_RECENTER_ENABLED")]
+    public bool AutoRecenterEnabled { get; init; } = false;
+
+    [ConfigurationKeyName("AUTO_RECENTER_CANDLE_INTERVAL")]
+    public string AutoRecenterCandleInterval { get; init; } = "1";
+
+    [ConfigurationKeyName("AUTO_RECENTER_LOOKBACK_CANDLES")]
+    [Range(5, 1000)]
+    public int AutoRecenterLookbackCandles { get; init; } = 60;
+
+    [ConfigurationKeyName("AUTO_RECENTER_PADDING_STEPS")]
+    [Range(0, 1000)]
+    public int AutoRecenterPaddingSteps { get; init; } = 2;
+
+    [ConfigurationKeyName("AUTO_RECENTER_MIN_SHIFT_STEPS")]
+    [Range(1, 1000)]
+    public int AutoRecenterMinShiftSteps { get; init; } = 2;
 }

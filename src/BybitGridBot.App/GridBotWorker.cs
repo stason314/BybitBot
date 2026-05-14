@@ -267,6 +267,12 @@ public sealed class GridBotWorker : BackgroundService
             return state;
         }
 
+        if (await TryAutoRecenterGridAsync(state, currentPrice, cancellationToken))
+        {
+            await _repository.SaveBotStateAsync(state, cancellationToken);
+            return state;
+        }
+
         if (!_strategy.IsWithinTradingRange(_gridOptions, currentPrice))
         {
             _logger.LogInformation("Price is outside the trading range. No new orders will be created.");
@@ -293,6 +299,7 @@ public sealed class GridBotWorker : BackgroundService
         }
 
         var activeGridOrders = await _repository.GetActiveOrdersAsync(_gridOptions.Symbol, cancellationToken);
+        activeGridOrders = await ReduceBuyExposureAfterDailyTakeProfitAsync(state, activeGridOrders, cancellationToken);
         var wallet = _appOptions.TradingMode == TradingMode.Paper
             ? null
             : await _bybitRestClient.GetWalletBalanceAsync(cancellationToken, _quoteAsset, _baseAsset);
@@ -365,7 +372,10 @@ public sealed class GridBotWorker : BackgroundService
         decimal currentPrice,
         CancellationToken cancellationToken)
     {
-        if (_appOptions.TradingMode != TradingMode.Paper || state.IsInitialized || state.BaseAssetQuantity > 0m)
+        if (_appOptions.TradingMode != TradingMode.Paper ||
+            !_gridOptions.PaperBootstrapInventoryEnabled ||
+            state.IsInitialized ||
+            state.BaseAssetQuantity > 0m)
         {
             return;
         }
@@ -438,6 +448,81 @@ public sealed class GridBotWorker : BackgroundService
 
             await EnsureOppositeGridOrderAsync(state, levels, order, cancellationToken);
         }
+    }
+
+    private async Task<bool> TryAutoRecenterGridAsync(
+        BotState state,
+        decimal currentPrice,
+        CancellationToken cancellationToken)
+    {
+        if (!_gridOptions.AutoRecenterEnabled)
+        {
+            return false;
+        }
+
+        var candles = await _bybitRestClient.GetKlinesAsync(
+            _gridOptions.Category,
+            _gridOptions.Symbol,
+            _gridOptions.AutoRecenterCandleInterval,
+            _gridOptions.AutoRecenterLookbackCandles,
+            cancellationToken);
+        if (candles.Count < 5)
+        {
+            return false;
+        }
+
+        var recentLow = candles.Min(candle => candle.Low);
+        var recentHigh = candles.Max(candle => candle.High);
+        var padding = _gridOptions.Step * _gridOptions.AutoRecenterPaddingSteps;
+        var proposedLower = FloorToStep(Math.Min(recentLow, currentPrice) - padding, _gridOptions.Step);
+        var proposedUpper = CeilingToStep(Math.Max(recentHigh, currentPrice) + padding, _gridOptions.Step);
+        if (proposedLower <= 0m || proposedUpper <= proposedLower)
+        {
+            return false;
+        }
+
+        var minShift = _gridOptions.Step * _gridOptions.AutoRecenterMinShiftSteps;
+        if (Math.Abs(proposedLower - _gridOptions.LowerPrice) < minShift &&
+            Math.Abs(proposedUpper - _gridOptions.UpperPrice) < minShift)
+        {
+            return false;
+        }
+
+        var activeOrders = await _repository.GetActiveOrdersAsync(_gridOptions.Symbol, cancellationToken);
+        foreach (var order in activeOrders)
+        {
+            await CancelManagedOrderAsync(order, cancellationToken);
+        }
+
+        await _repository.SaveRuntimeSettingsAsync(
+            new GridBotSettings
+            {
+                Symbol = _gridOptions.Symbol,
+                Category = _gridOptions.Category,
+                LowerPrice = proposedLower,
+                UpperPrice = proposedUpper,
+                Step = _gridOptions.Step,
+                OrderSizeUsdt = _gridOptions.OrderSizeUsdt,
+                StopLowerPrice = Math.Max(_gridOptions.Step, proposedLower - padding),
+                StopUpperPrice = proposedUpper + padding,
+                UpdatedAt = DateTimeOffset.UtcNow
+            },
+            cancellationToken);
+
+        _logger.LogInformation(
+            "Auto-recentered grid for {Symbol}. Old range: {OldLower}-{OldUpper}. New range: {NewLower}-{NewUpper}.",
+            _gridOptions.Symbol,
+            _gridOptions.LowerPrice,
+            _gridOptions.UpperPrice,
+            proposedLower,
+            proposedUpper);
+
+        await _notifier.NotifyAsync(
+            $"Grid auto-recentered for `{_gridOptions.Symbol}`.\nRange: `{proposedLower}`-`{proposedUpper}`",
+            cancellationToken);
+
+        state.UpdatedAt = DateTimeOffset.UtcNow;
+        return true;
     }
 
     private async Task SynchronizeLiveOrdersAsync(BotState state, CancellationToken cancellationToken)
@@ -596,7 +681,8 @@ public sealed class GridBotWorker : BackgroundService
                 continue;
             }
 
-            var quantity = instrument.RoundQuantity(_gridOptions.OrderSizeUsdt / level.Price);
+            var orderSizeUsdt = GetOrderSizeUsdt(TradeSide.Buy, level.Price, state);
+            var quantity = instrument.RoundQuantity(orderSizeUsdt / level.Price);
             if (quantity <= 0m || quantity < instrument.MinOrderQty)
             {
                 continue;
@@ -609,7 +695,7 @@ public sealed class GridBotWorker : BackgroundService
                 state,
                 activeOrders,
                 currentPrice,
-                _gridOptions.OrderSizeUsdt,
+                orderSizeUsdt,
                 instrument.MinOrderAmount,
                 availableUsdt);
 
@@ -630,9 +716,16 @@ public sealed class GridBotWorker : BackgroundService
                 continue;
             }
 
-            var quantity = instrument.RoundQuantity(_gridOptions.OrderSizeUsdt / level.Price);
+            var orderSizeUsdt = GetOrderSizeUsdt(TradeSide.Sell, level.Price, state);
+            var quantity = instrument.RoundQuantity(orderSizeUsdt / level.Price);
             if (quantity <= 0m || quantity < instrument.MinOrderQty)
             {
+                continue;
+            }
+
+            if (!HasMinimumNetProfit(TradeSide.Sell, state.AverageEntryPrice, level.Price, quantity, 0m))
+            {
+                _logger.LogInformation("Sell order at {Price} skipped because net profit is below minimum.", level.Price);
                 continue;
             }
 
@@ -646,6 +739,38 @@ public sealed class GridBotWorker : BackgroundService
             var createdOrder = await PlaceOrderAsync(TradeSide.Sell, level.Price, quantity, null, cancellationToken);
             activeOrders = activeOrders.Append(createdOrder).ToArray();
         }
+    }
+
+    private async Task<IReadOnlyCollection<GridOrder>> ReduceBuyExposureAfterDailyTakeProfitAsync(
+        BotState state,
+        IReadOnlyCollection<GridOrder> activeOrders,
+        CancellationToken cancellationToken)
+    {
+        if (_gridOptions.DailyTakeProfitUsdt <= 0m ||
+            state.DailyRealizedPnl < _gridOptions.DailyTakeProfitUsdt ||
+            _gridOptions.DailyTakeProfitOrderMultiplier >= 1m)
+        {
+            return activeOrders;
+        }
+
+        foreach (var order in activeOrders.Where(order => order.Side == TradeSide.Buy).ToArray())
+        {
+            var remainingNotional = (order.Quantity - order.FilledQuantity) * order.Price;
+            var targetNotional = GetOrderSizeUsdt(TradeSide.Buy, order.Price, state);
+            if (remainingNotional <= targetNotional * 1.05m)
+            {
+                continue;
+            }
+
+            await CancelManagedOrderAsync(order, cancellationToken);
+            _logger.LogInformation(
+                "Buy order {OrderLinkId} cancelled after daily take-profit to reduce exposure. Current notional: {CurrentNotional}, target notional: {TargetNotional}",
+                order.OrderLinkId,
+                remainingNotional,
+                targetNotional);
+        }
+
+        return activeOrders.Where(order => order.IsActive).ToArray();
     }
 
     private async Task EnsureOppositeGridOrderAsync(
@@ -696,6 +821,14 @@ public sealed class GridBotWorker : BackgroundService
         {
             if (GetAvailableBaseBalance(state, activeOrders, wallet) < quantity)
             {
+                return;
+            }
+
+            if (!HasMinimumNetProfit(TradeSide.Sell, filledOrder.Price, nextLevel.Price, quantity, filledOrder.FeePaid))
+            {
+                _logger.LogInformation(
+                    "Follow-up sell order at {Price} skipped after buy because net profit is below minimum.",
+                    nextLevel.Price);
                 return;
             }
         }
@@ -885,6 +1018,50 @@ public sealed class GridBotWorker : BackgroundService
         return Math.Max(0m, wallet?.GetCoinWalletBalance(_baseAsset) - wallet?.GetCoinLockedBalance(_baseAsset) ?? 0m);
     }
 
+    private decimal GetOrderSizeUsdt(TradeSide side, decimal levelPrice, BotState state)
+    {
+        var orderSize = _gridOptions.OrderSizeUsdt;
+
+        if (_gridOptions.DynamicOrderSizeEnabled)
+        {
+            var midpoint = (_gridOptions.LowerPrice + _gridOptions.UpperPrice) / 2m;
+            var multiplier = side == TradeSide.Buy && levelPrice < midpoint
+                ? _gridOptions.DynamicLowerOrderMultiplier
+                : _gridOptions.DynamicUpperOrderMultiplier;
+            orderSize *= multiplier;
+        }
+
+        if (_gridOptions.DailyTakeProfitUsdt > 0m &&
+            state.DailyRealizedPnl >= _gridOptions.DailyTakeProfitUsdt)
+        {
+            orderSize *= _gridOptions.DailyTakeProfitOrderMultiplier;
+        }
+
+        return Math.Max(orderSize, 0m);
+    }
+
+    private bool HasMinimumNetProfit(
+        TradeSide closingSide,
+        decimal entryPrice,
+        decimal exitPrice,
+        decimal quantity,
+        decimal knownEntryFee)
+    {
+        if (_gridOptions.MinNetProfitUsdt <= 0m || quantity <= 0m || entryPrice <= 0m)
+        {
+            return true;
+        }
+
+        var exitFee = CalculateFee(exitPrice * quantity);
+        var entryFee = knownEntryFee > 0m ? knownEntryFee : CalculateFee(entryPrice * quantity);
+        var grossPnl = closingSide == TradeSide.Sell
+            ? (exitPrice - entryPrice) * quantity
+            : (entryPrice - exitPrice) * quantity;
+        var netPnl = grossPnl - entryFee - exitFee;
+
+        return netPnl >= _gridOptions.MinNetProfitUsdt;
+    }
+
     private decimal CalculateFee(decimal tradedNotional) => tradedNotional * (_gridOptions.FeePercent / 100m);
 
     private void ValidateAccountConfiguration()
@@ -916,6 +1093,21 @@ public sealed class GridBotWorker : BackgroundService
         if (_gridOptions.StopUpperPrice <= _gridOptions.UpperPrice)
         {
             throw new InvalidOperationException("STOP_UPPER_PRICE must be higher than GRID_UPPER_PRICE.");
+        }
+
+        if (_gridOptions.DynamicLowerOrderMultiplier <= 0m ||
+            _gridOptions.DynamicUpperOrderMultiplier <= 0m ||
+            _gridOptions.DailyTakeProfitOrderMultiplier <= 0m)
+        {
+            throw new InvalidOperationException("Dynamic and take-profit order multipliers must be positive.");
+        }
+
+        if (_gridOptions.AutoRecenterEnabled &&
+            (_gridOptions.AutoRecenterLookbackCandles < 5 ||
+             _gridOptions.AutoRecenterMinShiftSteps <= 0 ||
+             _gridOptions.AutoRecenterPaddingSteps < 0))
+        {
+            throw new InvalidOperationException("Auto-recenter settings are invalid.");
         }
 
         if (_appOptions.TradingMode is TradingMode.Testnet or TradingMode.Mainnet &&
@@ -953,6 +1145,16 @@ public sealed class GridBotWorker : BackgroundService
 
     private static bool IsManagedOrder(string orderLinkId) =>
         orderLinkId.StartsWith("gb", StringComparison.OrdinalIgnoreCase);
+
+    private static decimal FloorToStep(decimal value, decimal step)
+    {
+        return decimal.Round(Math.Floor(value / step) * step, 8, MidpointRounding.ToZero);
+    }
+
+    private static decimal CeilingToStep(decimal value, decimal step)
+    {
+        return decimal.Round(Math.Ceiling(value / step) * step, 8, MidpointRounding.AwayFromZero);
+    }
 
     private static TradeSide ParseSide(string side) =>
         Enum.TryParse<TradeSide>(side, true, out var parsed) ? parsed : TradeSide.Buy;
