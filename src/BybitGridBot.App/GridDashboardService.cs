@@ -1779,11 +1779,11 @@ public sealed class GridDashboardService : IGridDashboardService
     {
         return strategyType switch
         {
-            TradingStrategyType.Dca => new OrderSourceContext("DCA", "DCA", "DCA"),
-            TradingStrategyType.Btd => new OrderSourceContext("BTD", "BTD", "BTD"),
+            TradingStrategyType.Dca => new OrderSourceContext("Managed", "DCA", "DCA"),
+            TradingStrategyType.Btd => new OrderSourceContext("Managed", "BTD", "BTD"),
             TradingStrategyType.Combo => new OrderSourceContext("Combo-Grid", "Combo-DCA", "Combo-BTD"),
             TradingStrategyType.Signal => new OrderSourceContext("Managed", "DCA", "BTD"),
-            TradingStrategyType.NoTrade => new OrderSourceContext("NoTrade", "DCA", "BTD"),
+            TradingStrategyType.NoTrade => new OrderSourceContext("Managed", "DCA", "BTD"),
             _ => new OrderSourceContext("Grid", "DCA", "BTD")
         };
     }

@@ -209,11 +209,7 @@ public sealed class GridBotWorker : BackgroundService
              previousSettings is null ||
              !RuntimeGridOptionsFactory.IsSameTradingConfiguration(previousSettings, profile)))
         {
-            var activeOrders = await _repository.GetActiveOrdersAsync(_gridOptions.Symbol, cancellationToken);
-            foreach (var order in activeOrders)
-            {
-                await CancelManagedOrderAsync(order, cancellationToken);
-            }
+            await ReconcileActiveOrdersForRuntimeSettingsChangeAsync(profile, cancellationToken);
 
             _logger.LogInformation(
                 "Runtime grid settings updated. Symbol: {Symbol}, Range: {LowerPrice}-{UpperPrice}, Step: {Step}",
@@ -273,6 +269,71 @@ public sealed class GridBotWorker : BackgroundService
         }
 
         await RunCycleAsync(state, levels, instrument, null, cancellationToken);
+    }
+
+    private async Task ReconcileActiveOrdersForRuntimeSettingsChangeAsync(
+        GridBotSettings newProfile,
+        CancellationToken cancellationToken)
+    {
+        var activeOrders = await _repository.GetActiveOrdersAsync(_gridOptions.Symbol, cancellationToken);
+        if (!ShouldPreserveProfitableSellOrdersOnAutoSwitch(newProfile))
+        {
+            foreach (var order in activeOrders)
+            {
+                await CancelManagedOrderAsync(order, cancellationToken);
+            }
+
+            return;
+        }
+
+        var state = await _repository.GetBotStateAsync(_gridOptions.Symbol, cancellationToken);
+        foreach (var order in activeOrders)
+        {
+            if (state is not null &&
+                await ShouldPreserveProfitableSellOrderAsync(newProfile, state, order, cancellationToken))
+            {
+                _logger.LogInformation(
+                    "Preserved profitable sell order {OrderLinkId} during auto switch to {StrategyType}. Price: {Price}, average entry: {AverageEntryPrice}",
+                    order.OrderLinkId,
+                    newProfile.StrategyType,
+                    order.Price,
+                    state.AverageEntryPrice);
+                continue;
+            }
+
+            await CancelManagedOrderAsync(order, cancellationToken);
+        }
+    }
+
+    private static bool ShouldPreserveProfitableSellOrdersOnAutoSwitch(GridBotSettings newProfile)
+    {
+        return newProfile.StrategySelectionMode == StrategySelectionMode.Auto &&
+            newProfile.StrategyType is TradingStrategyType.Btd
+                or TradingStrategyType.NoTrade
+                or TradingStrategyType.Signal;
+    }
+
+    private async Task<bool> ShouldPreserveProfitableSellOrderAsync(
+        GridBotSettings profile,
+        BotState state,
+        GridOrder order,
+        CancellationToken cancellationToken)
+    {
+        if (!order.IsActive ||
+            order.Side != TradeSide.Sell ||
+            order.Quantity <= order.FilledQuantity ||
+            state.AverageEntryPrice <= 0m ||
+            order.Price <= state.AverageEntryPrice)
+        {
+            return false;
+        }
+
+        return await HasMinimumNetProfitForOrderAsync(
+            profile,
+            state,
+            order,
+            order.Quantity - order.FilledQuantity,
+            cancellationToken);
     }
 
     private async Task<GridBotSettings> TryApplyTimedAutoRecommendationAsync(

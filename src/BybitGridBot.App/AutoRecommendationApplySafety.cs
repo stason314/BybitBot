@@ -97,6 +97,11 @@ internal static class AutoRecommendationApplySafety
             return false;
         }
 
+        if (PreservesProfitableSellOrders(recommendedSettings))
+        {
+            return false;
+        }
+
         var recommendedSellPrices = recommendedSettings.StrategyType is TradingStrategyType.Grid or TradingStrategyType.Combo
             ? BuildRecommendedSellPrices(recommendedSettings, state, strategy)
             : [];
@@ -104,6 +109,14 @@ internal static class AutoRecommendationApplySafety
 
         return profitableSellOrders.Any(order =>
             recommendedSellPrices.All(price => Math.Abs(price - order.Price) > tolerance));
+    }
+
+    private static bool PreservesProfitableSellOrders(GridBotSettings recommendedSettings)
+    {
+        return recommendedSettings.StrategySelectionMode == StrategySelectionMode.Auto &&
+            recommendedSettings.StrategyType is TradingStrategyType.Btd
+                or TradingStrategyType.NoTrade
+                or TradingStrategyType.Signal;
     }
 
     private static IReadOnlyList<decimal> BuildRecommendedSellPrices(
