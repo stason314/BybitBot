@@ -68,6 +68,8 @@ public sealed class SqliteGridRepository : IGridRepository
                 settings_id TEXT NOT NULL PRIMARY KEY,
                 symbol TEXT NOT NULL,
                 category TEXT NOT NULL,
+                strategy_selection_mode TEXT NOT NULL DEFAULT 'Manual',
+                strategy_type TEXT NOT NULL DEFAULT 'Grid',
                 lower_price TEXT NOT NULL,
                 upper_price TEXT NOT NULL,
                 step TEXT NOT NULL,
@@ -88,13 +90,15 @@ public sealed class SqliteGridRepository : IGridRepository
         await using var command = connection.CreateCommand();
         command.CommandText = sql;
         await command.ExecuteNonQueryAsync(cancellationToken);
+        await EnsureColumnAsync(connection, "runtime_settings", "strategy_selection_mode", "TEXT NOT NULL DEFAULT 'Manual'", cancellationToken);
+        await EnsureColumnAsync(connection, "runtime_settings", "strategy_type", "TEXT NOT NULL DEFAULT 'Grid'", cancellationToken);
         _logger.LogInformation("SQLite repository initialized.");
     }
 
     public async Task<GridBotSettings?> GetRuntimeSettingsAsync(CancellationToken cancellationToken)
     {
         const string sql = """
-            SELECT symbol, category, lower_price, upper_price, step, order_size_usdt, stop_lower_price, stop_upper_price, updated_at
+            SELECT symbol, category, strategy_selection_mode, strategy_type, lower_price, upper_price, step, order_size_usdt, stop_lower_price, stop_upper_price, updated_at
             FROM runtime_settings
             ORDER BY symbol
             LIMIT 1;
@@ -116,7 +120,7 @@ public sealed class SqliteGridRepository : IGridRepository
     public async Task<GridBotSettings?> GetRuntimeSettingsAsync(string symbol, CancellationToken cancellationToken)
     {
         const string sql = """
-            SELECT symbol, category, lower_price, upper_price, step, order_size_usdt, stop_lower_price, stop_upper_price, updated_at
+            SELECT symbol, category, strategy_selection_mode, strategy_type, lower_price, upper_price, step, order_size_usdt, stop_lower_price, stop_upper_price, updated_at
             FROM runtime_settings
             WHERE settings_id = $settings_id
             LIMIT 1;
@@ -139,7 +143,7 @@ public sealed class SqliteGridRepository : IGridRepository
     public async Task<IReadOnlyList<GridBotSettings>> GetRuntimeSettingsProfilesAsync(CancellationToken cancellationToken)
     {
         const string sql = """
-            SELECT symbol, category, lower_price, upper_price, step, order_size_usdt, stop_lower_price, stop_upper_price, updated_at
+            SELECT symbol, category, strategy_selection_mode, strategy_type, lower_price, upper_price, step, order_size_usdt, stop_lower_price, stop_upper_price, updated_at
             FROM runtime_settings
             ORDER BY symbol;
             """;
@@ -162,14 +166,16 @@ public sealed class SqliteGridRepository : IGridRepository
     {
         const string sql = """
             INSERT INTO runtime_settings (
-                settings_id, symbol, category, lower_price, upper_price, step, order_size_usdt, stop_lower_price, stop_upper_price, updated_at
+                settings_id, symbol, category, strategy_selection_mode, strategy_type, lower_price, upper_price, step, order_size_usdt, stop_lower_price, stop_upper_price, updated_at
             )
             VALUES (
-                $settings_id, $symbol, $category, $lower_price, $upper_price, $step, $order_size_usdt, $stop_lower_price, $stop_upper_price, $updated_at
+                $settings_id, $symbol, $category, $strategy_selection_mode, $strategy_type, $lower_price, $upper_price, $step, $order_size_usdt, $stop_lower_price, $stop_upper_price, $updated_at
             )
             ON CONFLICT(settings_id) DO UPDATE SET
                 symbol = excluded.symbol,
                 category = excluded.category,
+                strategy_selection_mode = excluded.strategy_selection_mode,
+                strategy_type = excluded.strategy_type,
                 lower_price = excluded.lower_price,
                 upper_price = excluded.upper_price,
                 step = excluded.step,
@@ -185,6 +191,8 @@ public sealed class SqliteGridRepository : IGridRepository
         command.Parameters.AddWithValue("$settings_id", settings.Symbol);
         command.Parameters.AddWithValue("$symbol", settings.Symbol);
         command.Parameters.AddWithValue("$category", settings.Category);
+        command.Parameters.AddWithValue("$strategy_selection_mode", settings.StrategySelectionMode.ToString());
+        command.Parameters.AddWithValue("$strategy_type", settings.StrategyType.ToString());
         command.Parameters.AddWithValue("$lower_price", FormatDecimal(settings.LowerPrice));
         command.Parameters.AddWithValue("$upper_price", FormatDecimal(settings.UpperPrice));
         command.Parameters.AddWithValue("$step", FormatDecimal(settings.Step));
@@ -489,13 +497,15 @@ public sealed class SqliteGridRepository : IGridRepository
         {
             Symbol = reader.GetString(0),
             Category = reader.GetString(1),
-            LowerPrice = ParseDecimal(reader.GetString(2)),
-            UpperPrice = ParseDecimal(reader.GetString(3)),
-            Step = ParseDecimal(reader.GetString(4)),
-            OrderSizeUsdt = ParseDecimal(reader.GetString(5)),
-            StopLowerPrice = ParseDecimal(reader.GetString(6)),
-            StopUpperPrice = ParseDecimal(reader.GetString(7)),
-            UpdatedAt = DateTimeOffset.Parse(reader.GetString(8), CultureInfo.InvariantCulture)
+            StrategySelectionMode = ParseEnum(reader.GetString(2), StrategySelectionMode.Manual),
+            StrategyType = ParseEnum(reader.GetString(3), TradingStrategyType.Grid),
+            LowerPrice = ParseDecimal(reader.GetString(4)),
+            UpperPrice = ParseDecimal(reader.GetString(5)),
+            Step = ParseDecimal(reader.GetString(6)),
+            OrderSizeUsdt = ParseDecimal(reader.GetString(7)),
+            StopLowerPrice = ParseDecimal(reader.GetString(8)),
+            StopUpperPrice = ParseDecimal(reader.GetString(9)),
+            UpdatedAt = DateTimeOffset.Parse(reader.GetString(10), CultureInfo.InvariantCulture)
         };
     }
 
@@ -538,7 +548,43 @@ public sealed class SqliteGridRepository : IGridRepository
         return connection;
     }
 
+    private static async Task EnsureColumnAsync(
+        SqliteConnection connection,
+        string tableName,
+        string columnName,
+        string columnDefinition,
+        CancellationToken cancellationToken)
+    {
+        var hasColumn = false;
+        await using (var pragmaCommand = connection.CreateCommand())
+        {
+            pragmaCommand.CommandText = $"PRAGMA table_info({tableName});";
+            await using var reader = await pragmaCommand.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                if (string.Equals(reader.GetString(1), columnName, StringComparison.OrdinalIgnoreCase))
+                {
+                    hasColumn = true;
+                    break;
+                }
+            }
+        }
+
+        if (hasColumn)
+        {
+            return;
+        }
+
+        await using var alterCommand = connection.CreateCommand();
+        alterCommand.CommandText = $"ALTER TABLE {tableName} ADD COLUMN {columnName} {columnDefinition};";
+        await alterCommand.ExecuteNonQueryAsync(cancellationToken);
+    }
+
     private static string FormatDecimal(decimal value) => value.ToString(CultureInfo.InvariantCulture);
 
     private static decimal ParseDecimal(string value) => decimal.Parse(value, CultureInfo.InvariantCulture);
+
+    private static TEnum ParseEnum<TEnum>(string value, TEnum fallback)
+        where TEnum : struct, Enum =>
+        Enum.TryParse<TEnum>(value, true, out var parsed) ? parsed : fallback;
 }

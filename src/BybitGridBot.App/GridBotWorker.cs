@@ -22,7 +22,7 @@ public sealed class GridBotWorker : BackgroundService
     private readonly IGridRepository _repository;
     private readonly RiskManager _riskManager;
     private readonly RiskOptions _riskOptions;
-    private readonly GridStrategy _strategy;
+    private readonly IGridTradingStrategy _strategy;
     private readonly Dictionary<string, CachedFeeRate> _feeRates = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, GridOptions> _runningProfiles = new(StringComparer.OrdinalIgnoreCase);
     private GridOptions _gridOptions;
@@ -35,7 +35,7 @@ public sealed class GridBotWorker : BackgroundService
         IOptions<GridOptions> gridOptions,
         IOptions<RiskOptions> riskOptions,
         IBybitRestClient bybitRestClient,
-        GridStrategy strategy,
+        IGridTradingStrategy strategy,
         RiskManager riskManager,
         MarketRegimeFilter marketRegimeFilter,
         IGridRepository repository,

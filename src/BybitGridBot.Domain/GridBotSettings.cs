@@ -6,6 +6,10 @@ public sealed class GridBotSettings
 
     public string Category { get; init; } = "spot";
 
+    public StrategySelectionMode StrategySelectionMode { get; init; } = StrategySelectionMode.Manual;
+
+    public TradingStrategyType StrategyType { get; init; } = TradingStrategyType.Grid;
+
     public decimal LowerPrice { get; init; }
 
     public decimal UpperPrice { get; init; }

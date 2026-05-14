@@ -36,7 +36,8 @@ builder.Services.AddOptions<RiskOptions>().Bind(builder.Configuration);
 builder.Services.AddOptions<TelegramOptions>().Bind(builder.Configuration);
 
 builder.Services.AddSingleton<BybitSigner>();
-builder.Services.AddSingleton<GridStrategy>();
+builder.Services.AddSingleton<IGridTradingStrategy, GridStrategy>();
+builder.Services.AddSingleton<ITradingStrategy>(serviceProvider => serviceProvider.GetRequiredService<IGridTradingStrategy>());
 builder.Services.AddSingleton<RiskManager>();
 builder.Services.AddSingleton<MarketRegimeFilter>();
 builder.Services.AddSingleton<IGridDashboardService, GridDashboardService>();

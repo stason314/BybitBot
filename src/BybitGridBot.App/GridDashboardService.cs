@@ -22,14 +22,14 @@ public sealed class GridDashboardService : IGridDashboardService
     private readonly GridOptions _defaultGridOptions;
     private readonly IBybitRestClient _bybitRestClient;
     private readonly IGridRepository _repository;
-    private readonly GridStrategy _strategy;
+    private readonly IGridTradingStrategy _strategy;
 
     public GridDashboardService(
         IOptions<AppOptions> appOptions,
         IOptions<GridOptions> defaultGridOptions,
         IBybitRestClient bybitRestClient,
         IGridRepository repository,
-        GridStrategy strategy)
+        IGridTradingStrategy strategy)
     {
         _appOptions = appOptions.Value;
         _defaultGridOptions = defaultGridOptions.Value;

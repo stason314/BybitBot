@@ -2,8 +2,12 @@ using BybitGridBot.Domain;
 
 namespace BybitGridBot.Strategy;
 
-public sealed class GridStrategy
+public sealed class GridStrategy : IGridTradingStrategy
 {
+    public TradingStrategyType Type => TradingStrategyType.Grid;
+
+    public string DisplayName => "Grid";
+
     public IReadOnlyList<GridLevel> BuildGrid(GridOptions options)
     {
         if (options.LowerPrice >= options.UpperPrice)
