@@ -66,6 +66,36 @@ public sealed class AutoStrategySelectorTests
         Assert.Contains("dipPercent", recommendation.StrategyConfigJson);
     }
 
+    [Fact]
+    public void Recommend_ReturnsNoTrade_ForDangerRegime()
+    {
+        var selector = new AutoStrategySelector();
+        var options = new GridOptions
+        {
+            LowerPrice = 2.0m,
+            UpperPrice = 2.2m,
+            Step = 0.01m,
+            OrderSizeUsdt = 20m,
+            StopLowerPrice = 1.9m,
+            StopUpperPrice = 2.3m
+        };
+        var candles = BuildCandles(2.10m, 2.20m, 2.00m, 30);
+
+        var recommendation = selector.Recommend(
+            options,
+            new MarketRegimeAnalysis
+            {
+                Regime = MarketRegimeType.Danger,
+                Recommendation = "Danger",
+                Support = 2.0m,
+                Resistance = 2.2m
+            },
+            candles);
+
+        Assert.Equal(TradingStrategyType.NoTrade, recommendation.StrategyType);
+        Assert.Equal("{}", recommendation.StrategyConfigJson);
+    }
+
     private static IReadOnlyList<Candle> BuildCandles(decimal open, decimal high, decimal low, int count)
     {
         var now = DateTimeOffset.UtcNow;

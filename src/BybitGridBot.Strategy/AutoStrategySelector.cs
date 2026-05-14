@@ -44,27 +44,27 @@ public sealed class AutoStrategySelector
         return regime.Regime switch
         {
             MarketRegimeType.Danger => Build(
-                TradingStrategyType.Btd,
-                "Danger regime. Use BTD only for controlled dip entries; avoid broad grid buys.",
+                TradingStrategyType.NoTrade,
+                "Danger regime. Do not open new orders until volatility cools down.",
                 lower,
                 upper,
                 step,
-                orderSize * 0.5m,
+                5m,
                 stopLower,
                 stopUpper,
-                BuildBtdConfig(orderSize * 0.5m, drawdownPercent, lastPrice, stopLower, stopUpper),
+                "{}",
                 metrics),
 
             MarketRegimeType.Breakout => Build(
-                TradingStrategyType.Combo,
-                "Breakout-like move. Use wider Combo and let DCA activate only below support.",
+                TradingStrategyType.NoTrade,
+                "Breakout-like move. Wait for confirmation before opening new grid or dip orders.",
                 lower,
                 upper,
                 step,
-                orderSize * 0.75m,
+                5m,
                 stopLower,
                 stopUpper,
-                BuildComboConfig(orderSize * 0.75m, lower),
+                "{}",
                 metrics),
 
             MarketRegimeType.Trend when regime.MovePercent < 0m => Build(

@@ -225,6 +225,13 @@ public sealed class GridBotWorker : BackgroundService
 
         var instrument = await _bybitRestClient.GetInstrumentInfoAsync(_gridOptions.Category, _gridOptions.Symbol, cancellationToken);
         var state = await EnsureBotStateAsync(cancellationToken);
+        if (profile.StrategyType == TradingStrategyType.NoTrade)
+        {
+            await _repository.SaveGridLevelsAsync(_gridOptions.Symbol, [], cancellationToken);
+            await RunNoTradeCycleAsync(state, cancellationToken);
+            return;
+        }
+
         if (profile.StrategyType == TradingStrategyType.Dca)
         {
             await _repository.SaveGridLevelsAsync(_gridOptions.Symbol, [], cancellationToken);
@@ -247,6 +254,34 @@ public sealed class GridBotWorker : BackgroundService
         }
 
         await RunCycleAsync(state, levels, instrument, null, cancellationToken);
+    }
+
+    private async Task<BotState> RunNoTradeCycleAsync(
+        BotState state,
+        CancellationToken cancellationToken)
+    {
+        ResetDailyPnlIfNeeded(state);
+
+        var ticker = await _bybitRestClient.GetTickerAsync(_gridOptions.Category, _gridOptions.Symbol, cancellationToken);
+        var currentPrice = ticker.LastPrice;
+        state.LastObservedPrice = currentPrice;
+        state.UpdatedAt = DateTimeOffset.UtcNow;
+
+        _logger.LogInformation("NoTrade mode active for {Symbol}. Current price: {Price}. No new orders will be created.", _gridOptions.Symbol, currentPrice);
+
+        if (_appOptions.TradingMode == TradingMode.Paper)
+        {
+            await SimulatePaperFillsAsync(state, [], null, currentPrice, cancellationToken);
+        }
+        else
+        {
+            await SynchronizeLiveOrdersAsync(state, [], null, cancellationToken);
+        }
+
+        state.IsInitialized = true;
+        state.UpdatedAt = DateTimeOffset.UtcNow;
+        await _repository.SaveBotStateAsync(state, cancellationToken);
+        return state;
     }
 
     private async Task<BotState> RunDcaCycleAsync(

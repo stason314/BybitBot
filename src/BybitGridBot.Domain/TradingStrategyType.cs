@@ -5,5 +5,6 @@ public enum TradingStrategyType
     Grid,
     Dca,
     Combo,
-    Btd
+    Btd,
+    NoTrade
 }

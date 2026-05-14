@@ -19,6 +19,7 @@ Current baseline:
 - `TradingStrategyType.Dca` is supported as a first additional strategy;
 - `TradingStrategyType.Combo` runs grid first and enables DCA accumulation below a configured trigger;
 - `TradingStrategyType.Btd` buys sharp dips only when market regime is not danger;
+- `TradingStrategyType.NoTrade` syncs state and fills but creates no new orders;
 - `StrategySelectionMode.Manual` is the default runtime mode;
 - runtime settings persist strategy mode/type/config JSON so future UI and auto-selection can be added without another schema break.
 
@@ -76,6 +77,8 @@ If `dcaBelowPrice` is omitted, `Combo` starts DCA when price is at or below `Gri
 ```
 
 `Btd` skips new entries when `MarketRegimeAnalyzer` returns `Danger`. Runtime `Stop Lower` and `Stop Upper` remain hard entry boundaries.
+
+`NoTrade` is a safety strategy for auto mode. It keeps market/state synchronization running, including paper/live fill processing for existing orders, but does not create new orders.
 
 Next steps:
 1. Move remaining grid order-planning details fully behind strategy implementations.
