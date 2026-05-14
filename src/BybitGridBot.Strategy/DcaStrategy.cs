@@ -51,7 +51,7 @@ public sealed class DcaStrategy : ITradingStrategy
 
         var lookback = Math.Max(1, config.DipLookbackCandles);
         var high = candles
-            .OrderByDescending(candle => candle.StartTime)
+            .OrderByDescending(candle => candle.OpenTime)
             .Take(lookback)
             .Max(candle => candle.High);
         if (high <= 0m)
