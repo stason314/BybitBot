@@ -15,13 +15,30 @@ Strategy responsibilities:
 - avoid owning storage, exchange clients, or notification plumbing.
 
 Current baseline:
-- `TradingStrategyType.Grid` is the only supported strategy;
+- `TradingStrategyType.Grid` is the default strategy;
+- `TradingStrategyType.Dca` is supported as a first additional strategy;
 - `StrategySelectionMode.Manual` is the default runtime mode;
 - runtime settings persist strategy mode/type/config JSON so future UI and auto-selection can be added without another schema break.
 
+`Dca` strategy config lives in `StrategyConfigJson`:
+
+```json
+{
+  "orderSizeUsdt": 25,
+  "buyIntervalMinutes": 30,
+  "maxActiveBuyOrders": 1,
+  "takeProfitPercent": 1,
+  "limitOffsetPercent": 0.05,
+  "dipPercent": 0,
+  "dipLookbackCandles": 30,
+  "candleInterval": "1",
+  "maxPositionUsdt": 300
+}
+```
+
+For `Dca`, the existing runtime `Stop Lower` and `Stop Upper` fields act as hard trading boundaries. The bot creates periodic buy limits and places a parent-linked take-profit sell after each buy fill.
+
 Next steps:
-1. Move grid order-planning decisions behind a strategy decision interface.
-2. Add a market regime analyzer that produces range/trend/breakout/no-trade signals.
-3. Add dashboard controls for manual strategy selection.
-4. Add auto selector in paper mode first, initially switching only between `Grid` and `NoTrade`.
-5. Add adaptive grid and volume-breakout strategies as separate implementations.
+1. Move remaining grid order-planning details fully behind strategy implementations.
+2. Add auto selector in paper mode first, initially switching only between `Grid`, `Dca`, and `NoTrade`.
+3. Add adaptive grid, buy-the-dip, and volume-breakout strategies as separate implementations.

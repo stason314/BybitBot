@@ -72,4 +72,19 @@ internal static class RuntimeGridOptionsFactory
             && left.StopLowerPrice == right.StopLowerPrice
             && left.StopUpperPrice == right.StopUpperPrice;
     }
+
+    public static bool IsSameTradingConfiguration(GridBotSettings left, GridBotSettings right)
+    {
+        return string.Equals(left.Symbol, right.Symbol, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(left.Category, right.Category, StringComparison.OrdinalIgnoreCase)
+            && left.StrategySelectionMode == right.StrategySelectionMode
+            && left.StrategyType == right.StrategyType
+            && string.Equals(left.StrategyConfigJson, right.StrategyConfigJson, StringComparison.Ordinal)
+            && left.LowerPrice == right.LowerPrice
+            && left.UpperPrice == right.UpperPrice
+            && left.Step == right.Step
+            && left.OrderSizeUsdt == right.OrderSizeUsdt
+            && left.StopLowerPrice == right.StopLowerPrice
+            && left.StopUpperPrice == right.StopUpperPrice;
+    }
 }
