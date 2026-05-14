@@ -24,6 +24,7 @@ public sealed class GridBotWorker : BackgroundService
     private readonly GridOptions _defaultGridOptions;
     private readonly IBybitRestClient _bybitRestClient;
     private readonly ILogger<GridBotWorker> _logger;
+    private readonly MarketRegimeAnalyzer _marketRegimeAnalyzer;
     private readonly MarketRegimeFilter _marketRegimeFilter;
     private readonly ITelegramNotifier _notifier;
     private readonly IGridRepository _repository;
@@ -47,6 +48,7 @@ public sealed class GridBotWorker : BackgroundService
         DcaStrategy dcaStrategy,
         IGridTradingStrategy strategy,
         RiskManager riskManager,
+        MarketRegimeAnalyzer marketRegimeAnalyzer,
         MarketRegimeFilter marketRegimeFilter,
         IGridRepository repository,
         ITelegramNotifier notifier,
@@ -62,6 +64,7 @@ public sealed class GridBotWorker : BackgroundService
         _dcaStrategy = dcaStrategy;
         _strategy = strategy;
         _riskManager = riskManager;
+        _marketRegimeAnalyzer = marketRegimeAnalyzer;
         _marketRegimeFilter = marketRegimeFilter;
         _repository = repository;
         _notifier = notifier;
