@@ -43,6 +43,22 @@ public sealed class AutoStrategySelector
             LastPrice = lastPrice
         };
 
+        if (ShouldRecommendVolatileRange(regime, signal, atrPercent))
+        {
+            var comboOrderSize = RecommendActiveOrderSize(currentOptions, orderSize);
+            return Build(
+                TradingStrategyType.Combo,
+                "Volatile range without danger. Prefer active Combo so grid captures oscillations and DCA handles lower pullbacks.",
+                lower,
+                upper,
+                step,
+                comboOrderSize,
+                stopLower,
+                stopUpper,
+                BuildComboConfig(comboOrderSize, currentOptions.MinOrderSizeUsdt, lower),
+                metrics);
+        }
+
         if (ShouldRecommendSignalBot(regime, signal))
         {
             var signalOrderSize = decimal.Max(currentOptions.MinOrderSizeUsdt, orderSize * 0.75m);
@@ -61,7 +77,7 @@ public sealed class AutoStrategySelector
 
         if (ShouldRecommendDipStrategy(regime, signal, drawdownPercent))
         {
-            var dipOrderSize = decimal.Max(currentOptions.MinOrderSizeUsdt, orderSize * 0.6m);
+            var dipOrderSize = RecommendActiveOrderSize(currentOptions, orderSize * 0.6m);
             if (regime.MovePercent < 0m || drawdownPercent >= 1m)
             {
                 return Build(
@@ -122,10 +138,10 @@ public sealed class AutoStrategySelector
                 lower,
                 upper,
                 step,
-                decimal.Max(currentOptions.MinOrderSizeUsdt, orderSize * 0.6m),
+                RecommendActiveOrderSize(currentOptions, orderSize * 0.6m),
                 stopLower,
                 stopUpper,
-                BuildBtdConfig(orderSize * 0.6m, currentOptions.MinOrderSizeUsdt, drawdownPercent, lastPrice, stopLower, stopUpper),
+                BuildBtdConfig(RecommendActiveOrderSize(currentOptions, orderSize * 0.6m), currentOptions.MinOrderSizeUsdt, drawdownPercent, lastPrice, stopLower, stopUpper),
                 metrics),
 
             MarketRegimeType.Trend => Build(
@@ -134,10 +150,10 @@ public sealed class AutoStrategySelector
                 lower,
                 upper,
                 step,
-                decimal.Max(currentOptions.MinOrderSizeUsdt, orderSize * 0.75m),
+                RecommendActiveOrderSize(currentOptions, orderSize * 0.75m),
                 stopLower,
                 stopUpper,
-                BuildComboConfig(orderSize * 0.75m, currentOptions.MinOrderSizeUsdt, lower),
+                BuildComboConfig(RecommendActiveOrderSize(currentOptions, orderSize * 0.75m), currentOptions.MinOrderSizeUsdt, lower),
                 metrics),
 
             MarketRegimeType.LowVolatility => Build(
@@ -230,6 +246,22 @@ public sealed class AutoStrategySelector
             regime.Regime is MarketRegimeType.Breakout or MarketRegimeType.Trend;
     }
 
+    private static bool ShouldRecommendVolatileRange(
+        MarketRegimeAnalysis regime,
+        SignalAnalysis signal,
+        decimal atrPercent)
+    {
+        if (regime.Regime is MarketRegimeType.Danger or MarketRegimeType.LowVolatility)
+        {
+            return false;
+        }
+
+        return regime.RangePercent >= 1.5m &&
+            Math.Abs(regime.MovePercent) <= 1.5m &&
+            atrPercent >= 0.15m &&
+            signal.VolumeRatio < 2.5m;
+    }
+
     private static bool ShouldRecommendDipStrategy(
         MarketRegimeAnalysis regime,
         SignalAnalysis signal,
@@ -251,8 +283,8 @@ public sealed class AutoStrategySelector
         var config = new
         {
             orderSizeUsdt = decimal.Round(decimal.Max(minOrderSize, orderSize), 2, MidpointRounding.AwayFromZero),
-            buyIntervalMinutes = 30,
-            maxActiveBuyOrders = 1,
+            buyIntervalMinutes = 15,
+            maxActiveBuyOrders = 3,
             takeProfitPercent = 1m,
             limitOffsetPercent = 0.1m,
             dipPercent = 0.7m,
@@ -328,6 +360,11 @@ public sealed class AutoStrategySelector
         };
 
         return decimal.Max(options.MinOrderSizeUsdt, options.OrderSizeUsdt * multiplier);
+    }
+
+    private static decimal RecommendActiveOrderSize(GridOptions options, decimal baseOrderSize)
+    {
+        return decimal.Max(decimal.Max(options.MinOrderSizeUsdt, baseOrderSize), 20m);
     }
 
     private static decimal CalculateAtr(IReadOnlyList<Candle> candles)

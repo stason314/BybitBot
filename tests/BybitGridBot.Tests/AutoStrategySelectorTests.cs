@@ -107,7 +107,7 @@ public sealed class AutoStrategySelectorTests
             UpperPrice = 2.2m,
             Step = 0.01m,
             OrderSizeUsdt = 20m,
-            MinOrderSizeUsdt = 15m,
+            MinOrderSizeUsdt = 25m,
             StopLowerPrice = 1.9m,
             StopUpperPrice = 2.3m
         };
@@ -128,8 +128,8 @@ public sealed class AutoStrategySelectorTests
         using var config = JsonDocument.Parse(recommendation.StrategyConfigJson);
 
         Assert.Equal(TradingStrategyType.Combo, recommendation.StrategyType);
-        Assert.Equal(15m, recommendation.OrderSizeUsdt);
-        Assert.Equal(15m, config.RootElement.GetProperty("orderSizeUsdt").GetDecimal());
+        Assert.Equal(25m, recommendation.OrderSizeUsdt);
+        Assert.Equal(25m, config.RootElement.GetProperty("orderSizeUsdt").GetDecimal());
     }
 
     [Fact]
@@ -202,6 +202,45 @@ public sealed class AutoStrategySelectorTests
         Assert.Contains("dipPercent", recommendation.StrategyConfigJson);
     }
 
+    [Fact]
+    public void Recommend_ReturnsCombo_ForVolatileRangeWithoutDanger()
+    {
+        var selector = new AutoStrategySelector();
+        var options = new GridOptions
+        {
+            LowerPrice = 0.195m,
+            UpperPrice = 0.21m,
+            Step = 0.0005m,
+            OrderSizeUsdt = 15m,
+            MinOrderSizeUsdt = 15m,
+            StopLowerPrice = 0.19m,
+            StopUpperPrice = 0.215m
+        };
+        var candles = BuildVolatileRangeCandles();
+
+        var recommendation = selector.Recommend(
+            options,
+            new MarketRegimeAnalysis
+            {
+                Regime = MarketRegimeType.Breakout,
+                MovePercent = 0.4m,
+                RangePercent = 3.2m,
+                VolumeRatio = 1.7m,
+                Recommendation = "Volatile range",
+                Support = candles.Min(candle => candle.Low),
+                Resistance = candles.Max(candle => candle.High)
+            },
+            candles);
+
+        using var config = JsonDocument.Parse(recommendation.StrategyConfigJson);
+
+        Assert.Equal(TradingStrategyType.Combo, recommendation.StrategyType);
+        Assert.Contains("Volatile range", recommendation.Reason);
+        Assert.Equal(20m, recommendation.OrderSizeUsdt);
+        Assert.Equal(15, config.RootElement.GetProperty("buyIntervalMinutes").GetInt32());
+        Assert.Equal(3, config.RootElement.GetProperty("maxActiveBuyOrders").GetInt32());
+    }
+
     private static IReadOnlyList<Candle> BuildCandles(decimal open, decimal high, decimal low, int count)
     {
         var now = DateTimeOffset.UtcNow;
@@ -250,6 +289,25 @@ public sealed class AutoStrategySelectorTests
                     close,
                     close + 0.05m,
                     close - 0.05m,
+                    close,
+                    1000m,
+                    close * 1000m);
+            })
+            .ToArray();
+    }
+
+    private static IReadOnlyList<Candle> BuildVolatileRangeCandles()
+    {
+        var now = DateTimeOffset.UtcNow;
+        return Enumerable.Range(0, 45)
+            .Select(index =>
+            {
+                var close = 100m + (index % 6 - 2.5m) * 0.35m;
+                return new Candle(
+                    now.AddMinutes(index - 45),
+                    close,
+                    close + 0.25m,
+                    close - 0.25m,
                     close,
                     1000m,
                     close * 1000m);
