@@ -300,6 +300,7 @@ public sealed class GridBotWorker : BackgroundService
 
         var activeGridOrders = await _repository.GetActiveOrdersAsync(_gridOptions.Symbol, cancellationToken);
         activeGridOrders = await CancelUnprofitableSellOrdersAsync(state, activeGridOrders, cancellationToken);
+        activeGridOrders = await CancelCrossSideOrdersAtSameLevelAsync(activeGridOrders, cancellationToken);
         activeGridOrders = await ReduceBuyExposureAfterDailyTakeProfitAsync(state, activeGridOrders, cancellationToken);
         var wallet = _appOptions.TradingMode == TradingMode.Paper
             ? null
@@ -677,7 +678,8 @@ public sealed class GridBotWorker : BackgroundService
 
         foreach (var level in buyLevels)
         {
-            if (await _repository.GetActiveOrderAtLevelAsync(_gridOptions.Symbol, TradeSide.Buy, level.Price, cancellationToken) is not null)
+            if (HasActiveOrderAtLevel(activeOrders, level.Price) ||
+                await _repository.GetActiveOrderAtLevelAsync(_gridOptions.Symbol, TradeSide.Buy, level.Price, cancellationToken) is not null)
             {
                 continue;
             }
@@ -712,7 +714,8 @@ public sealed class GridBotWorker : BackgroundService
 
         foreach (var level in sellLevels)
         {
-            if (await _repository.GetActiveOrderAtLevelAsync(_gridOptions.Symbol, TradeSide.Sell, level.Price, cancellationToken) is not null)
+            if (HasActiveOrderAtLevel(activeOrders, level.Price) ||
+                await _repository.GetActiveOrderAtLevelAsync(_gridOptions.Symbol, TradeSide.Sell, level.Price, cancellationToken) is not null)
             {
                 continue;
             }
@@ -808,6 +811,31 @@ public sealed class GridBotWorker : BackgroundService
         return activeOrders.Where(order => order.IsActive).ToArray();
     }
 
+    private async Task<IReadOnlyCollection<GridOrder>> CancelCrossSideOrdersAtSameLevelAsync(
+        IReadOnlyCollection<GridOrder> activeOrders,
+        CancellationToken cancellationToken)
+    {
+        var conflictingGroups = activeOrders
+            .Where(order => order.IsActive)
+            .GroupBy(order => order.Price)
+            .Where(group => group.Any(order => order.Side == TradeSide.Buy) && group.Any(order => order.Side == TradeSide.Sell))
+            .ToArray();
+
+        foreach (var group in conflictingGroups)
+        {
+            foreach (var order in group)
+            {
+                await CancelManagedOrderAsync(order, cancellationToken);
+            }
+
+            _logger.LogInformation(
+                "Cancelled cross-side active orders at the same grid level {Price} to prevent fee churn.",
+                group.Key);
+        }
+
+        return activeOrders.Where(order => order.IsActive).ToArray();
+    }
+
     private async Task EnsureOppositeGridOrderAsync(
         BotState state,
         IReadOnlyList<GridLevel> levels,
@@ -833,7 +861,9 @@ public sealed class GridBotWorker : BackgroundService
             return;
         }
 
-        if (await _repository.GetActiveOrderAtLevelAsync(
+        var activeOrders = await _repository.GetActiveOrdersAsync(_gridOptions.Symbol, cancellationToken);
+        if (HasActiveOrderAtLevel(activeOrders, nextLevel.Price) ||
+            await _repository.GetActiveOrderAtLevelAsync(
                 _gridOptions.Symbol,
                 filledOrder.Side == TradeSide.Buy ? TradeSide.Sell : TradeSide.Buy,
                 nextLevel.Price,
@@ -842,7 +872,6 @@ public sealed class GridBotWorker : BackgroundService
             return;
         }
 
-        var activeOrders = await _repository.GetActiveOrdersAsync(_gridOptions.Symbol, cancellationToken);
         var wallet = _appOptions.TradingMode == TradingMode.Paper
             ? null
             : await _bybitRestClient.GetWalletBalanceAsync(cancellationToken, _quoteAsset, _baseAsset);
@@ -1098,6 +1127,9 @@ public sealed class GridBotWorker : BackgroundService
     }
 
     private decimal CalculateFee(decimal tradedNotional) => tradedNotional * (_gridOptions.FeePercent / 100m);
+
+    private static bool HasActiveOrderAtLevel(IEnumerable<GridOrder> activeOrders, decimal price) =>
+        activeOrders.Any(order => order.IsActive && order.Price == price);
 
     private void ValidateAccountConfiguration()
     {
