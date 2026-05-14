@@ -724,7 +724,12 @@ public sealed class GridBotWorker : BackgroundService
                 continue;
             }
 
-            var createdOrder = await PlaceOrderAsync(TradeSide.Buy, level.Price, quantity, null, cancellationToken);
+            var decision = new StrategyDecision
+            {
+                OrderIntents = [new OrderIntent(TradeSide.Buy, level.Price, quantity)]
+            };
+            var createdOrders = await ExecuteStrategyDecisionAsync(decision, cancellationToken);
+            var createdOrder = createdOrders[0];
             activeOrders = activeOrders.Append(createdOrder).ToArray();
         }
 
@@ -756,7 +761,12 @@ public sealed class GridBotWorker : BackgroundService
                 continue;
             }
 
-            var createdOrder = await PlaceOrderAsync(TradeSide.Sell, level.Price, quantity, null, cancellationToken);
+            var decision = new StrategyDecision
+            {
+                OrderIntents = [new OrderIntent(TradeSide.Sell, level.Price, quantity)]
+            };
+            var createdOrders = await ExecuteStrategyDecisionAsync(decision, cancellationToken);
+            var createdOrder = createdOrders[0];
             activeOrders = activeOrders.Append(createdOrder).ToArray();
         }
     }
@@ -957,13 +967,37 @@ public sealed class GridBotWorker : BackgroundService
             }
         }
 
-        await PlaceOrderAsync(
-            filledOrder.Side == TradeSide.Buy ? TradeSide.Sell : TradeSide.Buy,
-            nextLevel.Price,
-            quantity,
-            filledOrder.OrderLinkId,
+        await ExecuteStrategyDecisionAsync(
+            new StrategyDecision
+            {
+                OrderIntents =
+                [
+                    new OrderIntent(
+                        filledOrder.Side == TradeSide.Buy ? TradeSide.Sell : TradeSide.Buy,
+                        nextLevel.Price,
+                        quantity,
+                        filledOrder.OrderLinkId)
+                ]
+            },
             cancellationToken);
     }
+
+    private async Task<IReadOnlyList<GridOrder>> ExecuteStrategyDecisionAsync(
+        StrategyDecision decision,
+        CancellationToken cancellationToken)
+    {
+        var createdOrders = new List<GridOrder>();
+
+        foreach (var intent in decision.OrderIntents)
+        {
+            createdOrders.Add(await ExecuteOrderIntentAsync(intent, cancellationToken));
+        }
+
+        return createdOrders;
+    }
+
+    private Task<GridOrder> ExecuteOrderIntentAsync(OrderIntent intent, CancellationToken cancellationToken) =>
+        PlaceOrderAsync(intent.Side, intent.Price, intent.Quantity, intent.ParentOrderLinkId, cancellationToken);
 
     private async Task<GridOrder> PlaceOrderAsync(
         TradeSide side,
