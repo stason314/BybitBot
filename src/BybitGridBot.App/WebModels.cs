@@ -153,6 +153,8 @@ public sealed class DashboardOrderItem
 
     public required string Side { get; init; }
 
+    public required string Source { get; init; }
+
     public decimal Price { get; init; }
 
     public decimal Quantity { get; init; }

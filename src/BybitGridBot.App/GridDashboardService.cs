@@ -80,10 +80,11 @@ public sealed class GridDashboardService : IGridDashboardService
             levels = _strategy.BuildGrid(gridOptions);
         }
 
+        var orderSourceContext = ResolveOrderSourceContext(runtimeSettings.StrategyType);
         var orders = (await _repository.GetOrdersAsync(gridOptions.Symbol, cancellationToken))
             .OrderByDescending(order => order.CreatedAt)
             .Take(100)
-            .Select(MapOrder)
+            .Select(order => MapOrder(order, orderSourceContext))
             .ToArray();
         var activeOrders = orders
             .Where(order => order.Status is nameof(OrderStatus.New) or nameof(OrderStatus.PartiallyFilled))
@@ -918,7 +919,7 @@ public sealed class GridDashboardService : IGridDashboardService
         <div style="overflow:auto;">
           <table>
             <thead>
-              <tr><th>Side</th><th>Price</th><th>Qty</th><th>Filled</th><th>Status</th><th>Link</th></tr>
+              <tr><th>Source</th><th>Side</th><th>Price</th><th>Qty</th><th>Filled</th><th>Status</th><th>Link</th></tr>
             </thead>
             <tbody id="activeOrders"></tbody>
           </table>
@@ -935,7 +936,7 @@ public sealed class GridDashboardService : IGridDashboardService
         <table>
           <thead>
             <tr>
-              <th>Time</th><th>Side</th><th>Price</th><th>Qty</th><th>Filled</th><th>Status</th><th>Realized PnL</th><th>Fee</th><th>Order</th>
+              <th>Time</th><th>Source</th><th>Side</th><th>Price</th><th>Qty</th><th>Filled</th><th>Status</th><th>Realized PnL</th><th>Fee</th><th>Order</th>
             </tr>
           </thead>
           <tbody id="historyRows"></tbody>
@@ -1127,6 +1128,7 @@ public sealed class GridDashboardService : IGridDashboardService
         .map(order => [
           formatDate(order.filledAt || order.updatedAt || order.createdAt),
           order.symbol,
+          order.source,
           order.side,
           order.price,
           order.quantity,
@@ -1138,7 +1140,7 @@ public sealed class GridDashboardService : IGridDashboardService
         ]);
 
       return [
-        ['Time', 'Symbol', 'Side', 'Price', 'Qty', 'Filled', 'Status', 'Realized PnL', 'Fee', 'Order'],
+        ['Time', 'Symbol', 'Source', 'Side', 'Price', 'Qty', 'Filled', 'Status', 'Realized PnL', 'Fee', 'Order'],
         ...rows
       ].map(row => row.map(csvEscape).join(',')).join('\n');
     };
@@ -1255,9 +1257,10 @@ public sealed class GridDashboardService : IGridDashboardService
 
       byId('gridLevels').innerHTML = data.gridLevels.map(level => `<div class="grid-chip">${formatNumber(level)}</div>`).join('');
       byId('activeOrders').innerHTML = data.activeOrders.length === 0
-        ? `<tr><td colspan="6">No active orders.</td></tr>`
+        ? `<tr><td colspan="7">No active orders.</td></tr>`
         : data.activeOrders.map(order => `
             <tr>
+              <td>${order.source}</td>
               <td>${order.side}</td>
               <td>${formatNumber(order.price)}</td>
               <td>${formatNumber(order.quantity)}</td>
@@ -1267,10 +1270,11 @@ public sealed class GridDashboardService : IGridDashboardService
             </tr>`).join('');
 
       byId('historyRows').innerHTML = data.orders.length === 0
-        ? `<tr><td colspan="9">No orders yet.</td></tr>`
+        ? `<tr><td colspan="10">No orders yet.</td></tr>`
         : data.orders.map(order => `
             <tr>
               <td>${formatDate(order.filledAt || order.updatedAt || order.createdAt)}</td>
+              <td>${order.source}</td>
               <td>${order.side}</td>
               <td>${formatNumber(order.price)}</td>
               <td>${formatNumber(order.quantity)}</td>
@@ -1564,7 +1568,7 @@ public sealed class GridDashboardService : IGridDashboardService
     private static string? NormalizeOptionalSymbol(string? symbol) =>
         string.IsNullOrWhiteSpace(symbol) ? null : NormalizeSymbol(symbol);
 
-    private static DashboardOrderItem MapOrder(GridOrder order)
+    private static DashboardOrderItem MapOrder(GridOrder order, OrderSourceContext sourceContext)
     {
         return new DashboardOrderItem
         {
@@ -1572,6 +1576,7 @@ public sealed class GridDashboardService : IGridDashboardService
             BybitOrderId = order.BybitOrderId,
             Symbol = order.Symbol,
             Side = order.Side.ToString(),
+            Source = ResolveOrderSource(order, sourceContext),
             Price = order.Price,
             Quantity = order.Quantity,
             FilledQuantity = order.FilledQuantity,
@@ -1583,6 +1588,33 @@ public sealed class GridDashboardService : IGridDashboardService
             FilledAt = order.FilledAt
         };
     }
+
+    private static OrderSourceContext ResolveOrderSourceContext(TradingStrategyType strategyType)
+    {
+        return strategyType switch
+        {
+            TradingStrategyType.Dca => new OrderSourceContext("DCA", "DCA", "DCA"),
+            TradingStrategyType.Btd => new OrderSourceContext("BTD", "BTD", "BTD"),
+            TradingStrategyType.Combo => new OrderSourceContext("Combo", "Combo DCA", "Combo BTD"),
+            _ => new OrderSourceContext("Grid", "DCA", "BTD")
+        };
+    }
+
+    private static string ResolveOrderSource(GridOrder order, OrderSourceContext context)
+    {
+        return order.ParentOrderLinkId switch
+        {
+            "dca-entry" => context.DcaEntryLabel,
+            "btd-entry" => context.BtdEntryLabel,
+            null or "" => context.DefaultLabel,
+            _ => context.DefaultLabel
+        };
+    }
+
+    private sealed record OrderSourceContext(
+        string DefaultLabel,
+        string DcaEntryLabel,
+        string BtdEntryLabel);
 
     private static DashboardMarketRegime MapMarketRegime(MarketRegimeAnalysis analysis)
     {
