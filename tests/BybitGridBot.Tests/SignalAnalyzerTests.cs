@@ -1,5 +1,6 @@
 using BybitGridBot.Domain;
 using BybitGridBot.Strategy;
+using System.Text.Json;
 
 namespace BybitGridBot.Tests;
 
@@ -53,6 +54,31 @@ public sealed class SignalAnalyzerTests
         Assert.Equal(SignalType.Sell, result.Signal);
         Assert.True(result.Rsi >= 70m);
         Assert.True(result.BollingerPosition >= 0.75m);
+    }
+
+    [Fact]
+    public void SignalStrategyConfig_DeserializesRiskLimits()
+    {
+        var config = JsonSerializer.Deserialize<SignalStrategyConfig>(
+            """
+            {
+              "orderSizeUsdt": 20,
+              "cooldownMinutes": 15,
+              "minConfidence": 0.7,
+              "maxPositionUsdt": 300,
+              "stopLossPercent": 2,
+              "takeProfitPercent": 4
+            }
+            """,
+            new JsonSerializerOptions(JsonSerializerDefaults.Web));
+
+        Assert.NotNull(config);
+        Assert.Equal(20m, config.OrderSizeUsdt);
+        Assert.Equal(15, config.CooldownMinutes);
+        Assert.Equal(0.7m, config.MinConfidence);
+        Assert.Equal(300m, config.MaxPositionUsdt);
+        Assert.Equal(2m, config.StopLossPercent);
+        Assert.Equal(4m, config.TakeProfitPercent);
     }
 
     private static Candle BuildCandle(int index, decimal close, decimal volume)

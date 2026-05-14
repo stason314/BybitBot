@@ -6,5 +6,6 @@ public enum TradingStrategyType
     Dca,
     Combo,
     Btd,
+    Signal,
     NoTrade
 }

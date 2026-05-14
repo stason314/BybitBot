@@ -315,7 +315,7 @@ public sealed class GridDashboardService : IGridDashboardService
 
         if (strategyType is null)
         {
-            errors.Add("Strategy type must be grid, dca, combo, btd, or notrade.");
+            errors.Add("Strategy type must be grid, dca, combo, btd, signal, or notrade.");
         }
 
         if (strategyConfigJson is null)
@@ -925,7 +925,7 @@ public sealed class GridDashboardService : IGridDashboardService
           <div><label for="symbol">Symbol</label><input id="symbol" name="symbol" placeholder="BILLUSDT" required /></div>
           <div><label for="category">Category</label><input id="category" name="category" value="spot" required /></div>
           <div><label for="strategyMode">Strategy Mode</label><select id="strategyMode" name="strategyMode"><option value="manual">manual</option><option value="auto">auto</option></select></div>
-          <div><label for="strategyType">Strategy Type</label><select id="strategyType" name="strategyType"><option value="grid">Grid</option><option value="dca">DCA</option><option value="combo">Combo Grid + DCA</option><option value="btd">BTD Buy The Dip</option><option value="notrade">NoTrade</option></select></div>
+          <div><label for="strategyType">Strategy Type</label><select id="strategyType" name="strategyType"><option value="grid">Grid</option><option value="dca">DCA</option><option value="combo">Combo Grid + DCA</option><option value="btd">BTD Buy The Dip</option><option value="signal">Signal Bot</option><option value="notrade">NoTrade</option></select></div>
           <div><label for="lowerPrice">Grid Lower</label><input id="lowerPrice" name="lowerPrice" type="number" step="0.00000001" required /></div>
           <div><label for="upperPrice">Grid Upper</label><input id="upperPrice" name="upperPrice" type="number" step="0.00000001" required /></div>
           <div><label for="step">Grid Step</label><input id="step" name="step" type="number" step="0.00000001" required /></div>
@@ -1573,6 +1573,7 @@ public sealed class GridDashboardService : IGridDashboardService
             "dca" => TradingStrategyType.Dca,
             "combo" => TradingStrategyType.Combo,
             "btd" => TradingStrategyType.Btd,
+            "signal" or "signalbot" or "signal_bot" or "signal bot" => TradingStrategyType.Signal,
             "notrade" or "no_trade" or "no trade" => TradingStrategyType.NoTrade,
             _ => null
         };
@@ -1690,6 +1691,7 @@ public sealed class GridDashboardService : IGridDashboardService
             TradingStrategyType.Dca => new OrderSourceContext("DCA", "DCA", "DCA"),
             TradingStrategyType.Btd => new OrderSourceContext("BTD", "BTD", "BTD"),
             TradingStrategyType.Combo => new OrderSourceContext("Combo-Grid", "Combo-DCA", "Combo-BTD"),
+            TradingStrategyType.Signal => new OrderSourceContext("Signal", "DCA", "BTD"),
             TradingStrategyType.NoTrade => new OrderSourceContext("NoTrade", "DCA", "BTD"),
             _ => new OrderSourceContext("Grid", "DCA", "BTD")
         };
@@ -1701,6 +1703,7 @@ public sealed class GridDashboardService : IGridDashboardService
         {
             "dca-entry" => context.DcaEntryLabel,
             "btd-entry" => context.BtdEntryLabel,
+            "signal-entry" or "signal-exit" => "Signal",
             null or "" => context.DefaultLabel,
             _ => context.DefaultLabel
         };

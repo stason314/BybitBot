@@ -15,6 +15,8 @@ public sealed class GridBotWorker : BackgroundService
 {
     private const string BtdEntryMarker = "btd-entry";
     private const string DcaEntryMarker = "dca-entry";
+    private const string SignalEntryMarker = "signal-entry";
+    private const string SignalExitMarker = "signal-exit";
     private static readonly TimeSpan TimedAutoRecommendationApplyInterval = TimeSpan.FromMinutes(30);
     private static readonly JsonSerializerOptions StrategyJsonOptions = new(JsonSerializerDefaults.Web);
 
@@ -32,6 +34,7 @@ public sealed class GridBotWorker : BackgroundService
     private readonly IGridRepository _repository;
     private readonly RiskManager _riskManager;
     private readonly RiskOptions _riskOptions;
+    private readonly SignalAnalyzer _signalAnalyzer;
     private readonly IGridTradingStrategy _strategy;
     private readonly Dictionary<string, CachedFeeRate> _feeRates = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, DateTimeOffset> _lastTimedAutoApplyChecks = new(StringComparer.OrdinalIgnoreCase);
@@ -54,6 +57,7 @@ public sealed class GridBotWorker : BackgroundService
         RiskManager riskManager,
         MarketRegimeAnalyzer marketRegimeAnalyzer,
         MarketRegimeFilter marketRegimeFilter,
+        SignalAnalyzer signalAnalyzer,
         IGridRepository repository,
         ITelegramNotifier notifier,
         ILogger<GridBotWorker> logger)
@@ -71,6 +75,7 @@ public sealed class GridBotWorker : BackgroundService
         _riskManager = riskManager;
         _marketRegimeAnalyzer = marketRegimeAnalyzer;
         _marketRegimeFilter = marketRegimeFilter;
+        _signalAnalyzer = signalAnalyzer;
         _repository = repository;
         _notifier = notifier;
         _logger = logger;
@@ -250,6 +255,13 @@ public sealed class GridBotWorker : BackgroundService
         {
             await _repository.SaveGridLevelsAsync(_gridOptions.Symbol, [], cancellationToken);
             await RunBtdCycleAsync(profile, state, instrument, cancellationToken);
+            return;
+        }
+
+        if (profile.StrategyType == TradingStrategyType.Signal)
+        {
+            await _repository.SaveGridLevelsAsync(_gridOptions.Symbol, [], cancellationToken);
+            await RunSignalCycleAsync(profile, state, instrument, cancellationToken);
             return;
         }
 
@@ -577,6 +589,163 @@ public sealed class GridBotWorker : BackgroundService
         return state;
     }
 
+    private async Task<BotState> RunSignalCycleAsync(
+        GridBotSettings profile,
+        BotState state,
+        BybitInstrumentInfo instrument,
+        CancellationToken cancellationToken)
+    {
+        ResetDailyPnlIfNeeded(state);
+
+        var config = ParseSignalStrategyConfig(profile);
+        var ticker = await _bybitRestClient.GetTickerAsync(_gridOptions.Category, _gridOptions.Symbol, cancellationToken);
+        var currentPrice = ticker.LastPrice;
+        state.LastObservedPrice = currentPrice;
+        state.UpdatedAt = DateTimeOffset.UtcNow;
+
+        _logger.LogInformation("Current price for {Symbol}: {Price}", _gridOptions.Symbol, currentPrice);
+
+        if (_appOptions.TradingMode == TradingMode.Paper)
+        {
+            var activeOrders = await _repository.GetActiveOrdersAsync(_gridOptions.Symbol, cancellationToken);
+            if (await HandleStopConditionsAsync(state, currentPrice, activeOrders, cancellationToken))
+            {
+                await _repository.SaveBotStateAsync(state, cancellationToken);
+                return state;
+            }
+
+            await CleanSignalActiveOrdersAsync(state, activeOrders, cancellationToken);
+            await SimulatePaperFillsAsync(state, [], profile, currentPrice, cancellationToken);
+        }
+        else
+        {
+            await SynchronizeLiveOrdersAsync(state, [], profile, cancellationToken);
+            var activeOrders = await _repository.GetActiveOrdersAsync(_gridOptions.Symbol, cancellationToken);
+            if (await HandleStopConditionsAsync(state, currentPrice, activeOrders, cancellationToken))
+            {
+                await _repository.SaveBotStateAsync(state, cancellationToken);
+                return state;
+            }
+
+            await CleanSignalActiveOrdersAsync(state, activeOrders, cancellationToken);
+        }
+
+        if (state.IsPaused)
+        {
+            await _repository.SaveBotStateAsync(state, cancellationToken);
+            return state;
+        }
+
+        if (state.DailyRealizedPnl <= -_riskOptions.MaxDailyLossUsdt)
+        {
+            var activeOrders = await _repository.GetActiveOrdersAsync(_gridOptions.Symbol, cancellationToken);
+            await PauseTradingAsync(
+                state,
+                "Daily loss limit reached.",
+                activeOrders,
+                null,
+                "Daily loss limit reached. Trading paused.",
+                cancellationToken);
+            await _repository.SaveBotStateAsync(state, cancellationToken);
+            return state;
+        }
+
+        var candles = await _bybitRestClient.GetKlinesAsync(
+            _gridOptions.Category,
+            _gridOptions.Symbol,
+            string.IsNullOrWhiteSpace(config.CandleInterval) ? "1" : config.CandleInterval,
+            Math.Max(30, config.LookbackCandles),
+            cancellationToken);
+        var signal = _signalAnalyzer.Analyze(candles);
+        var refreshedActiveOrders = await _repository.GetActiveOrdersAsync(_gridOptions.Symbol, cancellationToken);
+        var wallet = _appOptions.TradingMode == TradingMode.Paper
+            ? null
+            : await _bybitRestClient.GetWalletBalanceAsync(cancellationToken, _quoteAsset, _baseAsset);
+
+        if (ShouldStopLoss(config, state, currentPrice))
+        {
+            await CancelActiveSignalBuyOrdersAsync(refreshedActiveOrders, cancellationToken);
+            await EnsureSignalSellOrderAsync(
+                config,
+                state,
+                instrument,
+                currentPrice,
+                refreshedActiveOrders,
+                wallet,
+                "stop-loss",
+                cancellationToken);
+        }
+        else if (ShouldTakeProfit(config, state, currentPrice) || signal.Signal == SignalType.Sell)
+        {
+            var isTakeProfit = ShouldTakeProfit(config, state, currentPrice);
+            if (!isTakeProfit && signal.Signal == SignalType.Sell && signal.Confidence < config.MinConfidence)
+            {
+                _logger.LogInformation(
+                    "Signal sell skipped because confidence {Confidence} is below minimum {MinConfidence}.",
+                    signal.Confidence,
+                    config.MinConfidence);
+            }
+            else
+            {
+                await CancelActiveSignalBuyOrdersAsync(refreshedActiveOrders, cancellationToken);
+                if (isTakeProfit ||
+                    !IsSignalCooldownActive(profile, config, DateTimeOffset.UtcNow, await _repository.GetOrdersAsync(_gridOptions.Symbol, cancellationToken)))
+                {
+                    await EnsureSignalSellOrderAsync(
+                        config,
+                        state,
+                        instrument,
+                        currentPrice,
+                        refreshedActiveOrders,
+                        wallet,
+                        isTakeProfit ? "take-profit" : "sell-signal",
+                        cancellationToken);
+                }
+            }
+        }
+        else if (signal.Signal == SignalType.Buy)
+        {
+            var allOrders = await _repository.GetOrdersAsync(_gridOptions.Symbol, cancellationToken);
+            if (signal.Confidence < config.MinConfidence)
+            {
+                _logger.LogInformation(
+                    "Signal buy skipped because confidence {Confidence} is below minimum {MinConfidence}.",
+                    signal.Confidence,
+                    config.MinConfidence);
+            }
+            else if (!IsSignalCooldownActive(profile, config, DateTimeOffset.UtcNow, allOrders))
+            {
+                await EnsureSignalBuyOrderAsync(
+                    config,
+                    state,
+                    instrument,
+                    currentPrice,
+                    refreshedActiveOrders,
+                    wallet,
+                    cancellationToken);
+            }
+        }
+        else
+        {
+            if (signal.Signal == SignalType.Avoid)
+            {
+                await CancelActiveSignalBuyOrdersAsync(refreshedActiveOrders, cancellationToken);
+            }
+
+            _logger.LogInformation(
+                "Signal strategy holds. Signal: {Signal}, Confidence: {Confidence}, Reason: {Reason}",
+                signal.Signal,
+                signal.Confidence,
+                signal.Reason);
+        }
+
+        state.IsInitialized = true;
+        state.UpdatedAt = DateTimeOffset.UtcNow;
+        await _repository.SaveBotStateAsync(state, cancellationToken);
+
+        return state;
+    }
+
     private async Task<BotState> RunComboCycleAsync(
         GridBotSettings profile,
         BotState state,
@@ -842,7 +1011,8 @@ public sealed class GridBotWorker : BackgroundService
                 continue;
             }
 
-            if (order.Side == TradeSide.Sell &&
+            if (profile?.StrategyType != TradingStrategyType.Signal &&
+                order.Side == TradeSide.Sell &&
                 !await HasMinimumNetProfitForOrderAsync(profile, state, order, remainingQuantity, cancellationToken))
             {
                 await CancelManagedOrderAsync(order, cancellationToken);
@@ -1353,6 +1523,118 @@ public sealed class GridBotWorker : BackgroundService
             profile.StrategyConfigJson);
     }
 
+    private async Task EnsureSignalBuyOrderAsync(
+        SignalStrategyConfig config,
+        BotState state,
+        BybitInstrumentInfo instrument,
+        decimal currentPrice,
+        IReadOnlyCollection<GridOrder> activeOrders,
+        BybitWalletBalance? wallet,
+        CancellationToken cancellationToken)
+    {
+        if (activeOrders.Any(order => order.IsActive && order.Side == TradeSide.Buy && IsSignalOrder(order)))
+        {
+            return;
+        }
+
+        var orderSizeUsdt = GetSignalOrderSizeUsdt(config, state);
+        var limitPrice = instrument.RoundPrice(CalculateSignalBuyPrice(currentPrice, config));
+        if (limitPrice <= 0m)
+        {
+            return;
+        }
+
+        var quantity = instrument.RoundQuantity(orderSizeUsdt / limitPrice);
+        if (quantity <= 0m || quantity < instrument.MinOrderQty)
+        {
+            return;
+        }
+
+        var riskOptions = new RiskOptions
+        {
+            MaxDailyLossUsdt = _riskOptions.MaxDailyLossUsdt,
+            MaxOpenOrders = _riskOptions.MaxOpenOrders,
+            MaxPositionUsdt = config.MaxPositionUsdt is > 0m ? config.MaxPositionUsdt.Value : _riskOptions.MaxPositionUsdt,
+            MinOrderSizeUsdt = _riskOptions.MinOrderSizeUsdt
+        };
+        var violations = _riskManager.ValidateOrderPlacement(
+            riskOptions,
+            _gridOptions,
+            state,
+            activeOrders,
+            currentPrice,
+            orderSizeUsdt,
+            instrument.MinOrderAmount,
+            GetAvailableQuoteBalance(state, activeOrders, wallet));
+
+        if (violations.Count > 0)
+        {
+            _logger.LogWarning("Signal buy order at {Price} skipped: {Violations}", limitPrice, string.Join(" | ", violations));
+            return;
+        }
+
+        await ExecuteStrategyDecisionAsync(
+            new StrategyDecision
+            {
+                OrderIntents = [new OrderIntent(TradeSide.Buy, limitPrice, quantity, SignalEntryMarker)]
+            },
+            cancellationToken);
+    }
+
+    private async Task EnsureSignalSellOrderAsync(
+        SignalStrategyConfig config,
+        BotState state,
+        BybitInstrumentInfo instrument,
+        decimal currentPrice,
+        IReadOnlyCollection<GridOrder> activeOrders,
+        BybitWalletBalance? wallet,
+        string reason,
+        CancellationToken cancellationToken)
+    {
+        if (activeOrders.Any(order => order.IsActive && order.Side == TradeSide.Sell && IsSignalOrder(order)))
+        {
+            return;
+        }
+
+        var availableBase = GetAvailableBaseBalance(state, activeOrders, wallet);
+        var quantity = instrument.RoundQuantity(availableBase);
+        if (quantity <= 0m || quantity < instrument.MinOrderQty)
+        {
+            _logger.LogInformation("Signal sell skipped because base asset inventory is insufficient.");
+            return;
+        }
+
+        var limitPrice = instrument.RoundPrice(CalculateSignalSellPrice(currentPrice, config));
+        if (limitPrice <= 0m)
+        {
+            return;
+        }
+
+        await ExecuteStrategyDecisionAsync(
+            new StrategyDecision
+            {
+                OrderIntents = [new OrderIntent(TradeSide.Sell, limitPrice, quantity, SignalExitMarker)]
+            },
+            cancellationToken);
+
+        _logger.LogInformation(
+            "Signal sell order created for {Symbol}. Reason: {Reason}, Price: {Price}, Quantity: {Quantity}",
+            _gridOptions.Symbol,
+            reason,
+            limitPrice,
+            quantity);
+    }
+
+    private async Task CancelActiveSignalBuyOrdersAsync(
+        IReadOnlyCollection<GridOrder> activeOrders,
+        CancellationToken cancellationToken)
+    {
+        foreach (var order in activeOrders.Where(order => order.IsActive && order.Side == TradeSide.Buy && IsSignalOrder(order)).ToArray())
+        {
+            await CancelManagedOrderAsync(order, cancellationToken);
+        }
+    }
+
     private async Task EnsureDcaTakeProfitOrderAsync(
         BotState state,
         DcaStrategyConfig config,
@@ -1424,6 +1706,17 @@ public sealed class GridBotWorker : BackgroundService
     }
 
     private async Task<IReadOnlyList<GridOrder>> CleanDcaActiveOrdersAsync(
+        BotState state,
+        IReadOnlyCollection<GridOrder> activeOrders,
+        CancellationToken cancellationToken)
+    {
+        var cleanedOrders = await CancelCrossSideOrdersAtSameLevelAsync(activeOrders, cancellationToken);
+        cleanedOrders = await ReduceBuyExposureAfterDailyTakeProfitAsync(state, cleanedOrders, cancellationToken);
+
+        return cleanedOrders.ToArray();
+    }
+
+    private async Task<IReadOnlyList<GridOrder>> CleanSignalActiveOrdersAsync(
         BotState state,
         IReadOnlyCollection<GridOrder> activeOrders,
         CancellationToken cancellationToken)
@@ -1842,6 +2135,73 @@ public sealed class GridBotWorker : BackgroundService
         return Math.Max(orderSize, 0m);
     }
 
+    private decimal GetSignalOrderSizeUsdt(SignalStrategyConfig config, BotState state)
+    {
+        var orderSize = config.OrderSizeUsdt is > 0m
+            ? config.OrderSizeUsdt.Value
+            : _gridOptions.OrderSizeUsdt;
+
+        if (_gridOptions.DailyTakeProfitUsdt > 0m &&
+            state.DailyRealizedPnl >= _gridOptions.DailyTakeProfitUsdt)
+        {
+            orderSize *= _gridOptions.DailyTakeProfitOrderMultiplier;
+        }
+
+        return Math.Max(orderSize, 0m);
+    }
+
+    private static decimal CalculateSignalBuyPrice(decimal currentPrice, SignalStrategyConfig config)
+    {
+        var offset = Math.Max(0m, config.LimitOffsetPercent) / 100m;
+        return currentPrice * (1m - offset);
+    }
+
+    private static decimal CalculateSignalSellPrice(decimal currentPrice, SignalStrategyConfig config)
+    {
+        var offset = Math.Max(0m, config.LimitOffsetPercent) / 100m;
+        return currentPrice * (1m - offset);
+    }
+
+    private static bool ShouldStopLoss(SignalStrategyConfig config, BotState state, decimal currentPrice)
+    {
+        if (state.BaseAssetQuantity <= 0m || state.AverageEntryPrice <= 0m || config.StopLossPercent <= 0m)
+        {
+            return false;
+        }
+
+        return currentPrice <= state.AverageEntryPrice * (1m - config.StopLossPercent / 100m);
+    }
+
+    private static bool ShouldTakeProfit(SignalStrategyConfig config, BotState state, decimal currentPrice)
+    {
+        if (state.BaseAssetQuantity <= 0m || state.AverageEntryPrice <= 0m || config.TakeProfitPercent <= 0m)
+        {
+            return false;
+        }
+
+        return currentPrice >= state.AverageEntryPrice * (1m + config.TakeProfitPercent / 100m);
+    }
+
+    private static bool IsSignalCooldownActive(
+        GridBotSettings profile,
+        SignalStrategyConfig config,
+        DateTimeOffset now,
+        IReadOnlyCollection<GridOrder> orders)
+    {
+        var cooldownMinutes = Math.Max(0, config.CooldownMinutes);
+        if (cooldownMinutes == 0)
+        {
+            return false;
+        }
+
+        var latestSignalOrder = GetSignalScopeOrders(profile, orders)
+            .OrderByDescending(order => order.CreatedAt)
+            .FirstOrDefault();
+
+        return latestSignalOrder is not null &&
+            now - latestSignalOrder.CreatedAt < TimeSpan.FromMinutes(cooldownMinutes);
+    }
+
     private static IEnumerable<GridOrder> GetDcaEntryScopeOrders(
         GridBotSettings profile,
         IEnumerable<GridOrder> orders)
@@ -1849,6 +2209,21 @@ public sealed class GridBotWorker : BackgroundService
         return profile.StrategyType == TradingStrategyType.Combo
             ? orders.Where(order => string.Equals(order.ParentOrderLinkId, DcaEntryMarker, StringComparison.Ordinal))
             : orders;
+    }
+
+    private static IEnumerable<GridOrder> GetSignalScopeOrders(
+        GridBotSettings profile,
+        IEnumerable<GridOrder> orders)
+    {
+        return profile.StrategyType == TradingStrategyType.Signal
+            ? orders.Where(IsSignalOrder)
+            : orders;
+    }
+
+    private static bool IsSignalOrder(GridOrder order)
+    {
+        return string.Equals(order.ParentOrderLinkId, SignalEntryMarker, StringComparison.Ordinal) ||
+            string.Equals(order.ParentOrderLinkId, SignalExitMarker, StringComparison.Ordinal);
     }
 
     private DcaStrategyConfig ParseDcaStrategyConfig(GridBotSettings profile)
@@ -1886,6 +2261,25 @@ public sealed class GridBotWorker : BackgroundService
                 "Invalid BTD strategy config for {Symbol}. Falling back to defaults.",
                 profile.Symbol);
             return new BtdStrategyConfig();
+        }
+    }
+
+    private SignalStrategyConfig ParseSignalStrategyConfig(GridBotSettings profile)
+    {
+        try
+        {
+            return JsonSerializer.Deserialize<SignalStrategyConfig>(
+                    string.IsNullOrWhiteSpace(profile.StrategyConfigJson) ? "{}" : profile.StrategyConfigJson,
+                    StrategyJsonOptions)
+                ?? new SignalStrategyConfig();
+        }
+        catch (JsonException exception)
+        {
+            _logger.LogWarning(
+                exception,
+                "Invalid signal strategy config for {Symbol}. Falling back to defaults.",
+                profile.Symbol);
+            return new SignalStrategyConfig();
         }
     }
 

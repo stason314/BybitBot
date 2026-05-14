@@ -134,6 +134,7 @@ internal static class AutoRecommendationApplySafety
         return strategyType is TradingStrategyType.Grid
             or TradingStrategyType.Dca
             or TradingStrategyType.Combo
-            or TradingStrategyType.Btd;
+            or TradingStrategyType.Btd
+            or TradingStrategyType.Signal;
     }
 }

@@ -19,6 +19,7 @@ Current baseline:
 - `TradingStrategyType.Dca` is supported as a first additional strategy;
 - `TradingStrategyType.Combo` runs grid first and enables DCA accumulation below a configured trigger;
 - `TradingStrategyType.Btd` buys sharp dips only when market regime is not danger;
+- `TradingStrategyType.Signal` trades directly from `SignalAnalyzer` output;
 - `TradingStrategyType.NoTrade` syncs state and fills but creates no new orders;
 - `StrategySelectionMode.Manual` is the default runtime mode;
 - runtime settings persist strategy mode/type/config JSON so future UI and auto-selection can be added without another schema break.
@@ -78,6 +79,24 @@ If `dcaBelowPrice` is omitted, `Combo` starts DCA when price is at or below `Gri
 
 `Btd` skips new entries when `MarketRegimeAnalyzer` returns `Danger`. Runtime `Stop Lower` and `Stop Upper` remain hard entry boundaries.
 
+`Signal` uses the dashboard signal analyzer as an execution strategy:
+
+```json
+{
+  "orderSizeUsdt": 20,
+  "cooldownMinutes": 30,
+  "minConfidence": 0.65,
+  "maxPositionUsdt": 400,
+  "stopLossPercent": 2,
+  "takeProfitPercent": 3,
+  "limitOffsetPercent": 0,
+  "lookbackCandles": 120,
+  "candleInterval": "1"
+}
+```
+
+It opens buy limits on `Buy` signals when confidence is high enough, closes available inventory on `Sell` signals, and creates no new orders on `Hold` or `Avoid`. `Avoid` also cancels pending signal buy entries so stale limits do not open a new position. Stop-loss and take-profit exits are evaluated before ordinary signal entries. Runtime `Stop Lower` and `Stop Upper` remain hard trading boundaries.
+
 `NoTrade` is a safety strategy for auto mode. It keeps market/state synchronization running, including paper/live fill processing for existing orders, but does not create new orders.
 
 Next steps:
@@ -87,6 +106,7 @@ Next steps:
 
 Auto recommendation flow:
 - `AutoStrategySelector` analyzes candles plus `MarketRegimeAnalysis`;
+- confirmed `Buy`/`Sell` signals can recommend `Signal` in breakout markets, and confirmed `Buy` signals can recommend `Signal` in trend markets;
 - dashboard shows the strategy and runtime settings it would choose;
 - operator can apply the recommendation manually from the UI;
 - timed auto-apply should only be enabled after paper validation and cooldown/safety checks.

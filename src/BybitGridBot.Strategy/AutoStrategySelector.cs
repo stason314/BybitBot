@@ -6,6 +6,7 @@ namespace BybitGridBot.Strategy;
 public sealed class AutoStrategySelector
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    private readonly SignalAnalyzer _signalAnalyzer = new();
 
     public AutoConfigRecommendation Recommend(
         GridOptions currentOptions,
@@ -32,6 +33,7 @@ public sealed class AutoStrategySelector
         var stopLower = FloorToStep(decimal.Max(step, lower - padding), step);
         var stopUpper = CeilingToStep(upper + padding, step);
         var orderSize = RecommendOrderSize(currentOptions, regime);
+        var signal = _signalAnalyzer.Analyze(ordered);
         var metrics = new AutoConfigMetrics
         {
             AtrPercent = decimal.Round(atrPercent, 4, MidpointRounding.AwayFromZero),
@@ -40,6 +42,22 @@ public sealed class AutoStrategySelector
             Resistance = resistance,
             LastPrice = lastPrice
         };
+
+        if (ShouldRecommendSignalBot(regime, signal))
+        {
+            var signalOrderSize = decimal.Max(currentOptions.MinOrderSizeUsdt, orderSize * 0.75m);
+            return Build(
+                TradingStrategyType.Signal,
+                $"Directional {signal.Signal.ToString().ToLowerInvariant()} signal confirmed. Use Signal Bot instead of passive grid orders. Signal confidence: {signal.Confidence:0.####}.",
+                lower,
+                upper,
+                step,
+                signalOrderSize,
+                stopLower,
+                stopUpper,
+                BuildSignalConfig(signalOrderSize, currentOptions.MinOrderSizeUsdt, stopLower, stopUpper),
+                metrics);
+        }
 
         return regime.Regime switch
         {
@@ -156,6 +174,22 @@ public sealed class AutoStrategySelector
         Metrics = metrics
     };
 
+    private static bool ShouldRecommendSignalBot(MarketRegimeAnalysis regime, SignalAnalysis signal)
+    {
+        if (regime.Regime is MarketRegimeType.Danger or MarketRegimeType.LowVolatility)
+        {
+            return false;
+        }
+
+        if (signal.Signal is not (SignalType.Buy or SignalType.Sell) || signal.Confidence < 0.65m)
+        {
+            return false;
+        }
+
+        return regime.Regime is MarketRegimeType.Breakout ||
+            regime.Regime == MarketRegimeType.Trend && signal.Signal == SignalType.Buy;
+    }
+
     private static string BuildComboConfig(decimal orderSize, decimal minOrderSize, decimal dcaBelowPrice)
     {
         var config = new
@@ -170,6 +204,30 @@ public sealed class AutoStrategySelector
             candleInterval = "1",
             maxPositionUsdt = 500m,
             dcaBelowPrice = decimal.Round(dcaBelowPrice, 8, MidpointRounding.ToZero)
+        };
+
+        return JsonSerializer.Serialize(config, JsonOptions);
+    }
+
+    private static string BuildSignalConfig(
+        decimal orderSize,
+        decimal minOrderSize,
+        decimal stopLower,
+        decimal stopUpper)
+    {
+        var config = new
+        {
+            orderSizeUsdt = decimal.Round(decimal.Max(minOrderSize, orderSize), 2, MidpointRounding.AwayFromZero),
+            cooldownMinutes = 30,
+            minConfidence = 0.65m,
+            maxPositionUsdt = 400m,
+            stopLossPercent = 2m,
+            takeProfitPercent = 3m,
+            limitOffsetPercent = 0m,
+            lookbackCandles = 120,
+            candleInterval = "1",
+            stopLowerPrice = stopLower,
+            stopUpperPrice = stopUpper
         };
 
         return JsonSerializer.Serialize(config, JsonOptions);
