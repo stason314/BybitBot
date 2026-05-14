@@ -697,6 +697,12 @@ public sealed class GridDashboardService : IGridDashboardService
       border-radius: 12px;
       font-size: 12px;
     }
+    .auto-actions {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      align-items: stretch;
+    }
     .preset-hint {
       color: var(--muted);
       font-size: 12px;
@@ -893,7 +899,10 @@ public sealed class GridDashboardService : IGridDashboardService
         <div class="subtle" id="autoStrategyReason">-</div>
         <div class="regime-meta" id="autoStrategyMeta"></div>
       </div>
-      <button type="button" class="secondary-button compact-button" id="applyAutoRecommendation">Apply Recommendation</button>
+      <div class="auto-actions">
+        <button type="button" class="secondary-button compact-button" id="refreshAutoRecommendation">Refresh Recommendation</button>
+        <button type="button" class="secondary-button compact-button" id="applyAutoRecommendation">Apply Recommendation</button>
+      </div>
     </section>
 
     <div class="layout">
@@ -1288,6 +1297,14 @@ public sealed class GridDashboardService : IGridDashboardService
         byId('formStatus').className = 'status error';
         byId('formStatus').textContent = error.message;
       });
+    });
+    byId('refreshAutoRecommendation').addEventListener('click', async () => {
+      const status = byId('formStatus');
+      status.className = 'status';
+      status.textContent = 'Refreshing auto recommendation from Bybit market data...';
+      await loadDashboard({ forceSettingsRefresh: false });
+      status.className = 'status ok';
+      status.textContent = `Auto recommendation refreshed for ${latestDashboardData?.settings?.symbol || 'current profile'}.`;
     });
     byId('applyAutoRecommendation').addEventListener('click', async () => {
       const status = byId('formStatus');
