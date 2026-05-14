@@ -1219,11 +1219,16 @@ public sealed class GridDashboardService : IGridDashboardService
         };
       }
     };
-    const buildDiagnosticsSnapshot = () => {
+    const buildDiagnosticsSnapshot = (hours) => {
       if (!latestDashboardData) {
         return '';
       }
 
+      const cutoff = Date.now() - hours * 60 * 60 * 1000;
+      const recentOrders = latestDashboardData.orders.filter(order => {
+        const timestamp = new Date(order.filledAt || order.updatedAt || order.createdAt).getTime();
+        return Number.isFinite(timestamp) && timestamp >= cutoff;
+      });
       const formSettings = readSettingsFormSnapshot();
       return JSON.stringify({
         schema: 'bybit-grid-bot-diagnostics/v1',
@@ -1253,7 +1258,8 @@ public sealed class GridDashboardService : IGridDashboardService
         autoRecommendation: latestDashboardData.autoRecommendation,
         gridLevels: latestDashboardData.gridLevels,
         activeOrders: latestDashboardData.activeOrders,
-        recentOrders: latestDashboardData.orders,
+        recentOrdersWindowHours: hours,
+        recentOrders,
         generatedAt: latestDashboardData.generatedAt
       }, null, 2);
     };
@@ -1328,7 +1334,8 @@ public sealed class GridDashboardService : IGridDashboardService
     };
     const copyDiagnostics = async () => {
       const status = byId('formStatus');
-      const snapshot = buildDiagnosticsSnapshot();
+      const hours = getCopyHistoryHours();
+      const snapshot = buildDiagnosticsSnapshot(hours);
       if (!snapshot) {
         status.className = 'status error';
         status.textContent = 'No dashboard data loaded yet.';
@@ -1336,8 +1343,9 @@ public sealed class GridDashboardService : IGridDashboardService
       }
 
       await writeClipboard(snapshot);
+      const copiedOrders = JSON.parse(snapshot).recentOrders.length;
       status.className = 'status ok';
-      status.textContent = `Copied diagnostics snapshot for ${latestDashboardData.settings?.symbol || 'current profile'}.`;
+      status.textContent = `Copied diagnostics snapshot for ${latestDashboardData.settings?.symbol || 'current profile'} with ${copiedOrders} order(s) from the last ${hours} hour(s).`;
     };
     const cancelActiveOrders = async () => {
       const status = byId('formStatus');
