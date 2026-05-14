@@ -59,6 +59,37 @@ public sealed class AutoStrategySelector
                 metrics);
         }
 
+        if (ShouldRecommendDipStrategy(regime, signal, drawdownPercent))
+        {
+            var dipOrderSize = decimal.Max(currentOptions.MinOrderSizeUsdt, orderSize * 0.6m);
+            if (regime.MovePercent < 0m || drawdownPercent >= 1m)
+            {
+                return Build(
+                    TradingStrategyType.Btd,
+                    $"Dip setup detected near lower Bollinger with RSI {signal.Rsi:0.####}. Prefer cautious BTD instead of strict Signal Bot.",
+                    lower,
+                    upper,
+                    step,
+                    dipOrderSize,
+                    stopLower,
+                    stopUpper,
+                    BuildBtdConfig(dipOrderSize, currentOptions.MinOrderSizeUsdt, drawdownPercent, lastPrice, stopLower, stopUpper),
+                    metrics);
+            }
+
+            return Build(
+                TradingStrategyType.Combo,
+                $"Pullback setup detected near lower Bollinger with RSI {signal.Rsi:0.####}. Use Combo so grid can trade the range and DCA only on deeper pullbacks.",
+                lower,
+                upper,
+                step,
+                dipOrderSize,
+                stopLower,
+                stopUpper,
+                BuildComboConfig(dipOrderSize, currentOptions.MinOrderSizeUsdt, lower),
+                metrics);
+        }
+
         return regime.Regime switch
         {
             MarketRegimeType.Danger => Build(
@@ -186,8 +217,33 @@ public sealed class AutoStrategySelector
             return false;
         }
 
-        return regime.Regime is MarketRegimeType.Breakout ||
-            regime.Regime == MarketRegimeType.Trend && signal.Signal == SignalType.Buy;
+        if (signal.Signal == SignalType.Buy)
+        {
+            return signal.TrendStrength > 0.08m &&
+                signal.BollingerPosition > 0.2m &&
+                signal.BollingerPosition < 0.85m &&
+                regime.Regime is MarketRegimeType.Breakout or MarketRegimeType.Trend;
+        }
+
+        return signal.TrendStrength < -0.08m &&
+            signal.BollingerPosition >= 0.65m &&
+            regime.Regime is MarketRegimeType.Breakout or MarketRegimeType.Trend;
+    }
+
+    private static bool ShouldRecommendDipStrategy(
+        MarketRegimeAnalysis regime,
+        SignalAnalysis signal,
+        decimal drawdownPercent)
+    {
+        if (regime.Regime == MarketRegimeType.Danger)
+        {
+            return false;
+        }
+
+        return signal.BollingerPosition <= 0.2m &&
+            signal.Rsi <= 55m &&
+            signal.VolumeRatio < 1.8m &&
+            drawdownPercent >= 0.5m;
     }
 
     private static string BuildComboConfig(decimal orderSize, decimal minOrderSize, decimal dcaBelowPrice)

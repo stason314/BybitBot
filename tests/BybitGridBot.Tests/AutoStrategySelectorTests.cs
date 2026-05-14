@@ -169,6 +169,39 @@ public sealed class AutoStrategySelectorTests
         Assert.Equal(30, config.RootElement.GetProperty("cooldownMinutes").GetInt32());
     }
 
+    [Fact]
+    public void Recommend_ReturnsBtd_ForLowerBollingerDipInsteadOfSignal()
+    {
+        var selector = new AutoStrategySelector();
+        var options = new GridOptions
+        {
+            LowerPrice = 0.19m,
+            UpperPrice = 0.21m,
+            Step = 0.001m,
+            OrderSizeUsdt = 20m,
+            MinOrderSizeUsdt = 15m,
+            StopLowerPrice = 0.18m,
+            StopUpperPrice = 0.22m
+        };
+        var candles = BuildLowerBollingerDipCandles();
+
+        var recommendation = selector.Recommend(
+            options,
+            new MarketRegimeAnalysis
+            {
+                Regime = MarketRegimeType.Trend,
+                MovePercent = -0.8m,
+                Recommendation = "Pullback",
+                Support = candles.Min(candle => candle.Low),
+                Resistance = candles.Max(candle => candle.High)
+            },
+            candles);
+
+        Assert.Equal(TradingStrategyType.Btd, recommendation.StrategyType);
+        Assert.Contains("Dip setup", recommendation.Reason);
+        Assert.Contains("dipPercent", recommendation.StrategyConfigJson);
+    }
+
     private static IReadOnlyList<Candle> BuildCandles(decimal open, decimal high, decimal low, int count)
     {
         var now = DateTimeOffset.UtcNow;
@@ -199,6 +232,27 @@ public sealed class AutoStrategySelectorTests
                     close,
                     index >= 40 ? 2200m : 1000m,
                     close * (index >= 40 ? 2200m : 1000m));
+            })
+            .ToArray();
+    }
+
+    private static IReadOnlyList<Candle> BuildLowerBollingerDipCandles()
+    {
+        var now = DateTimeOffset.UtcNow;
+        return Enumerable.Range(0, 45)
+            .Select(index =>
+            {
+                var close = index < 30
+                    ? 100m + (index % 2 == 0 ? -0.03m : 0.03m)
+                    : 100m - (index - 29) * 0.05m + (index % 2 == 0 ? -0.02m : 0.02m);
+                return new Candle(
+                    now.AddMinutes(index - 45),
+                    close,
+                    close + 0.05m,
+                    close - 0.05m,
+                    close,
+                    1000m,
+                    close * 1000m);
             })
             .ToArray();
     }
