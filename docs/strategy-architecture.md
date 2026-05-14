@@ -79,5 +79,11 @@ If `dcaBelowPrice` is omitted, `Combo` starts DCA when price is at or below `Gri
 
 Next steps:
 1. Move remaining grid order-planning details fully behind strategy implementations.
-2. Add auto selector in paper mode first, initially switching only between `Grid`, `Dca`, `Combo`, `Btd`, and `NoTrade`.
-3. Add adaptive grid, buy-the-dip, and volume-breakout strategies as separate implementations.
+2. Harden auto recommendation safety checks before enabling timed auto-apply.
+3. Add adaptive grid and volume-breakout strategies as separate implementations.
+
+Auto recommendation flow:
+- `AutoStrategySelector` analyzes candles plus `MarketRegimeAnalysis`;
+- dashboard shows the strategy and runtime settings it would choose;
+- operator can apply the recommendation manually from the UI;
+- timed auto-apply should only be enabled after paper validation and cooldown/safety checks.

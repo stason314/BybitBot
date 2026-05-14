@@ -43,6 +43,7 @@ builder.Services.AddSingleton<ITradingStrategy>(serviceProvider => serviceProvid
 builder.Services.AddSingleton<RiskManager>();
 builder.Services.AddSingleton<MarketRegimeFilter>();
 builder.Services.AddSingleton<MarketRegimeAnalyzer>();
+builder.Services.AddSingleton<AutoStrategySelector>();
 builder.Services.AddSingleton<IGridDashboardService, GridDashboardService>();
 
 builder.Services.AddHttpClient<IBybitRestClient, BybitRestClient>(client =>
@@ -78,6 +79,12 @@ app.MapGet("/api/dashboard", async (string? symbol, IGridDashboardService dashbo
 app.MapPost("/api/settings", async (UpdateSettingsRequest request, IGridDashboardService dashboardService, CancellationToken cancellationToken) =>
 {
     var response = await dashboardService.UpdateSettingsAsync(request, cancellationToken);
+    return response.Success ? Results.Ok(response) : Results.BadRequest(response);
+});
+
+app.MapPost("/api/settings/apply-auto", async (string? symbol, IGridDashboardService dashboardService, CancellationToken cancellationToken) =>
+{
+    var response = await dashboardService.ApplyAutoRecommendationAsync(symbol, cancellationToken);
     return response.Success ? Results.Ok(response) : Results.BadRequest(response);
 });
 

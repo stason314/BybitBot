@@ -14,6 +14,8 @@ public sealed class DashboardResponse
 
     public required DashboardMarketRegime MarketRegime { get; init; }
 
+    public required DashboardAutoRecommendation AutoRecommendation { get; init; }
+
     public required IReadOnlyList<DashboardOrderItem> Orders { get; init; }
 
     public required IReadOnlyList<DashboardOrderItem> ActiveOrders { get; init; }
@@ -110,6 +112,35 @@ public sealed class DashboardMarketRegime
     public decimal? Support { get; init; }
 
     public decimal? Resistance { get; init; }
+}
+
+public sealed class DashboardAutoRecommendation
+{
+    public required string StrategyType { get; init; }
+
+    public required string Reason { get; init; }
+
+    public decimal LowerPrice { get; init; }
+
+    public decimal UpperPrice { get; init; }
+
+    public decimal Step { get; init; }
+
+    public decimal OrderSizeUsdt { get; init; }
+
+    public decimal StopLowerPrice { get; init; }
+
+    public decimal StopUpperPrice { get; init; }
+
+    public required string StrategyConfigJson { get; init; }
+
+    public decimal AtrPercent { get; init; }
+
+    public decimal DrawdownPercent { get; init; }
+
+    public decimal Support { get; init; }
+
+    public decimal Resistance { get; init; }
 }
 
 public sealed class DashboardOrderItem

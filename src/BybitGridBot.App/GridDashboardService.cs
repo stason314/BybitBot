@@ -10,6 +10,7 @@ namespace BybitGridBot.App;
 public interface IGridDashboardService
 {
     Task<DashboardResponse> GetDashboardAsync(string? symbol, CancellationToken cancellationToken);
+    Task<UpdateSettingsResponse> ApplyAutoRecommendationAsync(string? symbol, CancellationToken cancellationToken);
     Task<UpdateSettingsResponse> UpdateSettingsAsync(UpdateSettingsRequest request, CancellationToken cancellationToken);
     Task<UpdateSettingsResponse> DeleteSettingsAsync(string symbol, CancellationToken cancellationToken);
     Task<UpdateSettingsResponse> ResumeTradingAsync(string? symbol, CancellationToken cancellationToken);
@@ -20,6 +21,7 @@ public interface IGridDashboardService
 public sealed class GridDashboardService : IGridDashboardService
 {
     private readonly AppOptions _appOptions;
+    private readonly AutoStrategySelector _autoStrategySelector;
     private readonly GridOptions _defaultGridOptions;
     private readonly IBybitRestClient _bybitRestClient;
     private readonly MarketRegimeAnalyzer _marketRegimeAnalyzer;
@@ -29,12 +31,14 @@ public sealed class GridDashboardService : IGridDashboardService
     public GridDashboardService(
         IOptions<AppOptions> appOptions,
         IOptions<GridOptions> defaultGridOptions,
+        AutoStrategySelector autoStrategySelector,
         IBybitRestClient bybitRestClient,
         MarketRegimeAnalyzer marketRegimeAnalyzer,
         IGridRepository repository,
         IGridTradingStrategy strategy)
     {
         _appOptions = appOptions.Value;
+        _autoStrategySelector = autoStrategySelector;
         _defaultGridOptions = defaultGridOptions.Value;
         _bybitRestClient = bybitRestClient;
         _marketRegimeAnalyzer = marketRegimeAnalyzer;
@@ -101,7 +105,9 @@ public sealed class GridDashboardService : IGridDashboardService
             : state.BaseAssetQuantity * (currentPrice.Value - state.AverageEntryPrice);
         var estimatedTotalEquity = state.QuoteAssetBalance + (currentPrice ?? 0m) * state.BaseAssetQuantity;
         var generatedAt = DateTimeOffset.UtcNow;
-        var marketRegime = await AnalyzeMarketRegimeAsync(gridOptions, cancellationToken);
+        var analysisCandles = await GetAnalysisCandlesAsync(gridOptions, cancellationToken);
+        var marketRegime = AnalyzeMarketRegime(analysisCandles);
+        var autoRecommendation = _autoStrategySelector.Recommend(gridOptions, marketRegime, analysisCandles);
 
         return new DashboardResponse
         {
@@ -148,6 +154,7 @@ public sealed class GridDashboardService : IGridDashboardService
                 UpdatedAt = state.UpdatedAt
             },
             MarketRegime = MapMarketRegime(marketRegime),
+            AutoRecommendation = MapAutoRecommendation(autoRecommendation),
             Orders = orders,
             ActiveOrders = activeOrders,
             GridLevels = levels.Select(level => level.Price).ToArray(),
@@ -155,20 +162,26 @@ public sealed class GridDashboardService : IGridDashboardService
         };
     }
 
-    private async Task<MarketRegimeAnalysis> AnalyzeMarketRegimeAsync(GridOptions gridOptions, CancellationToken cancellationToken)
+    private async Task<IReadOnlyList<Candle>> GetAnalysisCandlesAsync(GridOptions gridOptions, CancellationToken cancellationToken)
     {
         try
         {
-            var candles = await _bybitRestClient.GetKlinesAsync(
+            return await _bybitRestClient.GetKlinesAsync(
                 gridOptions.Category,
                 gridOptions.Symbol,
                 "1",
-                60,
+                120,
                 cancellationToken);
-
-            return _marketRegimeAnalyzer.Analyze(candles);
         }
         catch
+        {
+            return [];
+        }
+    }
+
+    private MarketRegimeAnalysis AnalyzeMarketRegime(IReadOnlyList<Candle> candles)
+    {
+        if (candles.Count == 0)
         {
             return new MarketRegimeAnalysis
             {
@@ -177,6 +190,67 @@ public sealed class GridDashboardService : IGridDashboardService
                 Recommendation = "Market regime analysis is unavailable."
             };
         }
+
+        return _marketRegimeAnalyzer.Analyze(candles);
+    }
+
+    public async Task<UpdateSettingsResponse> ApplyAutoRecommendationAsync(string? symbol, CancellationToken cancellationToken)
+    {
+        var profiles = await EnsureRuntimeSettingsProfilesAsync(cancellationToken);
+        var selectedSymbol = NormalizeOptionalSymbol(symbol);
+        var runtimeSettings = selectedSymbol is null
+            ? profiles[0]
+            : profiles.FirstOrDefault(profile => string.Equals(profile.Symbol, selectedSymbol, StringComparison.OrdinalIgnoreCase));
+        if (runtimeSettings is null)
+        {
+            return new UpdateSettingsResponse
+            {
+                Success = false,
+                Symbol = selectedSymbol,
+                Message = "Cannot apply auto recommendation.",
+                Errors = [$"Runtime settings profile {selectedSymbol} does not exist."]
+            };
+        }
+
+        var gridOptions = RuntimeGridOptionsFactory.ToGridOptions(runtimeSettings, _defaultGridOptions);
+        var candles = await GetAnalysisCandlesAsync(gridOptions, cancellationToken);
+        if (candles.Count == 0)
+        {
+            return new UpdateSettingsResponse
+            {
+                Success = false,
+                Symbol = runtimeSettings.Symbol,
+                Message = "Cannot apply auto recommendation.",
+                Errors = ["Market data is unavailable."]
+            };
+        }
+
+        var recommendation = _autoStrategySelector.Recommend(gridOptions, AnalyzeMarketRegime(candles), candles);
+        var recommendedSettings = new GridBotSettings
+        {
+            Symbol = runtimeSettings.Symbol,
+            Category = runtimeSettings.Category,
+            StrategySelectionMode = StrategySelectionMode.Auto,
+            StrategyType = recommendation.StrategyType,
+            StrategyConfigJson = recommendation.StrategyConfigJson,
+            LowerPrice = recommendation.LowerPrice,
+            UpperPrice = recommendation.UpperPrice,
+            Step = recommendation.Step,
+            OrderSizeUsdt = recommendation.OrderSizeUsdt,
+            StopLowerPrice = recommendation.StopLowerPrice,
+            StopUpperPrice = recommendation.StopUpperPrice,
+            UpdatedAt = DateTimeOffset.UtcNow
+        };
+
+        await _repository.SaveRuntimeSettingsAsync(recommendedSettings, cancellationToken);
+        var resumeMessage = await TryClearPauseForSettingsAsync(recommendedSettings, cancellationToken);
+
+        return new UpdateSettingsResponse
+        {
+            Success = true,
+            Symbol = runtimeSettings.Symbol,
+            Message = $"Auto recommendation applied: {recommendation.StrategyType}. {recommendation.Reason}{resumeMessage}"
+        };
     }
 
     public async Task<UpdateSettingsResponse> UpdateSettingsAsync(UpdateSettingsRequest request, CancellationToken cancellationToken)
@@ -812,6 +886,16 @@ public sealed class GridDashboardService : IGridDashboardService
       <div class="badge">Confidence <strong id="marketRegimeConfidence">-</strong></div>
     </section>
 
+    <section class="panel section regime-card">
+      <div>
+        <div class="label">Auto Recommendation</div>
+        <div class="regime-title" id="autoStrategyTitle">-</div>
+        <div class="subtle" id="autoStrategyReason">-</div>
+        <div class="regime-meta" id="autoStrategyMeta"></div>
+      </div>
+      <button type="button" class="secondary-button compact-button" id="applyAutoRecommendation">Apply Recommendation</button>
+    </section>
+
     <div class="layout">
       <section class="panel section">
         <h2>Active Grid Levels</h2>
@@ -1133,6 +1217,16 @@ public sealed class GridDashboardService : IGridDashboardService
         ['Support', formatNumber(data.marketRegime.support)],
         ['Resistance', formatNumber(data.marketRegime.resistance)]
       ].map(([label, value]) => `<span class="regime-chip">${label}: ${value}</span>`).join('');
+      byId('autoStrategyTitle').textContent = data.autoRecommendation.strategyType;
+      byId('autoStrategyReason').textContent = data.autoRecommendation.reason;
+      byId('autoStrategyMeta').innerHTML = [
+        ['Range', `${formatNumber(data.autoRecommendation.lowerPrice)} - ${formatNumber(data.autoRecommendation.upperPrice)}`],
+        ['Step', formatNumber(data.autoRecommendation.step)],
+        ['Order', `${formatNumber(data.autoRecommendation.orderSizeUsdt)} USDT`],
+        ['Stop', `${formatNumber(data.autoRecommendation.stopLowerPrice)} - ${formatNumber(data.autoRecommendation.stopUpperPrice)}`],
+        ['ATR', `${formatNumber(data.autoRecommendation.atrPercent)}%`],
+        ['Drawdown', `${formatNumber(data.autoRecommendation.drawdownPercent)}%`]
+      ].map(([label, value]) => `<span class="regime-chip">${label}: ${value}</span>`).join('');
 
       if (forceSettingsRefresh || !isSettingsFormDirty()) {
         updateSettingsForm(data.settings);
@@ -1194,6 +1288,18 @@ public sealed class GridDashboardService : IGridDashboardService
         byId('formStatus').className = 'status error';
         byId('formStatus').textContent = error.message;
       });
+    });
+    byId('applyAutoRecommendation').addEventListener('click', async () => {
+      const status = byId('formStatus');
+      const symbol = selectedSymbol || latestDashboardData?.settings?.symbol;
+      const applyUrl = symbol ? `/api/settings/apply-auto?symbol=${encodeURIComponent(symbol)}` : '/api/settings/apply-auto';
+      const response = await fetch(applyUrl, { method: 'POST' });
+      const result = await response.json();
+      status.className = `status ${response.ok ? 'ok' : 'error'}`;
+      status.textContent = response.ok ? result.message : (result.errors?.join(' | ') || result.message || 'Failed to apply auto recommendation.');
+      if (response.ok) {
+        await loadDashboard({ forceSettingsRefresh: true });
+      }
     });
     byId('profileTabs').addEventListener('click', async (event) => {
       const actionTarget = event.target.closest('[data-action]');
@@ -1474,6 +1580,26 @@ public sealed class GridDashboardService : IGridDashboardService
             VolumeRatio = analysis.VolumeRatio,
             Support = analysis.Support,
             Resistance = analysis.Resistance
+        };
+    }
+
+    private static DashboardAutoRecommendation MapAutoRecommendation(AutoConfigRecommendation recommendation)
+    {
+        return new DashboardAutoRecommendation
+        {
+            StrategyType = recommendation.StrategyType.ToString().ToLowerInvariant(),
+            Reason = recommendation.Reason,
+            LowerPrice = recommendation.LowerPrice,
+            UpperPrice = recommendation.UpperPrice,
+            Step = recommendation.Step,
+            OrderSizeUsdt = recommendation.OrderSizeUsdt,
+            StopLowerPrice = recommendation.StopLowerPrice,
+            StopUpperPrice = recommendation.StopUpperPrice,
+            StrategyConfigJson = recommendation.StrategyConfigJson,
+            AtrPercent = recommendation.Metrics.AtrPercent,
+            DrawdownPercent = recommendation.Metrics.DrawdownPercent,
+            Support = recommendation.Metrics.Support,
+            Resistance = recommendation.Metrics.Resistance
         };
     }
 }
