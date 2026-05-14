@@ -40,6 +40,7 @@ builder.Services.AddSingleton<IGridTradingStrategy, GridStrategy>();
 builder.Services.AddSingleton<ITradingStrategy>(serviceProvider => serviceProvider.GetRequiredService<IGridTradingStrategy>());
 builder.Services.AddSingleton<RiskManager>();
 builder.Services.AddSingleton<MarketRegimeFilter>();
+builder.Services.AddSingleton<MarketRegimeAnalyzer>();
 builder.Services.AddSingleton<IGridDashboardService, GridDashboardService>();
 
 builder.Services.AddHttpClient<IBybitRestClient, BybitRestClient>(client =>

@@ -22,6 +22,7 @@ public sealed class GridDashboardService : IGridDashboardService
     private readonly AppOptions _appOptions;
     private readonly GridOptions _defaultGridOptions;
     private readonly IBybitRestClient _bybitRestClient;
+    private readonly MarketRegimeAnalyzer _marketRegimeAnalyzer;
     private readonly IGridRepository _repository;
     private readonly IGridTradingStrategy _strategy;
 
@@ -29,12 +30,14 @@ public sealed class GridDashboardService : IGridDashboardService
         IOptions<AppOptions> appOptions,
         IOptions<GridOptions> defaultGridOptions,
         IBybitRestClient bybitRestClient,
+        MarketRegimeAnalyzer marketRegimeAnalyzer,
         IGridRepository repository,
         IGridTradingStrategy strategy)
     {
         _appOptions = appOptions.Value;
         _defaultGridOptions = defaultGridOptions.Value;
         _bybitRestClient = bybitRestClient;
+        _marketRegimeAnalyzer = marketRegimeAnalyzer;
         _repository = repository;
         _strategy = strategy;
     }
@@ -98,6 +101,7 @@ public sealed class GridDashboardService : IGridDashboardService
             : state.BaseAssetQuantity * (currentPrice.Value - state.AverageEntryPrice);
         var estimatedTotalEquity = state.QuoteAssetBalance + (currentPrice ?? 0m) * state.BaseAssetQuantity;
         var generatedAt = DateTimeOffset.UtcNow;
+        var marketRegime = await AnalyzeMarketRegimeAsync(gridOptions, cancellationToken);
 
         return new DashboardResponse
         {
@@ -143,11 +147,36 @@ public sealed class GridDashboardService : IGridDashboardService
                 AverageEntryPrice = state.AverageEntryPrice,
                 UpdatedAt = state.UpdatedAt
             },
+            MarketRegime = MapMarketRegime(marketRegime),
             Orders = orders,
             ActiveOrders = activeOrders,
             GridLevels = levels.Select(level => level.Price).ToArray(),
             GeneratedAt = generatedAt
         };
+    }
+
+    private async Task<MarketRegimeAnalysis> AnalyzeMarketRegimeAsync(GridOptions gridOptions, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var candles = await _bybitRestClient.GetKlinesAsync(
+                gridOptions.Category,
+                gridOptions.Symbol,
+                "1",
+                60,
+                cancellationToken);
+
+            return _marketRegimeAnalyzer.Analyze(candles);
+        }
+        catch
+        {
+            return new MarketRegimeAnalysis
+            {
+                Regime = MarketRegimeType.Danger,
+                Confidence = 0m,
+                Recommendation = "Market regime analysis is unavailable."
+            };
+        }
     }
 
     public async Task<UpdateSettingsResponse> UpdateSettingsAsync(UpdateSettingsRequest request, CancellationToken cancellationToken)
@@ -687,6 +716,31 @@ public sealed class GridDashboardService : IGridDashboardService
       font-family: "IBM Plex Mono", monospace;
       font-size: 13px;
     }
+    .regime-card {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 12px;
+      align-items: start;
+      margin-bottom: 20px;
+    }
+    .regime-title {
+      font-size: 28px;
+      font-weight: 900;
+      text-transform: capitalize;
+    }
+    .regime-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 12px;
+    }
+    .regime-chip {
+      padding: 8px 10px;
+      border-radius: 999px;
+      background: rgba(29,35,31,0.06);
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 12px;
+    }
     @keyframes fadeUp {
       from { opacity: 0; transform: translateY(10px); }
       to { opacity: 1; transform: translateY(0); }
@@ -747,6 +801,16 @@ public sealed class GridDashboardService : IGridDashboardService
     </div>
 
     <section class="stats" id="stats"></section>
+
+    <section class="panel section regime-card">
+      <div>
+        <div class="label">Market Regime</div>
+        <div class="regime-title" id="marketRegimeTitle">-</div>
+        <div class="subtle" id="marketRegimeRecommendation">-</div>
+        <div class="regime-meta" id="marketRegimeMeta"></div>
+      </div>
+      <div class="badge">Confidence <strong id="marketRegimeConfidence">-</strong></div>
+    </section>
 
     <div class="layout">
       <section class="panel section">
@@ -1056,6 +1120,17 @@ public sealed class GridDashboardService : IGridDashboardService
       byId('heroUpdated').textContent = formatDate(data.generatedAt);
       byId('pauseBox').hidden = !data.state.isPaused;
       byId('pauseReason').textContent = data.state.pauseReason || 'Trading is paused.';
+      byId('marketRegimeTitle').textContent = data.marketRegime.regime;
+      byId('marketRegimeRecommendation').textContent = data.marketRegime.recommendation;
+      byId('marketRegimeConfidence').textContent = `${formatNumber(Number(data.marketRegime.confidence || 0) * 100)}%`;
+      byId('marketRegimeMeta').innerHTML = [
+        ['ADX', formatNumber(data.marketRegime.adx)],
+        ['Move', `${formatNumber(data.marketRegime.movePercent)}%`],
+        ['Range', `${formatNumber(data.marketRegime.rangePercent)}%`],
+        ['Volume x', formatNumber(data.marketRegime.volumeRatio)],
+        ['Support', formatNumber(data.marketRegime.support)],
+        ['Resistance', formatNumber(data.marketRegime.resistance)]
+      ].map(([label, value]) => `<span class="regime-chip">${label}: ${value}</span>`).join('');
 
       if (forceSettingsRefresh || !isSettingsFormDirty()) {
         updateSettingsForm(data.settings);
@@ -1378,6 +1453,22 @@ public sealed class GridDashboardService : IGridDashboardService
             CreatedAt = order.CreatedAt,
             UpdatedAt = order.UpdatedAt,
             FilledAt = order.FilledAt
+        };
+    }
+
+    private static DashboardMarketRegime MapMarketRegime(MarketRegimeAnalysis analysis)
+    {
+        return new DashboardMarketRegime
+        {
+            Regime = analysis.Regime.ToString().ToLowerInvariant(),
+            Confidence = analysis.Confidence,
+            Recommendation = analysis.Recommendation,
+            Adx = analysis.Adx,
+            MovePercent = analysis.MovePercent,
+            RangePercent = analysis.RangePercent,
+            VolumeRatio = analysis.VolumeRatio,
+            Support = analysis.Support,
+            Resistance = analysis.Resistance
         };
     }
 }

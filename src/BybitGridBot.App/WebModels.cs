@@ -12,6 +12,8 @@ public sealed class DashboardResponse
 
     public required DashboardState State { get; init; }
 
+    public required DashboardMarketRegime MarketRegime { get; init; }
+
     public required IReadOnlyList<DashboardOrderItem> Orders { get; init; }
 
     public required IReadOnlyList<DashboardOrderItem> ActiveOrders { get; init; }
@@ -87,6 +89,27 @@ public sealed class DashboardState
     public decimal AverageEntryPrice { get; init; }
 
     public DateTimeOffset UpdatedAt { get; init; }
+}
+
+public sealed class DashboardMarketRegime
+{
+    public required string Regime { get; init; }
+
+    public decimal Confidence { get; init; }
+
+    public required string Recommendation { get; init; }
+
+    public decimal Adx { get; init; }
+
+    public decimal MovePercent { get; init; }
+
+    public decimal RangePercent { get; init; }
+
+    public decimal VolumeRatio { get; init; }
+
+    public decimal? Support { get; init; }
+
+    public decimal? Resistance { get; init; }
 }
 
 public sealed class DashboardOrderItem
