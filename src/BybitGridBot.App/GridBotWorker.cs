@@ -234,6 +234,7 @@ public sealed class GridBotWorker : BackgroundService
                 return state;
             }
 
+            await CleanRiskyActiveOrdersAsync(state, activeOrders, cancellationToken);
             await SimulatePaperFillsAsync(state, levels, currentPrice, cancellationToken);
         }
         else
@@ -245,6 +246,8 @@ public sealed class GridBotWorker : BackgroundService
                 await _repository.SaveBotStateAsync(state, cancellationToken);
                 return state;
             }
+
+            await CleanRiskyActiveOrdersAsync(state, activeOrders, cancellationToken);
         }
 
         if (state.IsPaused)
@@ -299,9 +302,7 @@ public sealed class GridBotWorker : BackgroundService
         }
 
         var activeGridOrders = await _repository.GetActiveOrdersAsync(_gridOptions.Symbol, cancellationToken);
-        activeGridOrders = await CancelUnprofitableSellOrdersAsync(state, activeGridOrders, cancellationToken);
-        activeGridOrders = await CancelCrossSideOrdersAtSameLevelAsync(activeGridOrders, cancellationToken);
-        activeGridOrders = await ReduceBuyExposureAfterDailyTakeProfitAsync(state, activeGridOrders, cancellationToken);
+        activeGridOrders = await CleanRiskyActiveOrdersAsync(state, activeGridOrders, cancellationToken);
         var wallet = _appOptions.TradingMode == TradingMode.Paper
             ? null
             : await _bybitRestClient.GetWalletBalanceAsync(cancellationToken, _quoteAsset, _baseAsset);
@@ -743,6 +744,18 @@ public sealed class GridBotWorker : BackgroundService
             var createdOrder = await PlaceOrderAsync(TradeSide.Sell, level.Price, quantity, null, cancellationToken);
             activeOrders = activeOrders.Append(createdOrder).ToArray();
         }
+    }
+
+    private async Task<IReadOnlyCollection<GridOrder>> CleanRiskyActiveOrdersAsync(
+        BotState state,
+        IReadOnlyCollection<GridOrder> activeOrders,
+        CancellationToken cancellationToken)
+    {
+        activeOrders = await CancelUnprofitableSellOrdersAsync(state, activeOrders, cancellationToken);
+        activeOrders = await CancelCrossSideOrdersAtSameLevelAsync(activeOrders, cancellationToken);
+        activeOrders = await ReduceBuyExposureAfterDailyTakeProfitAsync(state, activeOrders, cancellationToken);
+
+        return activeOrders;
     }
 
     private async Task<IReadOnlyCollection<GridOrder>> ReduceBuyExposureAfterDailyTakeProfitAsync(
