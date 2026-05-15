@@ -444,7 +444,6 @@ public sealed class GridBotWorker : BackgroundService
             marketPhase.Score,
             marketPhase.Confidence,
             marketPhase.Reason);
-        var recommendation = _autoStrategySelector.Recommend(gridOptions, regime, marketPhase, candles);
         var state = await _repository.GetBotStateAsync(profile.Symbol, cancellationToken);
         var now = DateTimeOffset.UtcNow;
         if (state is not null && RefreshAggressiveModeState(state, gridOptions, now))
@@ -452,6 +451,13 @@ public sealed class GridBotWorker : BackgroundService
             state.UpdatedAt = now;
             await _repository.SaveBotStateAsync(state, cancellationToken);
         }
+
+        var recommendation = _autoStrategySelector.Recommend(
+            gridOptions,
+            regime,
+            marketPhase,
+            candles,
+            IsAggressiveModeActive(gridOptions, state, now));
         var recommendedSettings = new GridBotSettings
         {
             Symbol = profile.Symbol,
@@ -1720,8 +1726,9 @@ public sealed class GridBotWorker : BackgroundService
     private static bool IsAggressiveModeActive(GridOptions gridOptions, BotState? state, DateTimeOffset now)
     {
         return gridOptions.AggressiveModeEnabled &&
-            state?.AggressiveModeEnabled == true &&
-            (state.AggressiveModeDisabledUntil is null || state.AggressiveModeDisabledUntil <= now);
+            (state is null ||
+             (state.AggressiveModeEnabled &&
+              (state.AggressiveModeDisabledUntil is null || state.AggressiveModeDisabledUntil <= now)));
     }
 
     private async Task BootstrapPaperInventoryIfNeededAsync(
