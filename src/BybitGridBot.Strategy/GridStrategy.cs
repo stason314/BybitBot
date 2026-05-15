@@ -81,10 +81,16 @@ public sealed class GridStrategy : IGridTradingStrategy
         GridOptions options,
         MarketPhaseResult marketPhase,
         decimal currentPrice,
-        bool bigRedGuardActive)
+        bool bigRedGuardActive,
+        bool aggressiveModeActive = false)
     {
         if (bigRedGuardActive ||
-            marketPhase.Phase is MarketPhase.Dump or MarketPhase.HighVolatility or MarketPhase.BreakoutDown or MarketPhase.Unknown)
+            marketPhase.Phase is MarketPhase.Dump or MarketPhase.HighVolatility or MarketPhase.BreakoutDown)
+        {
+            return false;
+        }
+
+        if (marketPhase.Phase == MarketPhase.Unknown && !aggressiveModeActive)
         {
             return false;
         }
@@ -94,7 +100,8 @@ public sealed class GridStrategy : IGridTradingStrategy
             return false;
         }
 
-        return marketPhase.Phase == MarketPhase.RangeBound &&
+        return (marketPhase.Phase == MarketPhase.RangeBound ||
+                (aggressiveModeActive && marketPhase.Phase == MarketPhase.Unknown)) &&
                IsWithinTradingRange(options, currentPrice) &&
                !IsBelowStop(options, currentPrice) &&
                !IsAboveStop(options, currentPrice);

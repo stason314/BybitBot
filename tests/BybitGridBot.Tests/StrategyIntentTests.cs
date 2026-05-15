@@ -30,6 +30,25 @@ public sealed class StrategyIntentTests
     }
 
     [Fact]
+    public void Grid_AggressiveModeAllowsUnknownPhaseInsideRange()
+    {
+        var strategy = new GridStrategy();
+        var options = Options();
+        var phase = new MarketPhaseResult
+        {
+            Phase = MarketPhase.Unknown,
+            Confidence = 0.35m,
+            Score = 35m,
+            Reason = "No reliable phase match.",
+            SuggestedStrategy = StrategyType.Pause,
+            DetectedAt = DateTimeOffset.UtcNow
+        };
+
+        Assert.False(strategy.CanCreateGridIntents(options, phase, 2.45m, bigRedGuardActive: false));
+        Assert.True(strategy.CanCreateGridIntents(options, phase, 2.45m, bigRedGuardActive: false, aggressiveModeActive: true));
+    }
+
+    [Fact]
     public void Btd_AllowsDipOnlyInUptrendWithoutRiskOffSignals()
     {
         var strategy = new BtdStrategy();

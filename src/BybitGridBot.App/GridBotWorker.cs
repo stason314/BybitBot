@@ -1544,7 +1544,8 @@ public sealed class GridBotWorker : BackgroundService
             return state;
         }
 
-        if (!IsGridSidewaysMarket(marketRegime, marketPhase))
+        var aggressiveModeActive = IsAggressiveModeActive(_gridOptions, state, DateTimeOffset.UtcNow);
+        if (!IsGridSidewaysMarket(marketRegime, marketPhase, aggressiveModeActive))
         {
             _logger.LogInformation(
                 "Grid orders skipped for {Symbol}: grid is allowed only in sideways markets. Regime={Regime}, Move={MovePercent:F4}%, Phase={Phase}, Reason={Reason}",
@@ -1597,7 +1598,7 @@ public sealed class GridBotWorker : BackgroundService
             return await FinishProtectiveReduceOnlyCycleAsync(profile, state, levels, currentPrice, cancellationToken);
         }
 
-        if (!_strategy.CanCreateGridIntents(_gridOptions, marketPhase, currentPrice, bigRedGuard.IsActive))
+        if (!_strategy.CanCreateGridIntents(_gridOptions, marketPhase, currentPrice, bigRedGuard.IsActive, aggressiveModeActive))
         {
             var noTradeReason = ResolveNoTradeReason(marketPhase);
             _logger.LogInformation(
@@ -4386,10 +4387,11 @@ public sealed class GridBotWorker : BackgroundService
             or MarketPhase.Exhaustion;
     }
 
-    private static bool IsGridSidewaysMarket(MarketRegimeAnalysis marketRegime, MarketPhaseResult marketPhase)
+    private static bool IsGridSidewaysMarket(MarketRegimeAnalysis marketRegime, MarketPhaseResult marketPhase, bool aggressiveModeActive)
     {
         return marketRegime.Regime == MarketRegimeType.Range &&
-            marketPhase.Phase == MarketPhase.RangeBound;
+            (marketPhase.Phase == MarketPhase.RangeBound ||
+             (aggressiveModeActive && marketPhase.Phase == MarketPhase.Unknown));
     }
 
     private async Task RecordNoTradeReasonForViolationsAsync(

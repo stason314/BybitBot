@@ -30,7 +30,7 @@ public sealed class AutoStrategySelector
         var atrPercent = lastPrice > 0m ? atr / lastPrice * 100m : 0m;
         var high = ordered.Max(candle => candle.High);
         var drawdownPercent = high > 0m ? (high - lastPrice) / high * 100m : 0m;
-        var step = ChooseStep(lastPrice, atr);
+        var step = ChooseProfitableStep(currentOptions, lastPrice, ChooseStep(lastPrice, atr));
         var padding = decimal.Max(step * 2m, atr * 1.5m);
         var lower = FloorToStep(decimal.Max(step, decimal.Min(support, lastPrice) - padding), step);
         var upper = CeilingToStep(decimal.Max(resistance, lastPrice) + padding, step);
@@ -695,6 +695,17 @@ public sealed class AutoStrategySelector
         }
 
         return decimal.Max(0.01m, decimal.Round(rawStep, 2, MidpointRounding.AwayFromZero));
+    }
+
+    private static decimal ChooseProfitableStep(GridOptions options, decimal lastPrice, decimal step)
+    {
+        if (lastPrice <= 0m)
+        {
+            return step;
+        }
+
+        var requiredStep = lastPrice * ExpectedProfitFilter.RequiredPercent(options) / 100m;
+        return step >= requiredStep ? step : ChooseStep(lastPrice, requiredStep * 2m);
     }
 
     private static decimal FloorToStep(decimal value, decimal step) =>

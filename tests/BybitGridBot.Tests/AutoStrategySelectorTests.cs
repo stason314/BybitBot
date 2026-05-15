@@ -71,6 +71,39 @@ public sealed class AutoStrategySelectorTests
     }
 
     [Fact]
+    public void Recommend_UsesProfitableGridStep()
+    {
+        var selector = new AutoStrategySelector();
+        var options = new GridOptions
+        {
+            LowerPrice = 9.9m,
+            UpperPrice = 10.2m,
+            Step = 0.03m,
+            OrderSizeUsdt = 15m,
+            StopLowerPrice = 9.7m,
+            StopUpperPrice = 10.4m
+        };
+        var candles = BuildCandles(10.05m, 10.07m, 10.03m, 60);
+
+        var recommendation = selector.Recommend(
+            options,
+            new MarketRegimeAnalysis
+            {
+                Regime = MarketRegimeType.Range,
+                Recommendation = "Range",
+                Support = 10.03m,
+                Resistance = 10.07m
+            },
+            candles);
+
+        var expectedProfitPercent = ExpectedProfitFilter.CalculateLongRoundTripPercent(
+            recommendation.LowerPrice,
+            recommendation.LowerPrice + recommendation.Step);
+
+        Assert.True(expectedProfitPercent > ExpectedProfitFilter.RequiredPercent(options));
+    }
+
+    [Fact]
     public void RecommendForStrategy_KeepsRequestedStrategy()
     {
         var selector = new AutoStrategySelector();
