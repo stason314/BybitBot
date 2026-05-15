@@ -18,6 +18,8 @@ public sealed class DashboardResponse
 
     public required DashboardSignalAnalysis SignalAnalysis { get; init; }
 
+    public required DashboardBtdDiagnostics BtdDiagnostics { get; init; }
+
     public required DashboardAutoRecommendation AutoRecommendation { get; init; }
 
     public DashboardNoTradeReason? LastNoTradeReason { get; init; }
@@ -174,6 +176,27 @@ public sealed class DashboardSignalAnalysis
     public decimal VolumeRatio { get; init; }
 
     public decimal TrendStrength { get; init; }
+}
+
+public sealed class DashboardBtdDiagnostics
+{
+    public required string Phase { get; init; }
+
+    public decimal EmaFast { get; init; }
+
+    public decimal EmaSlow { get; init; }
+
+    public bool BtcRiskOff { get; init; }
+
+    public decimal PullbackPercent { get; init; }
+
+    public decimal DistanceToEmaPercent { get; init; }
+
+    public bool DipTriggered { get; init; }
+
+    public bool IsAllowed { get; init; }
+
+    public required string Reason { get; init; }
 }
 
 public sealed class DashboardAutoRecommendation

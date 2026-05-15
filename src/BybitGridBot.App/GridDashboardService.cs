@@ -22,6 +22,8 @@ public interface IGridDashboardService
 
 public sealed class GridDashboardService : IGridDashboardService
 {
+    private static readonly JsonSerializerOptions StrategyJsonOptions = new(JsonSerializerDefaults.Web);
+
     private readonly AppOptions _appOptions;
     private readonly AutoStrategySelector _autoStrategySelector;
     private readonly GridOptions _defaultGridOptions;
@@ -136,7 +138,9 @@ public sealed class GridDashboardService : IGridDashboardService
         var analysisCandles = await GetAnalysisCandlesAsync(gridOptions, cancellationToken);
         var marketRegime = AnalyzeMarketRegime(analysisCandles);
         var signalAnalysis = AnalyzeSignal(analysisCandles);
-        var marketPhase = await DetectMarketPhaseAsync(gridOptions, analysisCandles, currentPrice, cancellationToken);
+        var btcCandles = await GetBtcCandlesForPhaseAsync(gridOptions, cancellationToken);
+        var marketPhase = DetectMarketPhase(gridOptions, analysisCandles, btcCandles, currentPrice);
+        var btdDiagnostics = BuildBtdDiagnostics(gridOptions, runtimeSettings, analysisCandles, btcCandles, marketPhase, currentPrice);
         var autoRecommendation = _autoStrategySelector.Recommend(gridOptions, marketRegime, marketPhase, analysisCandles);
         var recommendedSettings = BuildRecommendedSettings(runtimeSettings, autoRecommendation, StrategySelectionMode.Auto, generatedAt);
         recommendedSettings = UseReduceOnlyWhenNoTradeWouldLeavePosition(recommendedSettings, state);
@@ -201,6 +205,7 @@ public sealed class GridDashboardService : IGridDashboardService
             },
             MarketRegime = MapMarketRegime(marketRegime),
             SignalAnalysis = MapSignalAnalysis(signalAnalysis),
+            BtdDiagnostics = btdDiagnostics,
             AutoRecommendation = MapAutoRecommendation(autoRecommendation, autoRecommendationSafetyErrors),
             LastNoTradeReason = lastNoTradeReason is null ? null : MapNoTradeReason(lastNoTradeReason, generatedAt),
             NoTradeReasonHistory = noTradeReasonHistory.Select(reason => MapNoTradeReason(reason, generatedAt)).ToArray(),
@@ -298,8 +303,17 @@ public sealed class GridDashboardService : IGridDashboardService
         decimal? currentPrice,
         CancellationToken cancellationToken)
     {
-        var price = currentPrice ?? candles.OrderBy(candle => candle.OpenTime).LastOrDefault()?.Close ?? 0m;
         var btcCandles = await GetBtcCandlesForPhaseAsync(gridOptions, cancellationToken);
+        return DetectMarketPhase(gridOptions, candles, btcCandles, currentPrice);
+    }
+
+    private MarketPhaseResult DetectMarketPhase(
+        GridOptions gridOptions,
+        IReadOnlyList<Candle> candles,
+        IReadOnlyCollection<Candle> btcCandles,
+        decimal? currentPrice)
+    {
+        var price = currentPrice ?? candles.OrderBy(candle => candle.OpenTime).LastOrDefault()?.Close ?? 0m;
         return _priceActionPhaseDetector.Detect(gridOptions, price, candles, btcCandles);
     }
 
@@ -1334,6 +1348,16 @@ public sealed class GridDashboardService : IGridDashboardService
 
     <section class="panel section regime-card">
       <div>
+        <div class="label">BTD Diagnostics</div>
+        <div class="regime-title" id="btdDiagnosticsTitle">-</div>
+        <div class="subtle" id="btdDiagnosticsReason">-</div>
+        <div class="regime-meta" id="btdDiagnosticsMeta"></div>
+      </div>
+      <div class="badge">Allowed <strong id="btdDiagnosticsAllowed">-</strong></div>
+    </section>
+
+    <section class="panel section regime-card">
+      <div>
         <div class="label">Auto Recommendation</div>
         <div class="regime-title" id="autoStrategyTitle">-</div>
         <div class="subtle" id="autoStrategyReason">-</div>
@@ -1666,6 +1690,7 @@ public sealed class GridDashboardService : IGridDashboardService
         configSummaries: latestDashboardData.configSummaries,
         marketRegime: latestDashboardData.marketRegime,
         signalAnalysis: latestDashboardData.signalAnalysis,
+        btdDiagnostics: latestDashboardData.btdDiagnostics,
         autoRecommendation: latestDashboardData.autoRecommendation,
         gridLevels: latestDashboardData.gridLevels,
         activeOrders: latestDashboardData.activeOrders,
@@ -1839,6 +1864,17 @@ public sealed class GridDashboardService : IGridDashboardService
         ['Bollinger', formatNumber(data.signalAnalysis.bollingerPosition)],
         ['Volume x', formatNumber(data.signalAnalysis.volumeRatio)],
         ['Trend', `${formatNumber(data.signalAnalysis.trendStrength)}%`]
+      ].map(([label, value]) => `<span class="regime-chip">${label}: ${value}</span>`).join('');
+      byId('btdDiagnosticsTitle').textContent = data.btdDiagnostics.phase;
+      byId('btdDiagnosticsReason').textContent = data.btdDiagnostics.reason;
+      byId('btdDiagnosticsAllowed').textContent = data.btdDiagnostics.isAllowed ? 'yes' : 'no';
+      byId('btdDiagnosticsMeta').innerHTML = [
+        ['EMA fast', formatNumber(data.btdDiagnostics.emaFast)],
+        ['EMA slow', formatNumber(data.btdDiagnostics.emaSlow)],
+        ['BTC risk-off', data.btdDiagnostics.btcRiskOff ? 'yes' : 'no'],
+        ['Pullback', `${formatNumber(data.btdDiagnostics.pullbackPercent)}%`],
+        ['Distance to EMA', `${formatNumber(data.btdDiagnostics.distanceToEmaPercent)}%`],
+        ['Dip trigger', data.btdDiagnostics.dipTriggered ? 'yes' : 'no']
       ].map(([label, value]) => `<span class="regime-chip">${label}: ${value}</span>`).join('');
       byId('autoStrategyTitle').textContent = data.autoRecommendation.strategyType;
       byId('autoStrategyReason').textContent = data.autoRecommendation.reason;
@@ -2595,6 +2631,141 @@ public sealed class GridDashboardService : IGridDashboardService
             VolumeRatio = analysis.VolumeRatio,
             TrendStrength = analysis.TrendStrength
         };
+    }
+
+    private static DashboardBtdDiagnostics BuildBtdDiagnostics(
+        GridOptions options,
+        GridBotSettings settings,
+        IReadOnlyList<Candle> candles,
+        IReadOnlyCollection<Candle> btcCandles,
+        MarketPhaseResult phase,
+        decimal? currentPrice)
+    {
+        var price = currentPrice ?? candles.OrderBy(candle => candle.OpenTime).LastOrDefault()?.Close ?? 0m;
+        var ordered = candles.OrderBy(candle => candle.OpenTime).ToArray();
+        if (price <= 0m || ordered.Length < Math.Max(options.EmaSlow, options.TrendEmaSlow) + 1)
+        {
+            return new DashboardBtdDiagnostics
+            {
+                Phase = phase.Phase.ToString(),
+                Reason = "BTD diagnostics unavailable: not enough candle data.",
+                IsAllowed = false
+            };
+        }
+
+        var config = ParseBtdDiagnosticsConfig(settings);
+        var emaFast = CalculateEma(ordered, options.EmaFast);
+        var emaSlow = CalculateEma(ordered, options.EmaSlow);
+        var btcRiskOff = options.BtdBlockOnBtcRiskOff &&
+            IsBtcRiskOff(btcCandles, options.BtcLookbackCandles, options.BtcMaxMovePercent);
+        var distanceToEma = Math.Min(PercentDistance(price, emaFast), PercentDistance(price, emaSlow));
+        var recentHigh = ordered.TakeLast(Math.Max(1, options.DumpLookbackCandles * 10)).Max(candle => candle.High);
+        var pullbackPercent = recentHigh <= 0m ? 0m : (recentHigh - price) / recentHigh * 100m;
+        var dipLookback = Math.Max(1, config.DipLookbackCandles);
+        var dipHigh = ordered.TakeLast(dipLookback).Max(candle => candle.High);
+        var dipDrawdownPercent = dipHigh <= 0m ? 0m : (dipHigh - price) / dipHigh * 100m;
+        var dipTriggered = config.DipPercent <= 0m || dipDrawdownPercent >= config.DipPercent;
+
+        var isAllowed = true;
+        var reason = "BTD conditions pass.";
+        if (phase.Phase is MarketPhase.Dump or MarketPhase.HighVolatility or MarketPhase.BreakoutDown)
+        {
+            isAllowed = false;
+            reason = $"BTD silent: blocked by phase {phase.Phase}. {phase.Reason}";
+        }
+        else if (options.BtdRequireUptrend && phase.Phase != MarketPhase.PullbackInUptrend)
+        {
+            isAllowed = false;
+            reason = $"BTD silent: phase is {phase.Phase}, expected PullbackInUptrend. {phase.Reason}";
+        }
+        else if (btcRiskOff)
+        {
+            isAllowed = false;
+            reason = "BTD silent: BTC risk-off is active.";
+        }
+        else if (emaFast <= emaSlow)
+        {
+            isAllowed = false;
+            reason = "BTD silent: EMA fast is below or equal to EMA slow.";
+        }
+        else if (distanceToEma > options.BtdMaxDistanceFromEmaPercent)
+        {
+            isAllowed = false;
+            reason = $"BTD silent: price is {distanceToEma:F2}% from EMA, max {options.BtdMaxDistanceFromEmaPercent:F2}%.";
+        }
+        else if (pullbackPercent < options.BtdMinPullbackPercent)
+        {
+            isAllowed = false;
+            reason = $"BTD silent: pullback is {pullbackPercent:F2}%, min {options.BtdMinPullbackPercent:F2}%.";
+        }
+        else if (!dipTriggered)
+        {
+            isAllowed = false;
+            reason = $"BTD silent: dip trigger is {dipDrawdownPercent:F2}%, min {config.DipPercent:F2}%.";
+        }
+
+        return new DashboardBtdDiagnostics
+        {
+            Phase = phase.Phase.ToString(),
+            EmaFast = emaFast,
+            EmaSlow = emaSlow,
+            BtcRiskOff = btcRiskOff,
+            PullbackPercent = pullbackPercent,
+            DistanceToEmaPercent = distanceToEma,
+            DipTriggered = dipTriggered,
+            IsAllowed = isAllowed,
+            Reason = reason
+        };
+    }
+
+    private static BtdStrategyConfig ParseBtdDiagnosticsConfig(GridBotSettings settings)
+    {
+        if (string.IsNullOrWhiteSpace(settings.StrategyConfigJson))
+        {
+            return new BtdStrategyConfig();
+        }
+
+        try
+        {
+            return JsonSerializer.Deserialize<BtdStrategyConfig>(settings.StrategyConfigJson, StrategyJsonOptions) ?? new BtdStrategyConfig();
+        }
+        catch
+        {
+            return new BtdStrategyConfig();
+        }
+    }
+
+    private static decimal CalculateEma(IReadOnlyList<Candle> candles, int period)
+    {
+        if (candles.Count == 0)
+        {
+            return 0m;
+        }
+
+        var multiplier = 2m / (Math.Max(1, period) + 1);
+        var ema = candles[0].Close;
+        foreach (var candle in candles.Skip(1))
+        {
+            ema = (candle.Close - ema) * multiplier + ema;
+        }
+
+        return ema;
+    }
+
+    private static decimal PercentDistance(decimal value, decimal reference)
+    {
+        return reference <= 0m ? 0m : Math.Abs(value - reference) / reference * 100m;
+    }
+
+    private static bool IsBtcRiskOff(IReadOnlyCollection<Candle> btcCandles, int lookbackCandles, decimal maxMovePercent)
+    {
+        var slice = btcCandles.OrderBy(candle => candle.OpenTime).TakeLast(Math.Max(1, lookbackCandles)).ToArray();
+        if (slice.Length < Math.Max(1, lookbackCandles) || slice[0].Open <= 0m)
+        {
+            return false;
+        }
+
+        return (slice[^1].Close - slice[0].Open) / slice[0].Open * 100m <= -Math.Abs(maxMovePercent);
     }
 
     private static GridBotSettings BuildRecommendedSettings(
