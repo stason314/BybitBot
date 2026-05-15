@@ -148,6 +148,11 @@ public sealed class FuturesIntegrationSafetyTests
         var service = new FuturesReconciliationService(
             Options.Create(new AppOptions { TradingMode = TradingMode.Testnet }),
             bybitClient,
+            new FuturesProtectionService(
+                Options.Create(new AppOptions { TradingMode = TradingMode.Testnet }),
+                bybitClient,
+                repository,
+                NullLogger<FuturesProtectionService>.Instance),
             repository,
             NullLogger<FuturesReconciliationService>.Instance);
         var state = new BotState { Symbol = FuturesStateKeys.ForSymbol("BTCUSDT"), TradingMode = TradingMode.Testnet };

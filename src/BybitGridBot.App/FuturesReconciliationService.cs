@@ -10,17 +10,20 @@ public sealed class FuturesReconciliationService
 {
     private readonly AppOptions _appOptions;
     private readonly IBybitRestClient _bybitRestClient;
+    private readonly FuturesProtectionService _protectionService;
     private readonly ILogger<FuturesReconciliationService> _logger;
     private readonly IGridRepository _repository;
 
     public FuturesReconciliationService(
         IOptions<AppOptions> appOptions,
         IBybitRestClient bybitRestClient,
+        FuturesProtectionService protectionService,
         IGridRepository repository,
         ILogger<FuturesReconciliationService> logger)
     {
         _appOptions = appOptions.Value;
         _bybitRestClient = bybitRestClient;
+        _protectionService = protectionService;
         _repository = repository;
         _logger = logger;
     }
@@ -105,6 +108,10 @@ public sealed class FuturesReconciliationService
         ApplyPositionToState(state, position);
         await _repository.SaveBotStateAsync(state, cancellationToken);
         await _repository.UpsertFuturesPositionAsync(position, _appOptions.TradingMode, cancellationToken);
+        if (position.Size > 0m)
+        {
+            await _protectionService.EnsureProtectiveStopAsync(settings, position, cancellationToken);
+        }
 
         return new FuturesReconciliationResult
         {
