@@ -1094,12 +1094,31 @@ public sealed class GridBotWorker : BackgroundService
             _gridOptions.Category,
             _gridOptions.Symbol,
             string.IsNullOrWhiteSpace(config.CandleInterval) ? "1" : config.CandleInterval,
-            Math.Max(10, config.DipLookbackCandles),
+            Math.Max(120, Math.Max(config.DipLookbackCandles, Math.Max(_gridOptions.EmaSlow, _gridOptions.TrendEmaSlow) + 10)),
             cancellationToken);
         var regime = _marketRegimeAnalyzer.Analyze(candles);
         if (regime.Regime == MarketRegimeType.Danger)
         {
             _logger.LogInformation("BTD entry skipped because market regime is danger.");
+            await RecordNoTradeReasonAsync(profile, NoTradeReason.DumpDetected, "BTD skipped: danger regime is active.", cancellationToken);
+            return;
+        }
+
+        var btcCandles = _gridOptions.BtcFilterEnabled
+            ? await _bybitRestClient.GetKlinesAsync(
+                "spot",
+                "BTCUSDT",
+                string.IsNullOrWhiteSpace(config.CandleInterval) ? "1" : config.CandleInterval,
+                Math.Max(20, _gridOptions.BtcLookbackCandles),
+                cancellationToken)
+            : [];
+        var marketPhase = _priceActionPhaseDetector.Detect(_gridOptions, currentPrice, candles, btcCandles);
+        if (!_btdStrategy.IsDipAllowedByPhase(_gridOptions, marketPhase, currentPrice, candles, btcCandles))
+        {
+            var reasonCode = ResolveNoTradeReason(marketPhase);
+            var reason = $"BTD skipped: trend not confirmed. Phase={marketPhase.Phase}; Reason={marketPhase.Reason}";
+            _logger.LogInformation(reason);
+            await RecordNoTradeReasonAsync(profile, reasonCode, reason, cancellationToken);
             return;
         }
 
