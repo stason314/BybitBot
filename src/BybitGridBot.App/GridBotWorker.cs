@@ -3721,29 +3721,28 @@ public sealed class GridBotWorker : BackgroundService
         CancellationToken cancellationToken)
     {
         if (!_gridOptions.AggressiveModeEnabled ||
-            _gridOptions.AggressiveModeCooldownMinutes <= 0 ||
-            _gridOptions.AggressiveStopLossPercent <= 0m)
+            _gridOptions.AggressiveModeCooldownMinutes <= 0)
         {
             return;
         }
 
         var lossPercent = CalculateLossPercent(order, pnlDelta);
-        if (lossPercent < _gridOptions.AggressiveStopLossPercent)
-        {
-            return;
-        }
+        var thresholdPercent = decimal.Max(0m, _gridOptions.AggressiveStopLossPercent);
+        var thresholdReached = thresholdPercent > 0m && lossPercent >= thresholdPercent;
 
         state.AggressiveModeEnabled = false;
         state.AggressiveModeDisabledUntil = now.AddMinutes(_gridOptions.AggressiveModeCooldownMinutes);
         state.AggressiveModeDisabledReason =
-            $"Stop-loss threshold reached by {source} sell {order.OrderLinkId}: loss {lossPercent:0.####}% / PnL {pnlDelta}.";
+            thresholdReached
+                ? $"Stop-loss threshold reached by {source} sell {order.OrderLinkId}: loss {lossPercent:0.####}% / PnL {pnlDelta}."
+                : $"Loss sell by {source} {order.OrderLinkId}: loss {lossPercent:0.####}% / PnL {pnlDelta}.";
         state.AggressiveModeLastLossAt = now;
         state.UpdatedAt = now;
         await _repository.SaveBotStateAsync(state, cancellationToken);
         await RecordNoTradeReasonAsync(
             profile ?? ResolveCurrentProfile(),
             NoTradeReason.AggressiveStopLoss,
-            state.AggressiveModeDisabledReason ?? "Aggressive mode disabled after stop-loss threshold.",
+            state.AggressiveModeDisabledReason ?? "Aggressive mode disabled after loss sell.",
             cancellationToken);
 
         _logger.LogWarning(
