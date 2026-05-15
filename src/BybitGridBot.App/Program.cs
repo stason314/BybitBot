@@ -185,6 +185,12 @@ app.MapPost("/api/futures/orders/{symbol}/cancel-active", async (string symbol, 
     return response.Success ? Results.Ok(response) : Results.BadRequest(response);
 });
 
+app.MapPost("/api/futures/stats/{symbol}/reset", async (string symbol, IFuturesDashboardService dashboardService, CancellationToken cancellationToken) =>
+{
+    var response = await dashboardService.ResetPaperStatsAsync(symbol, cancellationToken);
+    return response.Success ? Results.Ok(response) : Results.BadRequest(response);
+});
+
 app.MapPost("/api/resume", async (string? symbol, IGridDashboardService dashboardService, CancellationToken cancellationToken) =>
 {
     var response = await dashboardService.ResumeTradingAsync(symbol, cancellationToken);

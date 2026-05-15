@@ -18,6 +18,7 @@ public interface IFuturesDashboardService
     Task<UpdateSettingsResponse> ClosePositionAsync(string symbol, CancellationToken cancellationToken);
     Task<UpdateSettingsResponse> OpenPaperTestPositionAsync(string symbol, CancellationToken cancellationToken);
     Task<UpdateSettingsResponse> CancelActiveOrdersAsync(string symbol, CancellationToken cancellationToken);
+    Task<UpdateSettingsResponse> ResetPaperStatsAsync(string symbol, CancellationToken cancellationToken);
     string RenderDashboardPage();
 }
 
@@ -606,6 +607,102 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         };
     }
 
+    public async Task<UpdateSettingsResponse> ResetPaperStatsAsync(string symbol, CancellationToken cancellationToken)
+    {
+        var normalizedSymbol = NormalizeSymbol(symbol);
+        if (_appOptions.TradingMode != TradingMode.Paper)
+        {
+            return new UpdateSettingsResponse
+            {
+                Success = false,
+                Symbol = normalizedSymbol,
+                Message = "Paper stats reset is disabled outside paper mode.",
+                Errors = ["Reset Stats is available only when TRADING_MODE=Paper."]
+            };
+        }
+
+        var settings = await _repository.GetFuturesSettingsAsync(normalizedSymbol, cancellationToken);
+        if (settings is null)
+        {
+            return new UpdateSettingsResponse
+            {
+                Success = false,
+                Symbol = normalizedSymbol,
+                Message = "Futures profile not found.",
+                Errors = [$"Futures profile {normalizedSymbol} does not exist."]
+            };
+        }
+
+        var activeOrders = await _repository.GetActiveFuturesOrdersAsync(settings.Symbol, cancellationToken);
+        if (activeOrders.Count > 0)
+        {
+            return new UpdateSettingsResponse
+            {
+                Success = false,
+                Symbol = normalizedSymbol,
+                Message = "Cannot reset paper stats while futures orders are active.",
+                Errors = ["Cancel active futures orders before resetting paper stats."]
+            };
+        }
+
+        var position = await ResolvePositionSnapshotAsync(settings, cancellationToken);
+        if (position.Size > 0m)
+        {
+            return new UpdateSettingsResponse
+            {
+                Success = false,
+                Symbol = normalizedSymbol,
+                Message = "Cannot reset paper stats while a futures position is open.",
+                Errors = ["Close the paper futures position before resetting stats."]
+            };
+        }
+
+        var stateKey = FuturesStateKeys.ForSymbol(settings.Symbol);
+        var currentState = await _repository.GetBotStateAsync(stateKey, cancellationToken);
+        var markPrice = position.MarkPrice > 0m
+            ? position.MarkPrice
+            : currentState?.LastObservedPrice ?? 0m;
+
+        await _repository.ClearFuturesPaperHistoryAsync(settings.Symbol, cancellationToken);
+        await _repository.SaveBotStateAsync(new BotState
+        {
+            Symbol = stateKey,
+            TradingMode = TradingMode.Paper,
+            IsInitialized = currentState?.IsInitialized ?? true,
+            IsPaused = currentState?.IsPaused ?? false,
+            PauseReason = currentState?.PauseReason,
+            LastObservedPrice = markPrice > 0m ? markPrice : null,
+            PositionSide = "None",
+            BaseAssetQuantity = 0m,
+            QuoteAssetBalance = _futuresOptions.PaperInitialEquityUsdt,
+            AverageEntryPrice = 0m,
+            ReduceOnly = false,
+            PositionIdx = 0,
+            Leverage = settings.Leverage,
+            MarginMode = settings.MarginMode.ToString(),
+            EntryPrice = 0m,
+            MarkPrice = markPrice,
+            LiquidationPrice = 0m,
+            UnrealizedPnl = 0m,
+            TotalRealizedPnl = 0m,
+            DailyRealizedPnl = 0m,
+            PeakEquityUsdt = _futuresOptions.PaperInitialEquityUsdt,
+            CurrentDrawdownUsdt = 0m,
+            CurrentDrawdownPercent = 0m,
+            ProfitProtectionPeakPrice = currentState?.ProfitProtectionPeakPrice ?? 0m,
+            ProfitProtectionTrailingStopPrice = currentState?.ProfitProtectionTrailingStopPrice ?? 0m,
+            DailyPnlDate = DateOnly.FromDateTime(DateTime.UtcNow),
+            UpdatedAt = DateTimeOffset.UtcNow
+        }, cancellationToken);
+
+        return new UpdateSettingsResponse
+        {
+            Success = true,
+            Symbol = normalizedSymbol,
+            Message = $"Paper stats reset for {normalizedSymbol}."
+        };
+    }
+
     public string RenderDashboardPage() => """
 <!doctype html>
 <html lang="en">
@@ -726,6 +823,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
           <span class="subtle">hours</span>
           <button type="button" class="compact-button" id="copyLastHistory">Copy Last</button>
           <button type="button" class="compact-button" id="copyDiagnostics">Copy Diagnostics</button>
+          <button type="button" class="compact-button danger" id="resetPaperStats">Reset Stats</button>
         </div>
       </div>
       <div class="stats" id="paperAccountStats" style="margin-bottom:0;"></div>
@@ -988,6 +1086,11 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
       paperTestEntry.title = data.tradingMode === 'Paper'
         ? (data.settings.enabled ? 'Open a minimal paper long through futures execution.' : 'Enable the futures profile first.')
         : 'Paper Test Entry is available only when TRADING_MODE=Paper.';
+      const resetPaperStats = byId('resetPaperStats');
+      resetPaperStats.disabled = data.tradingMode !== 'Paper';
+      resetPaperStats.title = data.tradingMode === 'Paper'
+        ? 'Reset paper account PnL and futures diagnostic history for the selected symbol.'
+        : 'Reset Stats is available only when TRADING_MODE=Paper.';
       byId('runtimeStatus').innerHTML = [
         `<span class="chip">${escapeHtml(data.tradingMode)}</span>`,
         `<span class="chip">${data.futuresEnabled ? 'Futures enabled' : 'Futures disabled'}</span>`,
@@ -1293,6 +1396,19 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         byId('copyStatus').className = 'status error';
         byId('copyStatus').textContent = error.message;
       });
+    });
+    byId('resetPaperStats').addEventListener('click', async () => {
+      const symbol = selectedSymbol || latest?.settings?.symbol;
+      if (latest?.tradingMode !== 'Paper' || !symbol) return;
+      if (!window.confirm(`Reset paper stats for ${symbol}? Close positions first; this clears futures paper orders, fills, risk decisions, and PnL history for this symbol.`)) {
+        return;
+      }
+
+      const response = await fetch(`/api/futures/stats/${encodeURIComponent(symbol)}/reset`, { method: 'POST' });
+      const result = await response.json();
+      byId('copyStatus').className = `status ${response.ok ? 'ok' : 'error'}`;
+      byId('copyStatus').textContent = response.ok ? result.message : (result.errors?.join(' | ') || result.message);
+      await load(true);
     });
     byId('settingsForm').addEventListener('submit', async (event) => {
       event.preventDefault();

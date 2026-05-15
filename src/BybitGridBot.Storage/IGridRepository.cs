@@ -24,6 +24,7 @@ public interface IGridRepository
     Task<bool> FuturesFillExistsAsync(string execId, CancellationToken cancellationToken);
     Task<IReadOnlyList<FuturesRiskDecisionRecord>> GetFuturesRiskDecisionsAsync(string symbol, int limit, CancellationToken cancellationToken);
     Task AddFuturesRiskDecisionAsync(FuturesRiskDecisionRecord decision, CancellationToken cancellationToken);
+    Task ClearFuturesPaperHistoryAsync(string symbol, CancellationToken cancellationToken);
     Task<IReadOnlyList<GridLevel>> GetGridLevelsAsync(string symbol, CancellationToken cancellationToken);
     Task SaveGridLevelsAsync(string symbol, IReadOnlyCollection<GridLevel> levels, CancellationToken cancellationToken);
     Task<IReadOnlyList<GridOrder>> GetOrdersAsync(string symbol, CancellationToken cancellationToken);
