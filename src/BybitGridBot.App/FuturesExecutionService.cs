@@ -29,6 +29,7 @@ public sealed class FuturesExecutionService
         FuturesExecutionRequest request,
         CancellationToken cancellationToken)
     {
+        ValidateInstrumentRules(request.Intent, request.Instrument);
         var bybitRequest = CreateBybitRequest(request.Settings, request.Intent);
         var now = DateTimeOffset.UtcNow;
         var order = new GridOrder
@@ -122,6 +123,11 @@ public sealed class FuturesExecutionService
             throw new InvalidOperationException("Futures MVP requires positionIdx=0 for one-way mode.");
         }
 
+        if (intent.Action == FuturesTradeAction.OpenLong && string.IsNullOrWhiteSpace(request.StopLoss))
+        {
+            throw new InvalidOperationException("Futures OpenLong must attach stopLoss to order create.");
+        }
+
         return request;
     }
 
@@ -159,6 +165,34 @@ public sealed class FuturesExecutionService
         }
     }
 
+    private static void ValidateInstrumentRules(FuturesTradeIntent intent, FuturesInstrumentRules instrument)
+    {
+        if (instrument.TickSize <= 0m)
+        {
+            throw new InvalidOperationException("Futures instrument tick size is invalid.");
+        }
+
+        if (instrument.QtyStep <= 0m && instrument.BasePrecision <= 0m)
+        {
+            throw new InvalidOperationException("Futures instrument quantity step is invalid.");
+        }
+
+        if (intent.Quantity <= 0m)
+        {
+            throw new InvalidOperationException("Futures order quantity must be positive.");
+        }
+
+        if (intent.IsPositionIncreasing && instrument.MinOrderQty > 0m && intent.Quantity < instrument.MinOrderQty)
+        {
+            throw new InvalidOperationException("Futures order quantity is below instrument min qty.");
+        }
+
+        if (intent.IsPositionIncreasing && instrument.MinOrderAmount > 0m && intent.NotionalUsdt < instrument.MinOrderAmount)
+        {
+            throw new InvalidOperationException("Futures order notional is below instrument min notional.");
+        }
+    }
+
     private static string ResolvePositionSide(FuturesTradeAction action) =>
         action switch
         {
@@ -177,6 +211,8 @@ public sealed class FuturesExecutionRequest
     public FuturesPositionSnapshot Position { get; init; } = new();
 
     public decimal MarkPrice { get; init; }
+
+    public FuturesInstrumentRules Instrument { get; init; } = new();
 
     public decimal FeeRatePercent { get; init; } = 0.06m;
 }

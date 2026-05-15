@@ -1,4 +1,3 @@
-using System.Globalization;
 using BybitGridBot.Bybit;
 using BybitGridBot.Domain;
 using BybitGridBot.Notifications;
@@ -18,6 +17,7 @@ public sealed class FuturesBotWorker : BackgroundService
     private readonly IBybitRestClient _bybitRestClient;
     private readonly FuturesExecutionService _executionService;
     private readonly FuturesOptions _futuresOptions;
+    private readonly FuturesPreflightService _preflightService;
     private readonly FuturesReconciliationService _reconciliationService;
     private readonly FuturesRiskManager _riskManager;
     private readonly FuturesRiskOptions _riskOptions;
@@ -25,7 +25,6 @@ public sealed class FuturesBotWorker : BackgroundService
     private readonly ILogger<FuturesBotWorker> _logger;
     private readonly ITelegramNotifier _notifier;
     private readonly IGridRepository _repository;
-    private readonly HashSet<string> _configuredTestnetSymbols = new(StringComparer.OrdinalIgnoreCase);
 
     public FuturesBotWorker(
         IOptions<AppOptions> appOptions,
@@ -33,6 +32,7 @@ public sealed class FuturesBotWorker : BackgroundService
         IOptions<FuturesRiskOptions> riskOptions,
         IBybitRestClient bybitRestClient,
         FuturesExecutionService executionService,
+        FuturesPreflightService preflightService,
         FuturesReconciliationService reconciliationService,
         FuturesRiskManager riskManager,
         FuturesStrategyRouter strategyRouter,
@@ -45,6 +45,7 @@ public sealed class FuturesBotWorker : BackgroundService
         _riskOptions = riskOptions.Value;
         _bybitRestClient = bybitRestClient;
         _executionService = executionService;
+        _preflightService = preflightService;
         _reconciliationService = reconciliationService;
         _riskManager = riskManager;
         _strategyRouter = strategyRouter;
@@ -103,6 +104,7 @@ public sealed class FuturesBotWorker : BackgroundService
         var ticker = await _bybitRestClient.GetTickerAsync(settings.Category, settings.Symbol, cancellationToken);
         var currentPrice = ticker.LastPrice;
         var instrument = await _bybitRestClient.GetInstrumentInfoAsync(settings.Category, settings.Symbol, cancellationToken);
+        var instrumentRules = MapInstrumentRules(instrument);
         var candles = await _bybitRestClient.GetKlinesAsync(
             settings.Category,
             settings.Symbol,
@@ -116,7 +118,7 @@ public sealed class FuturesBotWorker : BackgroundService
 
         if (_appOptions.TradingMode == TradingMode.Testnet)
         {
-            await EnsureTestnetConfigurationAsync(settings, cancellationToken);
+            await _preflightService.EnsureTestnetReadyAsync(settings, instrument, cancellationToken);
             var reconciliation = await _reconciliationService.ReconcileAsync(settings, state, currentPrice, cancellationToken);
             position = reconciliation.Position;
             if (reconciliation.SyncedOrderCount > 0 || reconciliation.FixedHangingOrderCount > 0)
@@ -137,7 +139,7 @@ public sealed class FuturesBotWorker : BackgroundService
             Candles = candles,
             Position = position,
             CurrentPrice = currentPrice,
-            Instrument = MapInstrumentRules(instrument)
+            Instrument = instrumentRules
         });
         foreach (var intent in decision.TradeIntents)
         {
@@ -166,7 +168,8 @@ public sealed class FuturesBotWorker : BackgroundService
                 Settings = settings,
                 Intent = intent,
                 Position = position,
-                MarkPrice = currentPrice
+                MarkPrice = currentPrice,
+                Instrument = instrumentRules
             }, cancellationToken);
 
             position = result.Position;
@@ -185,37 +188,6 @@ public sealed class FuturesBotWorker : BackgroundService
             FuturesReconciliationService.ApplyPositionToState(state, position);
             await _repository.SaveBotStateAsync(state, cancellationToken);
         }
-    }
-
-    private async Task EnsureTestnetConfigurationAsync(FuturesBotSettings settings, CancellationToken cancellationToken)
-    {
-        if (!_configuredTestnetSymbols.Add(settings.Symbol))
-        {
-            return;
-        }
-
-        var leverage = FormatDecimal(settings.Leverage);
-        await _bybitRestClient.SwitchPositionModeAsync(new BybitSwitchPositionModeRequest
-        {
-            Category = settings.Category,
-            Symbol = settings.Symbol,
-            Mode = 0
-        }, cancellationToken);
-        await _bybitRestClient.SwitchIsolatedMarginAsync(new BybitSwitchIsolatedMarginRequest
-        {
-            Category = settings.Category,
-            Symbol = settings.Symbol,
-            TradeMode = 1,
-            BuyLeverage = leverage,
-            SellLeverage = leverage
-        }, cancellationToken);
-        await _bybitRestClient.SetLeverageAsync(new BybitSetLeverageRequest
-        {
-            Category = settings.Category,
-            Symbol = settings.Symbol,
-            BuyLeverage = leverage,
-            SellLeverage = leverage
-        }, cancellationToken);
     }
 
     private async Task<BotState> EnsureFuturesStateAsync(
@@ -306,6 +278,4 @@ public sealed class FuturesBotWorker : BackgroundService
         MinOrderQty = instrument.MinOrderQty,
         MinOrderAmount = instrument.MinOrderAmount
     };
-
-    private static string FormatDecimal(decimal value) => value.ToString(CultureInfo.InvariantCulture);
 }

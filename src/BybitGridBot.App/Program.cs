@@ -59,6 +59,7 @@ builder.Services.AddSingleton<FuturesAutoConfigRecommender>();
 builder.Services.AddSingleton<FuturesAccounting>();
 builder.Services.AddSingleton<FuturesPaperSimulator>();
 builder.Services.AddSingleton<FuturesExecutionService>();
+builder.Services.AddSingleton<FuturesPreflightService>();
 builder.Services.AddSingleton<FuturesReconciliationService>();
 builder.Services.AddSingleton<IFuturesStrategy, FuturesPause>();
 builder.Services.AddSingleton<IFuturesStrategy, FuturesReduceOnly>();
