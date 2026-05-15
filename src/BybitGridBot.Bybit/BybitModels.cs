@@ -13,6 +13,7 @@ public interface IBybitRestClient
     Task<BybitOrderAck> CancelOrderAsync(string category, string symbol, string? orderId, string? orderLinkId, CancellationToken cancellationToken);
     Task<IReadOnlyList<BybitOrderSnapshot>> GetOpenOrdersAsync(string category, string symbol, CancellationToken cancellationToken);
     Task<IReadOnlyList<BybitOrderSnapshot>> GetOrderHistoryAsync(string category, string symbol, string? orderLinkId, CancellationToken cancellationToken);
+    Task<IReadOnlyList<BybitExecutionSnapshot>> GetExecutionsAsync(string category, string symbol, string? orderLinkId, string? execType, CancellationToken cancellationToken);
     Task<IReadOnlyList<Candle>> GetKlinesAsync(string category, string symbol, string interval, int limit, CancellationToken cancellationToken);
     Task<BybitInstrumentInfo> GetInstrumentInfoAsync(string category, string symbol, CancellationToken cancellationToken);
     Task<BybitPositionSnapshot?> GetPositionAsync(string category, string symbol, CancellationToken cancellationToken);
@@ -254,6 +255,35 @@ public sealed class BybitOrderSnapshot
     public DateTimeOffset UpdatedAt { get; init; }
 }
 
+public sealed class BybitExecutionSnapshot
+{
+    public string ExecId { get; init; } = string.Empty;
+
+    public string OrderId { get; init; } = string.Empty;
+
+    public string OrderLinkId { get; init; } = string.Empty;
+
+    public string Symbol { get; init; } = string.Empty;
+
+    public string Side { get; init; } = string.Empty;
+
+    public string ExecType { get; init; } = string.Empty;
+
+    public decimal ExecPrice { get; init; }
+
+    public decimal ExecQty { get; init; }
+
+    public decimal ExecValue { get; init; }
+
+    public decimal ExecFee { get; init; }
+
+    public decimal ClosedSize { get; init; }
+
+    public bool IsMaker { get; init; }
+
+    public DateTimeOffset ExecTime { get; init; }
+}
+
 public sealed class BybitInstrumentInfo
 {
     public string Symbol { get; init; } = string.Empty;
@@ -369,6 +399,12 @@ internal sealed class BybitOrdersResult
 {
     [JsonPropertyName("list")]
     public List<BybitOrderItem> List { get; init; } = [];
+}
+
+internal sealed class BybitExecutionsResult
+{
+    [JsonPropertyName("list")]
+    public List<BybitExecutionItem> List { get; init; } = [];
 }
 
 internal sealed class BybitFeeRateResult
@@ -497,6 +533,48 @@ internal sealed class BybitOrderItem
     public Dictionary<string, string>? CumFeeDetail { get; init; }
 }
 
+internal sealed class BybitExecutionItem
+{
+    [JsonPropertyName("execId")]
+    public string ExecId { get; init; } = string.Empty;
+
+    [JsonPropertyName("orderId")]
+    public string OrderId { get; init; } = string.Empty;
+
+    [JsonPropertyName("orderLinkId")]
+    public string OrderLinkId { get; init; } = string.Empty;
+
+    [JsonPropertyName("symbol")]
+    public string Symbol { get; init; } = string.Empty;
+
+    [JsonPropertyName("side")]
+    public string Side { get; init; } = string.Empty;
+
+    [JsonPropertyName("execType")]
+    public string ExecType { get; init; } = string.Empty;
+
+    [JsonPropertyName("execPrice")]
+    public string ExecPrice { get; init; } = "0";
+
+    [JsonPropertyName("execQty")]
+    public string ExecQty { get; init; } = "0";
+
+    [JsonPropertyName("execValue")]
+    public string ExecValue { get; init; } = "0";
+
+    [JsonPropertyName("execFee")]
+    public string ExecFee { get; init; } = "0";
+
+    [JsonPropertyName("closedSize")]
+    public string ClosedSize { get; init; } = "0";
+
+    [JsonPropertyName("isMaker")]
+    public bool IsMaker { get; init; }
+
+    [JsonPropertyName("execTime")]
+    public string ExecTime { get; init; } = "0";
+}
+
 internal sealed class BybitKlineResult
 {
     [JsonPropertyName("list")]
@@ -589,6 +667,26 @@ internal static class BybitModelMapper
             PositionIdx = item.PositionIdx,
             CreatedAt = ParseUnixMilliseconds(item.CreatedTime),
             UpdatedAt = ParseUnixMilliseconds(item.UpdatedTime)
+        };
+    }
+
+    public static BybitExecutionSnapshot ToSnapshot(this BybitExecutionItem item)
+    {
+        return new BybitExecutionSnapshot
+        {
+            ExecId = item.ExecId,
+            OrderId = item.OrderId,
+            OrderLinkId = item.OrderLinkId,
+            Symbol = item.Symbol,
+            Side = item.Side,
+            ExecType = item.ExecType,
+            ExecPrice = ParseDecimal(item.ExecPrice),
+            ExecQty = ParseDecimal(item.ExecQty),
+            ExecValue = ParseDecimal(item.ExecValue),
+            ExecFee = ParseDecimal(item.ExecFee),
+            ClosedSize = ParseDecimal(item.ClosedSize),
+            IsMaker = item.IsMaker,
+            ExecTime = ParseUnixMilliseconds(item.ExecTime)
         };
     }
 

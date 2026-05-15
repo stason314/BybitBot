@@ -21,6 +21,7 @@ public interface IGridRepository
     Task<FuturesPositionSnapshot?> GetFuturesPositionAsync(string symbol, CancellationToken cancellationToken);
     Task UpsertFuturesPositionAsync(FuturesPositionSnapshot position, TradingMode tradingMode, CancellationToken cancellationToken);
     Task AddFuturesFillAsync(FuturesFillRecord fill, CancellationToken cancellationToken);
+    Task<bool> FuturesFillExistsAsync(string execId, CancellationToken cancellationToken);
     Task<IReadOnlyList<FuturesRiskDecisionRecord>> GetFuturesRiskDecisionsAsync(string symbol, int limit, CancellationToken cancellationToken);
     Task AddFuturesRiskDecisionAsync(FuturesRiskDecisionRecord decision, CancellationToken cancellationToken);
     Task<IReadOnlyList<GridLevel>> GetGridLevelsAsync(string symbol, CancellationToken cancellationToken);

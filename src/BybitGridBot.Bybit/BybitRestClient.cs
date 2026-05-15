@@ -193,6 +193,31 @@ public sealed class BybitRestClient : IBybitRestClient
         return result.List.Select(static item => item.ToSnapshot()).ToArray();
     }
 
+    public async Task<IReadOnlyList<BybitExecutionSnapshot>> GetExecutionsAsync(
+        string category,
+        string symbol,
+        string? orderLinkId,
+        string? execType,
+        CancellationToken cancellationToken)
+    {
+        var result = await SendAsync<BybitExecutionsResult>(
+            HttpMethod.Get,
+            "/v5/execution/list",
+            true,
+            new Dictionary<string, string?>
+            {
+                ["category"] = category,
+                ["symbol"] = symbol,
+                ["orderLinkId"] = orderLinkId,
+                ["execType"] = execType,
+                ["limit"] = "100"
+            },
+            null,
+            cancellationToken);
+
+        return result.List.Select(static item => item.ToSnapshot()).ToArray();
+    }
+
     public async Task<IReadOnlyList<Candle>> GetKlinesAsync(
         string category,
         string symbol,

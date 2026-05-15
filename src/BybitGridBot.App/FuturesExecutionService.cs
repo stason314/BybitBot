@@ -88,6 +88,7 @@ public sealed class FuturesExecutionService
                 Symbol = request.Settings.Symbol,
                 Action = request.Intent.Action,
                 Side = order.Side,
+                ExecType = "Paper",
                 Quantity = request.Intent.Quantity,
                 Price = request.Intent.Price,
                 Fee = simulation.FeePaid,

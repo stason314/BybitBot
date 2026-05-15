@@ -90,6 +90,7 @@ public sealed class FuturesReconciliationService
                 order.OrderLinkId);
         }
 
+        var syncedFills = await SyncExecutionsAsync(settings, remoteSnapshots, localOrders, cancellationToken);
         var bybitPosition = await _bybitRestClient.GetPositionAsync(settings.Category, settings.Symbol, cancellationToken);
         var position = bybitPosition is null
             ? new FuturesPositionSnapshot
@@ -111,8 +112,50 @@ public sealed class FuturesReconciliationService
             RemoteOpenOrderCount = remoteOpenOrders.Count,
             RemoteHistoryOrderCount = remoteHistory.Count,
             SyncedOrderCount = syncedOrders,
+            SyncedFillCount = syncedFills,
             FixedHangingOrderCount = fixedHangingOrders
         };
+    }
+
+    private async Task<int> SyncExecutionsAsync(
+        FuturesBotSettings settings,
+        IReadOnlyCollection<BybitOrderSnapshot> remoteSnapshots,
+        IReadOnlyDictionary<string, GridOrder> localOrders,
+        CancellationToken cancellationToken)
+    {
+        var executions = await _bybitRestClient.GetExecutionsAsync(
+            settings.Category,
+            settings.Symbol,
+            null,
+            "Trade",
+            cancellationToken);
+        var remoteReduceOnlyByLinkId = remoteSnapshots
+            .Where(snapshot => !string.IsNullOrWhiteSpace(snapshot.OrderLinkId))
+            .ToDictionary(snapshot => snapshot.OrderLinkId, snapshot => snapshot.ReduceOnly, StringComparer.OrdinalIgnoreCase);
+        var syncedFills = 0;
+
+        foreach (var execution in executions.Where(execution => FuturesOrderLinkIds.IsManaged(execution.OrderLinkId)))
+        {
+            if (await _repository.FuturesFillExistsAsync(execution.ExecId, cancellationToken))
+            {
+                continue;
+            }
+
+            var reduceOnly = remoteReduceOnlyByLinkId.GetValueOrDefault(execution.OrderLinkId) ||
+                (localOrders.TryGetValue(execution.OrderLinkId, out var localOrder) && localOrder.ReduceOnly);
+            await _repository.AddFuturesFillAsync(MapFill(execution, reduceOnly), cancellationToken);
+            syncedFills++;
+        }
+
+        if (syncedFills > 0)
+        {
+            _logger.LogInformation(
+                "Synced {FillCount} futures execution fills for {Symbol}.",
+                syncedFills,
+                settings.Symbol);
+        }
+
+        return syncedFills;
     }
 
     private GridOrder MapSnapshot(
@@ -213,6 +256,26 @@ public sealed class FuturesReconciliationService
     private static FuturesTradeAction ResolveAction(TradeSide side, bool reduceOnly) =>
         side == TradeSide.Buy && !reduceOnly ? FuturesTradeAction.OpenLong : FuturesTradeAction.CloseLong;
 
+    private static FuturesFillRecord MapFill(BybitExecutionSnapshot execution, bool reduceOnly)
+    {
+        var side = ParseSide(execution.Side);
+        return new FuturesFillRecord
+        {
+            ExecId = execution.ExecId,
+            OrderLinkId = execution.OrderLinkId,
+            Symbol = execution.Symbol,
+            Action = ResolveAction(side, reduceOnly),
+            Side = side,
+            ExecType = string.IsNullOrWhiteSpace(execution.ExecType) ? "Trade" : execution.ExecType,
+            Quantity = execution.ExecQty,
+            Price = execution.ExecPrice,
+            Fee = execution.ExecFee,
+            RealizedPnl = 0m,
+            Funding = 0m,
+            CreatedAt = execution.ExecTime == DateTimeOffset.UnixEpoch ? DateTimeOffset.UtcNow : execution.ExecTime
+        };
+    }
+
     private static FuturesPositionSnapshot MapPosition(
         FuturesBotSettings settings,
         BybitPositionSnapshot position,
@@ -293,6 +356,8 @@ public sealed class FuturesReconciliationResult
     public int RemoteHistoryOrderCount { get; init; }
 
     public int SyncedOrderCount { get; init; }
+
+    public int SyncedFillCount { get; init; }
 
     public int FixedHangingOrderCount { get; init; }
 }

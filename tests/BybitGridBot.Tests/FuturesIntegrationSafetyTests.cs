@@ -105,6 +105,62 @@ public sealed class FuturesIntegrationSafetyTests
         Assert.Contains("minimum size", exception.Message, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public async Task Reconciliation_SyncsManagedExecutionsIdempotently()
+    {
+        var repository = await CreateRepositoryAsync();
+        var orderLinkId = FuturesOrderLinkIds.Create(FuturesTradeAction.OpenLong);
+        var bybitClient = new FakeBybitRestClient
+        {
+            OrderHistory =
+            [
+                new BybitOrderSnapshot
+                {
+                    OrderId = "order-1",
+                    OrderLinkId = orderLinkId,
+                    Symbol = "BTCUSDT",
+                    Side = "Buy",
+                    OrderStatus = "Filled",
+                    Quantity = 0.001m,
+                    CumExecQty = 0.001m,
+                    AveragePrice = 100m,
+                    CreatedAt = DateTimeOffset.UtcNow,
+                    UpdatedAt = DateTimeOffset.UtcNow
+                }
+            ],
+            Executions =
+            [
+                new BybitExecutionSnapshot
+                {
+                    ExecId = "exec-1",
+                    OrderId = "order-1",
+                    OrderLinkId = orderLinkId,
+                    Symbol = "BTCUSDT",
+                    Side = "Buy",
+                    ExecType = "Trade",
+                    ExecPrice = 100m,
+                    ExecQty = 0.001m,
+                    ExecFee = 0.00006m,
+                    ExecTime = DateTimeOffset.UtcNow
+                }
+            ]
+        };
+        var service = new FuturesReconciliationService(
+            Options.Create(new AppOptions { TradingMode = TradingMode.Testnet }),
+            bybitClient,
+            repository,
+            NullLogger<FuturesReconciliationService>.Instance);
+        var state = new BotState { Symbol = FuturesStateKeys.ForSymbol("BTCUSDT"), TradingMode = TradingMode.Testnet };
+
+        var first = await service.ReconcileAsync(Settings(), state, 100m, CancellationToken.None);
+        var second = await service.ReconcileAsync(Settings(), state, 100m, CancellationToken.None);
+
+        Assert.Equal(1, first.SyncedFillCount);
+        Assert.Equal(0, second.SyncedFillCount);
+        Assert.True(await repository.FuturesFillExistsAsync("exec-1", CancellationToken.None));
+    }
+
+
     private static FuturesRiskEvaluationContext RiskContext(
         FuturesTradeIntent intent,
         decimal positionSize = 0m,
@@ -216,6 +272,12 @@ public sealed class FuturesIntegrationSafetyTests
 
     private sealed class FakeBybitRestClient : IBybitRestClient
     {
+        public IReadOnlyList<BybitOrderSnapshot> OpenOrders { get; init; } = [];
+
+        public IReadOnlyList<BybitOrderSnapshot> OrderHistory { get; init; } = [];
+
+        public IReadOnlyList<BybitExecutionSnapshot> Executions { get; init; } = [];
+
         public Task<BybitTicker> GetTickerAsync(string category, string symbol, CancellationToken cancellationToken) =>
             Task.FromResult(new BybitTicker(symbol, 100m, 99m, 101m));
 
@@ -232,10 +294,20 @@ public sealed class FuturesIntegrationSafetyTests
             Task.FromResult(new BybitOrderAck(orderId ?? "fake-order", orderLinkId ?? "fake-link"));
 
         public Task<IReadOnlyList<BybitOrderSnapshot>> GetOpenOrdersAsync(string category, string symbol, CancellationToken cancellationToken) =>
-            Task.FromResult<IReadOnlyList<BybitOrderSnapshot>>(Array.Empty<BybitOrderSnapshot>());
+            Task.FromResult(OpenOrders);
 
         public Task<IReadOnlyList<BybitOrderSnapshot>> GetOrderHistoryAsync(string category, string symbol, string? orderLinkId, CancellationToken cancellationToken) =>
-            Task.FromResult<IReadOnlyList<BybitOrderSnapshot>>(Array.Empty<BybitOrderSnapshot>());
+            Task.FromResult<IReadOnlyList<BybitOrderSnapshot>>(
+                string.IsNullOrWhiteSpace(orderLinkId)
+                    ? OrderHistory
+                    : OrderHistory.Where(order => string.Equals(order.OrderLinkId, orderLinkId, StringComparison.OrdinalIgnoreCase)).ToArray());
+
+        public Task<IReadOnlyList<BybitExecutionSnapshot>> GetExecutionsAsync(string category, string symbol, string? orderLinkId, string? execType, CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<BybitExecutionSnapshot>>(
+                Executions
+                    .Where(execution => string.IsNullOrWhiteSpace(orderLinkId) || string.Equals(execution.OrderLinkId, orderLinkId, StringComparison.OrdinalIgnoreCase))
+                    .Where(execution => string.IsNullOrWhiteSpace(execType) || string.Equals(execution.ExecType, execType, StringComparison.OrdinalIgnoreCase))
+                    .ToArray());
 
         public Task<IReadOnlyList<Candle>> GetKlinesAsync(string category, string symbol, string interval, int limit, CancellationToken cancellationToken) =>
             Task.FromResult<IReadOnlyList<Candle>>(Array.Empty<Candle>());

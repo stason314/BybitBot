@@ -56,7 +56,7 @@ Current scope:
 - futures state now has dedicated SQLite tables: `futures_orders`, `futures_positions`, `futures_fills`, and `futures_risk_decisions`
 - `/futures` includes profile enable/disable, paper/testnet status, active futures orders, reduce-only close, cancel active futures orders, risk decision log, and latest pre-flight result
 - MVP futures strategies are separate implementations: `FuturesPause`, `FuturesReduceOnly`, `FuturesTrendFollowLongOnly`, `FuturesBreakoutLongOnly`, and `FuturesGridLongOnly`
-- `FuturesReconciliationService` syncs Bybit open orders, recent order history, and current position before each testnet strategy decision; locally active managed orders missing from Bybit are marked cancelled after a per-order history check
+- `FuturesReconciliationService` syncs Bybit open orders, recent order history, recent managed execution fills from `/v5/execution/list`, and current position before each testnet strategy decision; locally active managed orders missing from Bybit are marked cancelled after a per-order history check
 - Bybit futures client methods are present for `/v5/position/set-leverage`, `/v5/position/switch-isolated`, `/v5/position/switch-mode`, and `/v5/position/trading-stop`
 - futures accounting is separated from spot accounting through `FuturesAccounting` and `FuturesPositionSnapshot`
 - futures paper simulation is separated through `FuturesPaperSimulator`: leverage, margin, realized/unrealized PnL, fees, funding cost, and liquidation are simulated under a futures-only state key without touching spot paper state

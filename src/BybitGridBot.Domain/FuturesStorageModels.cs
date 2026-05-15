@@ -57,6 +57,8 @@ public sealed class FuturesFillRecord
 {
     public long FillId { get; init; }
 
+    public string? ExecId { get; init; }
+
     public string OrderLinkId { get; init; } = string.Empty;
 
     public string Symbol { get; init; } = string.Empty;
@@ -64,6 +66,8 @@ public sealed class FuturesFillRecord
     public FuturesTradeAction Action { get; init; }
 
     public TradeSide Side { get; init; }
+
+    public string ExecType { get; init; } = "Trade";
 
     public decimal Quantity { get; init; }
 

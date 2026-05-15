@@ -166,10 +166,12 @@ public sealed class SqliteGridRepository : IGridRepository
 
             CREATE TABLE IF NOT EXISTS futures_fills (
                 fill_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                exec_id TEXT NULL,
                 order_link_id TEXT NOT NULL,
                 symbol TEXT NOT NULL,
                 action TEXT NOT NULL,
                 side TEXT NOT NULL,
+                exec_type TEXT NOT NULL DEFAULT 'Trade',
                 quantity TEXT NOT NULL,
                 price TEXT NOT NULL,
                 fee TEXT NOT NULL,
@@ -380,6 +382,9 @@ public sealed class SqliteGridRepository : IGridRepository
         await EnsureFuturesOrderColumnsAsync(connection, "orders", cancellationToken);
         await EnsureFuturesStateColumnsAsync(connection, "bot_state", cancellationToken);
         await EnsureColumnAsync(connection, "futures_settings", "enabled", "INTEGER NOT NULL DEFAULT 1", cancellationToken);
+        await EnsureColumnAsync(connection, "futures_fills", "exec_id", "TEXT NULL", cancellationToken);
+        await EnsureColumnAsync(connection, "futures_fills", "exec_type", "TEXT NOT NULL DEFAULT 'Trade'", cancellationToken);
+        await EnsureUniqueFuturesFillExecIndexAsync(connection, cancellationToken);
         _logger.LogInformation("SQLite repository initialized.");
     }
 
@@ -796,21 +801,23 @@ public sealed class SqliteGridRepository : IGridRepository
     public async Task AddFuturesFillAsync(FuturesFillRecord fill, CancellationToken cancellationToken)
     {
         const string sql = """
-            INSERT INTO futures_fills (
-                order_link_id, symbol, action, side, quantity, price, fee, realized_pnl, funding, created_at
+            INSERT OR IGNORE INTO futures_fills (
+                exec_id, order_link_id, symbol, action, side, exec_type, quantity, price, fee, realized_pnl, funding, created_at
             )
             VALUES (
-                $order_link_id, $symbol, $action, $side, $quantity, $price, $fee, $realized_pnl, $funding, $created_at
+                $exec_id, $order_link_id, $symbol, $action, $side, $exec_type, $quantity, $price, $fee, $realized_pnl, $funding, $created_at
             );
             """;
 
         await using var connection = await OpenConnectionAsync(cancellationToken);
         await using var command = connection.CreateCommand();
         command.CommandText = sql;
+        command.Parameters.AddWithValue("$exec_id", string.IsNullOrWhiteSpace(fill.ExecId) ? DBNull.Value : fill.ExecId);
         command.Parameters.AddWithValue("$order_link_id", fill.OrderLinkId);
         command.Parameters.AddWithValue("$symbol", fill.Symbol);
         command.Parameters.AddWithValue("$action", fill.Action.ToString());
         command.Parameters.AddWithValue("$side", fill.Side.ToString());
+        command.Parameters.AddWithValue("$exec_type", fill.ExecType);
         command.Parameters.AddWithValue("$quantity", FormatDecimal(fill.Quantity));
         command.Parameters.AddWithValue("$price", FormatDecimal(fill.Price));
         command.Parameters.AddWithValue("$fee", FormatDecimal(fill.Fee));
@@ -818,6 +825,22 @@ public sealed class SqliteGridRepository : IGridRepository
         command.Parameters.AddWithValue("$funding", FormatDecimal(fill.Funding));
         command.Parameters.AddWithValue("$created_at", fill.CreatedAt.ToString("O", CultureInfo.InvariantCulture));
         await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    public async Task<bool> FuturesFillExistsAsync(string execId, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(execId))
+        {
+            return false;
+        }
+
+        const string sql = "SELECT 1 FROM futures_fills WHERE exec_id = $exec_id LIMIT 1;";
+
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        command.Parameters.AddWithValue("$exec_id", execId);
+        return await command.ExecuteScalarAsync(cancellationToken) is not null;
     }
 
     public async Task<IReadOnlyList<FuturesRiskDecisionRecord>> GetFuturesRiskDecisionsAsync(string symbol, int limit, CancellationToken cancellationToken)
@@ -1464,6 +1487,19 @@ public sealed class SqliteGridRepository : IGridRepository
         await EnsureColumnAsync(connection, tableName, "mark_price", "TEXT NOT NULL DEFAULT '0'", cancellationToken);
         await EnsureColumnAsync(connection, tableName, "liquidation_price", "TEXT NOT NULL DEFAULT '0'", cancellationToken);
         await EnsureColumnAsync(connection, tableName, "unrealized_pnl", "TEXT NOT NULL DEFAULT '0'", cancellationToken);
+    }
+
+    private static async Task EnsureUniqueFuturesFillExecIndexAsync(
+        SqliteConnection connection,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_futures_fills_exec_id
+            ON futures_fills(exec_id)
+            WHERE exec_id IS NOT NULL AND exec_id <> '';
+            """;
+        await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
     private static string FormatDecimal(decimal value) => value.ToString(CultureInfo.InvariantCulture);

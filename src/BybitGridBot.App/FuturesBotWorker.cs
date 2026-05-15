@@ -132,14 +132,17 @@ public sealed class FuturesBotWorker : BackgroundService
             await _preflightService.EnsureTestnetReadyAsync(settings, instrument, cancellationToken);
             var reconciliation = await _reconciliationService.ReconcileAsync(settings, state, currentPrice, cancellationToken);
             position = reconciliation.Position;
-            if (reconciliation.SyncedOrderCount > 0 || reconciliation.FixedHangingOrderCount > 0)
+            if (reconciliation.SyncedOrderCount > 0 ||
+                reconciliation.SyncedFillCount > 0 ||
+                reconciliation.FixedHangingOrderCount > 0)
             {
                 _logger.LogInformation(
-                    "Futures reconciliation completed for {Symbol}. Open: {OpenCount}, History: {HistoryCount}, Synced: {SyncedCount}, Fixed hanging: {FixedCount}",
+                    "Futures reconciliation completed for {Symbol}. Open: {OpenCount}, History: {HistoryCount}, Synced orders: {SyncedCount}, Synced fills: {FillCount}, Fixed hanging: {FixedCount}",
                     settings.Symbol,
                     reconciliation.RemoteOpenOrderCount,
                     reconciliation.RemoteHistoryOrderCount,
                     reconciliation.SyncedOrderCount,
+                    reconciliation.SyncedFillCount,
                     reconciliation.FixedHangingOrderCount);
             }
         }
