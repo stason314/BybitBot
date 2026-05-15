@@ -265,3 +265,145 @@ public sealed class UpdateSettingsResponse
 
     public IReadOnlyList<string> Errors { get; init; } = [];
 }
+
+public sealed class FuturesDashboardResponse
+{
+    public required IReadOnlyList<FuturesProfileItem> Profiles { get; init; }
+
+    public required IReadOnlyList<FuturesConfigSummaryItem> ConfigSummaries { get; init; }
+
+    public required FuturesSettingsView Settings { get; init; }
+
+    public required FuturesPositionView Position { get; init; }
+
+    public required IReadOnlyList<string> StrategyActions { get; init; }
+
+    public string? PositionError { get; init; }
+
+    public DateTimeOffset GeneratedAt { get; init; }
+}
+
+public sealed class FuturesProfileItem
+{
+    public required string Symbol { get; init; }
+
+    public required string Category { get; init; }
+
+    public bool IsSelected { get; init; }
+}
+
+public sealed class FuturesConfigSummaryItem
+{
+    public required string Symbol { get; init; }
+
+    public required string Category { get; init; }
+
+    public required string StrategyType { get; init; }
+
+    public required string Direction { get; init; }
+
+    public decimal Leverage { get; init; }
+
+    public decimal MaxNotionalUsdt { get; init; }
+
+    public decimal MaxMarginUsdt { get; init; }
+
+    public bool IsSelected { get; init; }
+
+    public DateTimeOffset UpdatedAt { get; init; }
+}
+
+public sealed class FuturesSettingsView
+{
+    public required string Symbol { get; init; }
+
+    public required string Category { get; init; }
+
+    public required string StrategyType { get; init; }
+
+    public required string StrategyConfigJson { get; init; }
+
+    public decimal Leverage { get; init; }
+
+    public required string MarginMode { get; init; }
+
+    public required string PositionMode { get; init; }
+
+    public required string Direction { get; init; }
+
+    public decimal MaxNotionalUsdt { get; init; }
+
+    public decimal MaxMarginUsdt { get; init; }
+
+    public decimal StopLossPercent { get; init; }
+
+    public decimal TakeProfitPercent { get; init; }
+
+    public decimal LiquidationBufferPercent { get; init; }
+
+    public bool ReduceOnlyEnabled { get; init; }
+}
+
+public sealed class FuturesPositionView
+{
+    public required string Symbol { get; init; }
+
+    public required string Category { get; init; }
+
+    public required string Side { get; init; }
+
+    public decimal Size { get; init; }
+
+    public decimal EntryPrice { get; init; }
+
+    public decimal MarkPrice { get; init; }
+
+    public decimal LiquidationPrice { get; init; }
+
+    public decimal PositionValueUsdt { get; init; }
+
+    public decimal MarginUsedUsdt { get; init; }
+
+    public decimal Leverage { get; init; }
+
+    public decimal UnrealizedPnl { get; init; }
+
+    public decimal RealizedPnl { get; init; }
+
+    public decimal Funding { get; init; }
+
+    public int PositionIdx { get; init; }
+
+    public DateTimeOffset UpdatedAt { get; init; }
+}
+
+public sealed class UpdateFuturesSettingsRequest
+{
+    public string Symbol { get; init; } = string.Empty;
+
+    public string Category { get; init; } = "linear";
+
+    public string StrategyType { get; init; } = "pause";
+
+    public string StrategyConfigJson { get; init; } = "{}";
+
+    public decimal Leverage { get; init; } = 2m;
+
+    public string MarginMode { get; init; } = "isolated";
+
+    public string PositionMode { get; init; } = "oneway";
+
+    public string Direction { get; init; } = "long-only";
+
+    public decimal MaxNotionalUsdt { get; init; } = 100m;
+
+    public decimal MaxMarginUsdt { get; init; } = 50m;
+
+    public decimal StopLossPercent { get; init; } = 2m;
+
+    public decimal TakeProfitPercent { get; init; } = 4m;
+
+    public decimal LiquidationBufferPercent { get; init; } = 15m;
+
+    public bool ReduceOnlyEnabled { get; init; } = true;
+}

@@ -33,6 +33,8 @@ builder.Services.AddOptions<AppOptions>().Bind(builder.Configuration);
 builder.Services.AddOptions<BybitOptions>().Bind(builder.Configuration);
 builder.Services.AddOptions<GridOptions>().Bind(builder.Configuration);
 builder.Services.AddOptions<RiskOptions>().Bind(builder.Configuration);
+builder.Services.AddOptions<FuturesOptions>().Bind(builder.Configuration);
+builder.Services.AddOptions<FuturesRiskOptions>().Bind(builder.Configuration);
 builder.Services.AddOptions<TelegramOptions>().Bind(builder.Configuration);
 
 builder.Services.AddSingleton<BybitSigner>();
@@ -51,6 +53,7 @@ builder.Services.AddSingleton<ProfitProtectionManager>();
 builder.Services.AddSingleton<SignalAnalyzer>();
 builder.Services.AddSingleton<SignalEngine>();
 builder.Services.AddSingleton<AutoStrategySelector>();
+builder.Services.AddSingleton<FuturesAccounting>();
 builder.Services.AddSingleton<StrategyRouter>();
 builder.Services.AddSingleton<CapitalAllocator>();
 builder.Services.AddSingleton<ConflictResolver>();
@@ -58,6 +61,7 @@ builder.Services.AddSingleton<BreakoutStrategy>();
 builder.Services.AddSingleton<TrendFollowingStrategy>();
 builder.Services.AddSingleton<PauseStrategy>();
 builder.Services.AddSingleton<IGridDashboardService, GridDashboardService>();
+builder.Services.AddSingleton<IFuturesDashboardService, FuturesDashboardService>();
 
 builder.Services.AddHttpClient<IBybitRestClient, BybitRestClient>(client =>
 {
@@ -86,6 +90,9 @@ await app.Services.GetRequiredService<IGridRepository>().InitializeAsync(Cancell
 app.MapGet("/", (IGridDashboardService dashboardService) =>
     Results.Content(dashboardService.RenderDashboardPage(), "text/html; charset=utf-8"));
 
+app.MapGet("/futures", (IFuturesDashboardService dashboardService) =>
+    Results.Content(dashboardService.RenderDashboardPage(), "text/html; charset=utf-8"));
+
 app.MapGet("/api/dashboard", async (string? symbol, IGridDashboardService dashboardService, CancellationToken cancellationToken) =>
     Results.Ok(await dashboardService.GetDashboardAsync(symbol, cancellationToken)));
 
@@ -108,6 +115,21 @@ app.MapPost("/api/settings/apply-selected-recommendation", async (UpdateSettings
 });
 
 app.MapDelete("/api/settings/{symbol}", async (string symbol, IGridDashboardService dashboardService, CancellationToken cancellationToken) =>
+{
+    var response = await dashboardService.DeleteSettingsAsync(symbol, cancellationToken);
+    return response.Success ? Results.Ok(response) : Results.BadRequest(response);
+});
+
+app.MapGet("/api/futures/dashboard", async (string? symbol, IFuturesDashboardService dashboardService, CancellationToken cancellationToken) =>
+    Results.Ok(await dashboardService.GetDashboardAsync(symbol, cancellationToken)));
+
+app.MapPost("/api/futures/settings", async (UpdateFuturesSettingsRequest request, IFuturesDashboardService dashboardService, CancellationToken cancellationToken) =>
+{
+    var response = await dashboardService.UpdateSettingsAsync(request, cancellationToken);
+    return response.Success ? Results.Ok(response) : Results.BadRequest(response);
+});
+
+app.MapDelete("/api/futures/settings/{symbol}", async (string symbol, IFuturesDashboardService dashboardService, CancellationToken cancellationToken) =>
 {
     var response = await dashboardService.DeleteSettingsAsync(symbol, cancellationToken);
     return response.Success ? Results.Ok(response) : Results.BadRequest(response);

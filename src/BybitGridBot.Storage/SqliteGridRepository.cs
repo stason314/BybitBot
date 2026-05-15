@@ -80,6 +80,25 @@ public sealed class SqliteGridRepository : IGridRepository
                 updated_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS futures_settings (
+                settings_id TEXT NOT NULL PRIMARY KEY,
+                symbol TEXT NOT NULL,
+                category TEXT NOT NULL,
+                strategy_type TEXT NOT NULL,
+                strategy_config_json TEXT NOT NULL DEFAULT '{}',
+                leverage TEXT NOT NULL,
+                margin_mode TEXT NOT NULL,
+                position_mode TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                max_notional_usdt TEXT NOT NULL,
+                max_margin_usdt TEXT NOT NULL,
+                stop_loss_percent TEXT NOT NULL,
+                take_profit_percent TEXT NOT NULL,
+                liquidation_buffer_percent TEXT NOT NULL,
+                reduce_only_enabled INTEGER NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS strategy_decisions (
                 decision_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 symbol TEXT NOT NULL,
@@ -371,6 +390,119 @@ public sealed class SqliteGridRepository : IGridRepository
     public async Task DeleteRuntimeSettingsAsync(string symbol, CancellationToken cancellationToken)
     {
         const string sql = "DELETE FROM runtime_settings WHERE settings_id = $settings_id;";
+
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        command.Parameters.AddWithValue("$settings_id", symbol);
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    public async Task<FuturesBotSettings?> GetFuturesSettingsAsync(string symbol, CancellationToken cancellationToken)
+    {
+        const string sql = """
+            SELECT symbol, category, strategy_type, strategy_config_json, leverage, margin_mode, position_mode,
+                   direction, max_notional_usdt, max_margin_usdt, stop_loss_percent, take_profit_percent,
+                   liquidation_buffer_percent, reduce_only_enabled, updated_at
+            FROM futures_settings
+            WHERE settings_id = $settings_id
+            LIMIT 1;
+            """;
+
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        command.Parameters.AddWithValue("$settings_id", symbol);
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return null;
+        }
+
+        return ReadFuturesSettings(reader);
+    }
+
+    public async Task<IReadOnlyList<FuturesBotSettings>> GetFuturesSettingsProfilesAsync(CancellationToken cancellationToken)
+    {
+        const string sql = """
+            SELECT symbol, category, strategy_type, strategy_config_json, leverage, margin_mode, position_mode,
+                   direction, max_notional_usdt, max_margin_usdt, stop_loss_percent, take_profit_percent,
+                   liquidation_buffer_percent, reduce_only_enabled, updated_at
+            FROM futures_settings
+            ORDER BY symbol;
+            """;
+
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        var result = new List<FuturesBotSettings>();
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            result.Add(ReadFuturesSettings(reader));
+        }
+
+        return result;
+    }
+
+    public async Task SaveFuturesSettingsAsync(FuturesBotSettings settings, CancellationToken cancellationToken)
+    {
+        const string sql = """
+            INSERT INTO futures_settings (
+                settings_id, symbol, category, strategy_type, strategy_config_json, leverage, margin_mode, position_mode,
+                direction, max_notional_usdt, max_margin_usdt, stop_loss_percent, take_profit_percent,
+                liquidation_buffer_percent, reduce_only_enabled, updated_at
+            )
+            VALUES (
+                $settings_id, $symbol, $category, $strategy_type, $strategy_config_json, $leverage, $margin_mode, $position_mode,
+                $direction, $max_notional_usdt, $max_margin_usdt, $stop_loss_percent, $take_profit_percent,
+                $liquidation_buffer_percent, $reduce_only_enabled, $updated_at
+            )
+            ON CONFLICT(settings_id) DO UPDATE SET
+                symbol = excluded.symbol,
+                category = excluded.category,
+                strategy_type = excluded.strategy_type,
+                strategy_config_json = excluded.strategy_config_json,
+                leverage = excluded.leverage,
+                margin_mode = excluded.margin_mode,
+                position_mode = excluded.position_mode,
+                direction = excluded.direction,
+                max_notional_usdt = excluded.max_notional_usdt,
+                max_margin_usdt = excluded.max_margin_usdt,
+                stop_loss_percent = excluded.stop_loss_percent,
+                take_profit_percent = excluded.take_profit_percent,
+                liquidation_buffer_percent = excluded.liquidation_buffer_percent,
+                reduce_only_enabled = excluded.reduce_only_enabled,
+                updated_at = excluded.updated_at;
+            """;
+
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        command.Parameters.AddWithValue("$settings_id", settings.Symbol);
+        command.Parameters.AddWithValue("$symbol", settings.Symbol);
+        command.Parameters.AddWithValue("$category", settings.Category);
+        command.Parameters.AddWithValue("$strategy_type", settings.StrategyType.ToString());
+        command.Parameters.AddWithValue("$strategy_config_json", string.IsNullOrWhiteSpace(settings.StrategyConfigJson) ? "{}" : settings.StrategyConfigJson);
+        command.Parameters.AddWithValue("$leverage", FormatDecimal(settings.Leverage));
+        command.Parameters.AddWithValue("$margin_mode", settings.MarginMode.ToString());
+        command.Parameters.AddWithValue("$position_mode", settings.PositionMode.ToString());
+        command.Parameters.AddWithValue("$direction", settings.Direction.ToString());
+        command.Parameters.AddWithValue("$max_notional_usdt", FormatDecimal(settings.MaxNotionalUsdt));
+        command.Parameters.AddWithValue("$max_margin_usdt", FormatDecimal(settings.MaxMarginUsdt));
+        command.Parameters.AddWithValue("$stop_loss_percent", FormatDecimal(settings.StopLossPercent));
+        command.Parameters.AddWithValue("$take_profit_percent", FormatDecimal(settings.TakeProfitPercent));
+        command.Parameters.AddWithValue("$liquidation_buffer_percent", FormatDecimal(settings.LiquidationBufferPercent));
+        command.Parameters.AddWithValue("$reduce_only_enabled", settings.ReduceOnlyEnabled);
+        command.Parameters.AddWithValue("$updated_at", settings.UpdatedAt.ToString("O", CultureInfo.InvariantCulture));
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    public async Task DeleteFuturesSettingsAsync(string symbol, CancellationToken cancellationToken)
+    {
+        const string sql = "DELETE FROM futures_settings WHERE settings_id = $settings_id;";
 
         await using var connection = await OpenConnectionAsync(cancellationToken);
         await using var command = connection.CreateCommand();
@@ -672,6 +804,28 @@ public sealed class SqliteGridRepository : IGridRepository
             StopLowerPrice = ParseDecimal(reader.GetString(9)),
             StopUpperPrice = ParseDecimal(reader.GetString(10)),
             UpdatedAt = DateTimeOffset.Parse(reader.GetString(11), CultureInfo.InvariantCulture)
+        };
+    }
+
+    private static FuturesBotSettings ReadFuturesSettings(SqliteDataReader reader)
+    {
+        return new FuturesBotSettings
+        {
+            Symbol = reader.GetString(0),
+            Category = reader.GetString(1),
+            StrategyType = ParseEnum(reader.GetString(2), FuturesStrategyType.Pause),
+            StrategyConfigJson = reader.GetString(3),
+            Leverage = ParseDecimal(reader.GetString(4)),
+            MarginMode = ParseEnum(reader.GetString(5), FuturesMarginMode.Isolated),
+            PositionMode = ParseEnum(reader.GetString(6), FuturesPositionMode.OneWay),
+            Direction = ParseEnum(reader.GetString(7), FuturesDirection.LongOnly),
+            MaxNotionalUsdt = ParseDecimal(reader.GetString(8)),
+            MaxMarginUsdt = ParseDecimal(reader.GetString(9)),
+            StopLossPercent = ParseDecimal(reader.GetString(10)),
+            TakeProfitPercent = ParseDecimal(reader.GetString(11)),
+            LiquidationBufferPercent = ParseDecimal(reader.GetString(12)),
+            ReduceOnlyEnabled = reader.GetBoolean(13),
+            UpdatedAt = DateTimeOffset.Parse(reader.GetString(14), CultureInfo.InvariantCulture)
         };
     }
 

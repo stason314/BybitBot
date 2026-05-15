@@ -35,6 +35,38 @@ The existing worker still owns execution and Bybit synchronization. The new arch
 
 `signal` is an engine, not a standalone trading strategy by default. `hybrid` uses manual strategy intent/weights, while `auto` uses price-action phase detection, market regime, and score thresholds. Auto-select is a risk-adjusted selector; it does not guarantee profit.
 
+## Futures Context
+
+The futures UI is available at `/futures`. It is intentionally separate from the spot/grid dashboard and stores profiles in `futures_settings`.
+
+Current scope:
+
+- futures profile list and editor
+- MVP is locked to USDT linear perpetuals: `CATEGORY=linear`, isolated margin, one-way mode, long-only
+- leverage, max notional, max margin, stop loss, take profit, liquidation buffer, reduce-only flag
+- read-only Bybit position sync through `/v5/position/list`
+- MVP strategy action model: `OpenLong`, `CloseLong`, `ReduceOnlyClose`
+- Bybit futures client methods are present for `/v5/position/set-leverage`, `/v5/position/switch-isolated`, `/v5/position/switch-mode`, and `/v5/position/trading-stop`
+- futures accounting is separated from spot accounting through `FuturesAccounting` and `FuturesPositionSnapshot`
+
+Live futures order placement is not enabled in this first step.
+
+Example futures defaults:
+
+```env
+FUTURES_ENABLED=true
+CATEGORY=linear
+LEVERAGE=2
+MARGIN_MODE=isolated
+POSITION_MODE=oneway
+MAX_NOTIONAL_USDT=100
+MAX_MARGIN_USDT=50
+MIN_LIQUIDATION_BUFFER_PERCENT=15
+STOP_LOSS_REQUIRED=true
+```
+
+Cross margin, hedge mode, and shorts are deliberately rejected by the futures API until the second phase.
+
 ## How Auto/Hybrid Mode Works
 
 The bot is not supposed to trade every loop. It first classifies the market phase, then picks the strategy. If the market is dangerous, `Pause` is a valid protective state.

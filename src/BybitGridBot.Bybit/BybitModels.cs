@@ -15,6 +15,11 @@ public interface IBybitRestClient
     Task<IReadOnlyList<BybitOrderSnapshot>> GetOrderHistoryAsync(string category, string symbol, string? orderLinkId, CancellationToken cancellationToken);
     Task<IReadOnlyList<Candle>> GetKlinesAsync(string category, string symbol, string interval, int limit, CancellationToken cancellationToken);
     Task<BybitInstrumentInfo> GetInstrumentInfoAsync(string category, string symbol, CancellationToken cancellationToken);
+    Task<BybitPositionSnapshot?> GetPositionAsync(string category, string symbol, CancellationToken cancellationToken);
+    Task SetLeverageAsync(BybitSetLeverageRequest request, CancellationToken cancellationToken);
+    Task SwitchIsolatedMarginAsync(BybitSwitchIsolatedMarginRequest request, CancellationToken cancellationToken);
+    Task SwitchPositionModeAsync(BybitSwitchPositionModeRequest request, CancellationToken cancellationToken);
+    Task SetTradingStopAsync(BybitSetTradingStopRequest request, CancellationToken cancellationToken);
 }
 
 public sealed class BybitApiException : Exception
@@ -57,8 +62,107 @@ public sealed class BybitCreateOrderRequest
     [JsonPropertyName("isLeverage")]
     public int IsLeverage { get; init; } = 0;
 
+    [JsonPropertyName("reduceOnly")]
+    public bool? ReduceOnly { get; init; }
+
+    [JsonPropertyName("positionIdx")]
+    public int? PositionIdx { get; init; }
+
+    [JsonPropertyName("takeProfit")]
+    public string? TakeProfit { get; init; }
+
+    [JsonPropertyName("stopLoss")]
+    public string? StopLoss { get; init; }
+
+    [JsonPropertyName("tpTriggerBy")]
+    public string? TakeProfitTriggerBy { get; init; }
+
+    [JsonPropertyName("slTriggerBy")]
+    public string? StopLossTriggerBy { get; init; }
+
+    [JsonPropertyName("tpslMode")]
+    public string? TakeProfitStopLossMode { get; init; }
+
     [JsonPropertyName("orderLinkId")]
     public string OrderLinkId { get; init; } = string.Empty;
+}
+
+public sealed class BybitSetLeverageRequest
+{
+    [JsonPropertyName("category")]
+    public string Category { get; init; } = "linear";
+
+    [JsonPropertyName("symbol")]
+    public string Symbol { get; init; } = string.Empty;
+
+    [JsonPropertyName("buyLeverage")]
+    public string BuyLeverage { get; init; } = string.Empty;
+
+    [JsonPropertyName("sellLeverage")]
+    public string SellLeverage { get; init; } = string.Empty;
+}
+
+public sealed class BybitSwitchIsolatedMarginRequest
+{
+    [JsonPropertyName("category")]
+    public string Category { get; init; } = "linear";
+
+    [JsonPropertyName("symbol")]
+    public string Symbol { get; init; } = string.Empty;
+
+    [JsonPropertyName("tradeMode")]
+    public int TradeMode { get; init; } = 1;
+
+    [JsonPropertyName("buyLeverage")]
+    public string BuyLeverage { get; init; } = string.Empty;
+
+    [JsonPropertyName("sellLeverage")]
+    public string SellLeverage { get; init; } = string.Empty;
+}
+
+public sealed class BybitSwitchPositionModeRequest
+{
+    [JsonPropertyName("category")]
+    public string Category { get; init; } = "linear";
+
+    [JsonPropertyName("symbol")]
+    public string? Symbol { get; init; }
+
+    [JsonPropertyName("coin")]
+    public string? Coin { get; init; }
+
+    [JsonPropertyName("mode")]
+    public int Mode { get; init; }
+}
+
+public sealed class BybitSetTradingStopRequest
+{
+    [JsonPropertyName("category")]
+    public string Category { get; init; } = "linear";
+
+    [JsonPropertyName("symbol")]
+    public string Symbol { get; init; } = string.Empty;
+
+    [JsonPropertyName("positionIdx")]
+    public int PositionIdx { get; init; }
+
+    [JsonPropertyName("takeProfit")]
+    public string? TakeProfit { get; init; }
+
+    [JsonPropertyName("stopLoss")]
+    public string? StopLoss { get; init; }
+
+    [JsonPropertyName("trailingStop")]
+    public string? TrailingStop { get; init; }
+
+    [JsonPropertyName("tpTriggerBy")]
+    public string? TakeProfitTriggerBy { get; init; }
+
+    [JsonPropertyName("slTriggerBy")]
+    public string? StopLossTriggerBy { get; init; }
+
+    [JsonPropertyName("tpslMode")]
+    public string TakeProfitStopLossMode { get; init; } = "Full";
 }
 
 public sealed record BybitTicker(string Symbol, decimal LastPrice, decimal Bid1Price, decimal Ask1Price);
@@ -81,6 +185,41 @@ public sealed record BybitWalletCoin(string Coin, decimal WalletBalance, decimal
 public sealed record BybitOrderAck(string OrderId, string OrderLinkId);
 
 public sealed record BybitFeeRate(string Symbol, decimal MakerFeeRate, decimal TakerFeeRate);
+
+public sealed class BybitPositionSnapshot
+{
+    public string Symbol { get; init; } = string.Empty;
+
+    public string Side { get; init; } = "None";
+
+    public decimal Size { get; init; }
+
+    public decimal AveragePrice { get; init; }
+
+    public decimal MarkPrice { get; init; }
+
+    public decimal LiquidationPrice { get; init; }
+
+    public decimal PositionValue { get; init; }
+
+    public decimal PositionInitialMargin { get; init; }
+
+    public decimal PositionMaintenanceMargin { get; init; }
+
+    public decimal Leverage { get; init; }
+
+    public decimal UnrealizedPnl { get; init; }
+
+    public decimal RealizedPnl { get; init; }
+
+    public decimal CurRealizedPnl { get; init; }
+
+    public int PositionIdx { get; init; }
+
+    public int TradeMode { get; init; }
+
+    public DateTimeOffset UpdatedAt { get; init; } = DateTimeOffset.UtcNow;
+}
 
 public sealed class BybitOrderSnapshot
 {
@@ -218,6 +357,10 @@ internal sealed class BybitOrderAckResult
     public string OrderLinkId { get; init; } = string.Empty;
 }
 
+internal sealed class BybitEmptyResult
+{
+}
+
 internal sealed class BybitOrdersResult
 {
     [JsonPropertyName("list")]
@@ -228,6 +371,63 @@ internal sealed class BybitFeeRateResult
 {
     [JsonPropertyName("list")]
     public List<BybitFeeRateItem> List { get; init; } = [];
+}
+
+internal sealed class BybitPositionsResult
+{
+    [JsonPropertyName("list")]
+    public List<BybitPositionItem> List { get; init; } = [];
+}
+
+internal sealed class BybitPositionItem
+{
+    [JsonPropertyName("symbol")]
+    public string Symbol { get; init; } = string.Empty;
+
+    [JsonPropertyName("side")]
+    public string Side { get; init; } = string.Empty;
+
+    [JsonPropertyName("size")]
+    public string Size { get; init; } = "0";
+
+    [JsonPropertyName("avgPrice")]
+    public string AvgPrice { get; init; } = "0";
+
+    [JsonPropertyName("markPrice")]
+    public string MarkPrice { get; init; } = "0";
+
+    [JsonPropertyName("liqPrice")]
+    public string LiqPrice { get; init; } = "0";
+
+    [JsonPropertyName("positionValue")]
+    public string PositionValue { get; init; } = "0";
+
+    [JsonPropertyName("positionIM")]
+    public string PositionInitialMargin { get; init; } = "0";
+
+    [JsonPropertyName("positionMM")]
+    public string PositionMaintenanceMargin { get; init; } = "0";
+
+    [JsonPropertyName("leverage")]
+    public string Leverage { get; init; } = "0";
+
+    [JsonPropertyName("unrealisedPnl")]
+    public string UnrealizedPnl { get; init; } = "0";
+
+    [JsonPropertyName("cumRealisedPnl")]
+    public string RealizedPnl { get; init; } = "0";
+
+    [JsonPropertyName("curRealisedPnl")]
+    public string CurRealizedPnl { get; init; } = "0";
+
+    [JsonPropertyName("positionIdx")]
+    public int PositionIdx { get; init; }
+
+    [JsonPropertyName("tradeMode")]
+    public int TradeMode { get; init; }
+
+    [JsonPropertyName("updatedTime")]
+    public string UpdatedTime { get; init; } = "0";
 }
 
 internal sealed class BybitFeeRateItem
@@ -377,6 +577,31 @@ internal static class BybitModelMapper
             FeePaid = fee,
             CreatedAt = ParseUnixMilliseconds(item.CreatedTime),
             UpdatedAt = ParseUnixMilliseconds(item.UpdatedTime)
+        };
+    }
+
+    public static BybitPositionSnapshot ToSnapshot(this BybitPositionItem item)
+    {
+        return new BybitPositionSnapshot
+        {
+            Symbol = item.Symbol,
+            Side = string.IsNullOrWhiteSpace(item.Side) ? "None" : item.Side,
+            Size = ParseDecimal(item.Size),
+            AveragePrice = ParseDecimal(item.AvgPrice),
+            MarkPrice = ParseDecimal(item.MarkPrice),
+            LiquidationPrice = ParseDecimal(item.LiqPrice),
+            PositionValue = ParseDecimal(item.PositionValue),
+            PositionInitialMargin = ParseDecimal(item.PositionInitialMargin),
+            PositionMaintenanceMargin = ParseDecimal(item.PositionMaintenanceMargin),
+            Leverage = ParseDecimal(item.Leverage),
+            UnrealizedPnl = ParseDecimal(item.UnrealizedPnl),
+            RealizedPnl = ParseDecimal(item.RealizedPnl),
+            CurRealizedPnl = ParseDecimal(item.CurRealizedPnl),
+            PositionIdx = item.PositionIdx,
+            TradeMode = item.TradeMode,
+            UpdatedAt = string.IsNullOrWhiteSpace(item.UpdatedTime)
+                ? DateTimeOffset.UtcNow
+                : ParseUnixMilliseconds(item.UpdatedTime)
         };
     }
 }

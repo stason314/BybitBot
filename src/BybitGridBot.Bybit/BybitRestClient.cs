@@ -227,6 +227,72 @@ public sealed class BybitRestClient : IBybitRestClient
             .ToArray();
     }
 
+    public async Task<BybitPositionSnapshot?> GetPositionAsync(string category, string symbol, CancellationToken cancellationToken)
+    {
+        var result = await SendAsync<BybitPositionsResult>(
+            HttpMethod.Get,
+            "/v5/position/list",
+            true,
+            new Dictionary<string, string?>
+            {
+                ["category"] = category,
+                ["symbol"] = symbol
+            },
+            null,
+            cancellationToken);
+
+        var position = result.List
+            .Where(item => string.Equals(item.Symbol, symbol, StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(static item => BybitModelMapper.ParseDecimal(item.Size))
+            .FirstOrDefault();
+
+        return position?.ToSnapshot();
+    }
+
+    public async Task SetLeverageAsync(BybitSetLeverageRequest request, CancellationToken cancellationToken)
+    {
+        await SendAsync<BybitEmptyResult>(
+            HttpMethod.Post,
+            "/v5/position/set-leverage",
+            true,
+            null,
+            request,
+            cancellationToken);
+    }
+
+    public async Task SwitchIsolatedMarginAsync(BybitSwitchIsolatedMarginRequest request, CancellationToken cancellationToken)
+    {
+        await SendAsync<BybitEmptyResult>(
+            HttpMethod.Post,
+            "/v5/position/switch-isolated",
+            true,
+            null,
+            request,
+            cancellationToken);
+    }
+
+    public async Task SwitchPositionModeAsync(BybitSwitchPositionModeRequest request, CancellationToken cancellationToken)
+    {
+        await SendAsync<BybitEmptyResult>(
+            HttpMethod.Post,
+            "/v5/position/switch-mode",
+            true,
+            null,
+            request,
+            cancellationToken);
+    }
+
+    public async Task SetTradingStopAsync(BybitSetTradingStopRequest request, CancellationToken cancellationToken)
+    {
+        await SendAsync<BybitEmptyResult>(
+            HttpMethod.Post,
+            "/v5/position/trading-stop",
+            true,
+            null,
+            request,
+            cancellationToken);
+    }
+
     public async Task<BybitInstrumentInfo> GetInstrumentInfoAsync(string category, string symbol, CancellationToken cancellationToken)
     {
         var result = await SendAsync<BybitInstrumentsResult>(

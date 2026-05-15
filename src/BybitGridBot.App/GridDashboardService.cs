@@ -1139,6 +1139,7 @@ public sealed class GridDashboardService : IGridDashboardService
           <div class="badge">Price <strong id="heroPrice">-</strong></div>
           <div class="badge">Active <strong id="heroActiveTime">-</strong></div>
           <div class="badge">Last sync <strong id="heroUpdated">-</strong></div>
+          <a class="profile-tab new" href="/futures">Futures</a>
         </div>
         <div class="pause-box" id="pauseBox" hidden>
           <strong>Trading paused</strong>
