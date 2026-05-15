@@ -21,6 +21,18 @@ public sealed class GridBotWorker : BackgroundService
     private const string TrendEntryMarker = "trend-entry";
     private const string TrendExitMarker = "trend-exit";
     private const string ReduceOnlyExitMarker = "reduce-only-exit";
+    private const string GridSource = "Grid";
+    private const string DcaSource = "DCA";
+    private const string BtdSource = "BTD";
+    private const string SignalSource = "Signal";
+    private const string TrendSource = "Trend";
+    private const string ReduceOnlySource = "ReduceOnly";
+    private const string ComboGridSource = "Combo-Grid";
+    private const string ComboDcaSource = "Combo-DCA";
+    private const string ComboBtdSource = "Combo-BTD";
+    private const string HybridGridSource = "Hybrid-Grid";
+    private const string HybridDcaSource = "Hybrid-DCA";
+    private const string HybridBtdSource = "Hybrid-BTD";
     private const decimal SignalMarketLikeLimitBufferPercent = 0.05m;
     private const string ReduceOnlyReasonDanger = "danger-regime";
     private const string ReduceOnlyReasonTrailing = "trailing-protection";
@@ -1417,12 +1429,48 @@ public sealed class GridBotWorker : BackgroundService
 
             if (bigRedGuard.CancelGridBuyOrders)
             {
-                await CancelActiveGridBuyOrdersAsync(activeGridOrders, cancellationToken);
+                await CancelActiveBuyOrdersAsync(activeGridOrders, cancellationToken);
                 activeGridOrders = await _repository.GetActiveOrdersAsync(_gridOptions.Symbol, cancellationToken);
+            }
+
+            if (state.BaseAssetQuantity > 0m)
+            {
+                await ApplyReduceOnlyProtectionAsync(
+                    profile,
+                    state,
+                    levels,
+                    instrument,
+                    activeGridOrders,
+                    currentPrice,
+                    $"big-red-candle-guard: {bigRedGuard.Reason}",
+                    cancellationToken);
+                return await FinishProtectiveReduceOnlyCycleAsync(profile, state, levels, currentPrice, cancellationToken);
             }
 
             await _repository.SaveBotStateAsync(state, cancellationToken);
             return state;
+        }
+
+        if (IsProtectiveSellOnlyPhase(marketPhase.Phase))
+        {
+            await CancelActiveBuyOrdersAsync(activeGridOrders, cancellationToken);
+            activeGridOrders = await _repository.GetActiveOrdersAsync(_gridOptions.Symbol, cancellationToken);
+            if (state.BaseAssetQuantity <= 0m)
+            {
+                await _repository.SaveBotStateAsync(state, cancellationToken);
+                return state;
+            }
+
+            activeGridOrders = await ApplyReduceOnlyProtectionAsync(
+                profile,
+                state,
+                levels,
+                instrument,
+                activeGridOrders,
+                currentPrice,
+                $"market-phase-{marketPhase.Phase.ToString().ToLowerInvariant()}: {marketPhase.Reason}",
+                cancellationToken);
+            return await FinishProtectiveReduceOnlyCycleAsync(profile, state, levels, currentPrice, cancellationToken);
         }
 
         if (!_strategy.CanCreateGridIntents(_gridOptions, marketPhase, currentPrice, bigRedGuard.IsActive))
@@ -1453,7 +1501,7 @@ public sealed class GridBotWorker : BackgroundService
             ? null
             : await _bybitRestClient.GetWalletBalanceAsync(cancellationToken, _quoteAsset, _baseAsset);
 
-        await EnsureGridOrdersAsync(state, levels, instrument, currentPrice, activeGridOrders, wallet, cancellationToken);
+        await EnsureGridOrdersAsync(profile, state, levels, instrument, currentPrice, activeGridOrders, wallet, cancellationToken);
         state.IsInitialized = true;
         state.UpdatedAt = DateTimeOffset.UtcNow;
         await _repository.SaveBotStateAsync(state, cancellationToken);
@@ -1999,7 +2047,7 @@ public sealed class GridBotWorker : BackgroundService
         MarketRegimeAnalysis marketRegime,
         CancellationToken cancellationToken)
     {
-        if (profile?.StrategyType == TradingStrategyType.ReduceOnly || state.BaseAssetQuantity <= 0m)
+        if (profile?.StrategyType == TradingStrategyType.ReduceOnly)
         {
             return false;
         }
@@ -2012,6 +2060,20 @@ public sealed class GridBotWorker : BackgroundService
         if (reason is null)
         {
             return false;
+        }
+
+        if (state.BaseAssetQuantity <= 0m)
+        {
+            foreach (var order in activeOrders.Where(order => order.IsActive && order.Side == TradeSide.Buy).ToArray())
+            {
+                await CancelManagedOrderAsync(order, cancellationToken);
+            }
+
+            _logger.LogWarning(
+                "Protective no-buy mode active for {Symbol}. Reason: {Reason}. Buy orders were cancelled and no new buy orders will be created.",
+                _gridOptions.Symbol,
+                reason);
+            return true;
         }
 
         await ApplyReduceOnlyProtectionAsync(
@@ -2143,7 +2205,7 @@ public sealed class GridBotWorker : BackgroundService
             var createdOrders = await ExecuteStrategyDecisionAsync(
                 new StrategyExecutionDecision
                 {
-                    OrderIntents = [new OrderIntent(TradeSide.Sell, price, quantity, ReduceOnlyExitMarker)]
+                    OrderIntents = [new OrderIntent(TradeSide.Sell, price, quantity, ReduceOnlyExitMarker, ReduceOnlySource)]
                 },
                 cancellationToken);
             var createdOrder = createdOrders[0];
@@ -2183,6 +2245,7 @@ public sealed class GridBotWorker : BackgroundService
     }
 
     private async Task EnsureGridOrdersAsync(
+        GridBotSettings? profile,
         BotState state,
         IReadOnlyList<GridLevel> levels,
         BybitInstrumentInfo instrument,
@@ -2235,7 +2298,7 @@ public sealed class GridBotWorker : BackgroundService
 
             var decision = new StrategyExecutionDecision
             {
-                OrderIntents = [new OrderIntent(TradeSide.Buy, level.Price, quantity)]
+                OrderIntents = [new OrderIntent(TradeSide.Buy, level.Price, quantity, StrategySource: ResolveGridSource(profile))]
             };
             var createdOrders = await ExecuteStrategyDecisionAsync(decision, cancellationToken);
             var createdOrder = createdOrders[0];
@@ -2278,7 +2341,7 @@ public sealed class GridBotWorker : BackgroundService
 
             var decision = new StrategyExecutionDecision
             {
-                OrderIntents = [new OrderIntent(TradeSide.Sell, level.Price, quantity)]
+                OrderIntents = [new OrderIntent(TradeSide.Sell, level.Price, quantity, StrategySource: ResolveGridSource(profile))]
             };
             var createdOrders = await ExecuteStrategyDecisionAsync(decision, cancellationToken);
             var createdOrder = createdOrders[0];
@@ -2412,7 +2475,7 @@ public sealed class GridBotWorker : BackgroundService
         await ExecuteStrategyDecisionAsync(
             new StrategyExecutionDecision
             {
-                OrderIntents = [new OrderIntent(TradeSide.Buy, limitPrice, quantity, entryMarker)]
+                OrderIntents = [new OrderIntent(TradeSide.Buy, limitPrice, quantity, entryMarker, ResolveDipEntrySource(profile, entryMarker))]
             },
             cancellationToken);
 
@@ -2483,7 +2546,7 @@ public sealed class GridBotWorker : BackgroundService
         await ExecuteStrategyDecisionAsync(
             new StrategyExecutionDecision
             {
-                OrderIntents = [new OrderIntent(TradeSide.Buy, limitPrice, quantity, SignalEntryMarker)]
+                OrderIntents = [new OrderIntent(TradeSide.Buy, limitPrice, quantity, SignalEntryMarker, SignalSource)]
             },
             cancellationToken);
 
@@ -2535,7 +2598,7 @@ public sealed class GridBotWorker : BackgroundService
         await ExecuteStrategyDecisionAsync(
             new StrategyExecutionDecision
             {
-                OrderIntents = [new OrderIntent(TradeSide.Sell, limitPrice, quantity, SignalExitMarker)]
+                OrderIntents = [new OrderIntent(TradeSide.Sell, limitPrice, quantity, SignalExitMarker, SignalSource)]
             },
             cancellationToken);
 
@@ -2600,7 +2663,7 @@ public sealed class GridBotWorker : BackgroundService
         await ExecuteStrategyDecisionAsync(
             new StrategyExecutionDecision
             {
-                OrderIntents = [new OrderIntent(TradeSide.Buy, limitPrice, quantity, TrendEntryMarker)]
+                OrderIntents = [new OrderIntent(TradeSide.Buy, limitPrice, quantity, TrendEntryMarker, TrendSource)]
             },
             cancellationToken);
 
@@ -2647,7 +2710,7 @@ public sealed class GridBotWorker : BackgroundService
         await ExecuteStrategyDecisionAsync(
             new StrategyExecutionDecision
             {
-                OrderIntents = [new OrderIntent(TradeSide.Sell, limitPrice, quantity, TrendExitMarker)]
+                OrderIntents = [new OrderIntent(TradeSide.Sell, limitPrice, quantity, TrendExitMarker, TrendSource)]
             },
             cancellationToken);
 
@@ -2677,6 +2740,16 @@ public sealed class GridBotWorker : BackgroundService
                      order.IsActive &&
                      order.Side == TradeSide.Buy &&
                      string.IsNullOrWhiteSpace(order.ParentOrderLinkId)).ToArray())
+        {
+            await CancelManagedOrderAsync(order, cancellationToken);
+        }
+    }
+
+    private async Task CancelActiveBuyOrdersAsync(
+        IReadOnlyCollection<GridOrder> activeOrders,
+        CancellationToken cancellationToken)
+    {
+        foreach (var order in activeOrders.Where(order => order.IsActive && order.Side == TradeSide.Buy).ToArray())
         {
             await CancelManagedOrderAsync(order, cancellationToken);
         }
@@ -2791,7 +2864,7 @@ public sealed class GridBotWorker : BackgroundService
         await ExecuteStrategyDecisionAsync(
             new StrategyExecutionDecision
             {
-                OrderIntents = [new OrderIntent(TradeSide.Sell, takeProfitPrice, quantity, filledOrder.OrderLinkId)]
+                OrderIntents = [new OrderIntent(TradeSide.Sell, takeProfitPrice, quantity, filledOrder.OrderLinkId, filledOrder.StrategySource)]
             },
             cancellationToken);
     }
@@ -3030,7 +3103,8 @@ public sealed class GridBotWorker : BackgroundService
                         filledOrder.Side == TradeSide.Buy ? TradeSide.Sell : TradeSide.Buy,
                         nextLevel.Price,
                         quantity,
-                        filledOrder.OrderLinkId)
+                        filledOrder.OrderLinkId,
+                        filledOrder.StrategySource)
                 ]
             },
             cancellationToken);
@@ -3051,13 +3125,14 @@ public sealed class GridBotWorker : BackgroundService
     }
 
     private Task<GridOrder> ExecuteOrderIntentAsync(OrderIntent intent, CancellationToken cancellationToken) =>
-        PlaceOrderAsync(intent.Side, intent.Price, intent.Quantity, intent.ParentOrderLinkId, cancellationToken);
+        PlaceOrderAsync(intent.Side, intent.Price, intent.Quantity, intent.ParentOrderLinkId, intent.StrategySource, cancellationToken);
 
     private async Task<GridOrder> PlaceOrderAsync(
         TradeSide side,
         decimal price,
         decimal quantity,
         string? parentOrderLinkId,
+        string? strategySource,
         CancellationToken cancellationToken)
     {
         var orderLinkId = OrderLinkIdFactory.Create(side);
@@ -3073,6 +3148,7 @@ public sealed class GridBotWorker : BackgroundService
             Status = OrderStatus.New,
             TradingMode = _appOptions.TradingMode,
             ParentOrderLinkId = parentOrderLinkId,
+            StrategySource = NormalizeOrderSource(strategySource, parentOrderLinkId),
             CreatedAt = now,
             UpdatedAt = now
         };
@@ -3533,6 +3609,56 @@ public sealed class GridBotWorker : BackgroundService
     {
         return string.Equals(order.ParentOrderLinkId, TrendEntryMarker, StringComparison.Ordinal) ||
             string.Equals(order.ParentOrderLinkId, TrendExitMarker, StringComparison.Ordinal);
+    }
+
+    private static bool IsProtectiveSellOnlyPhase(MarketPhase phase)
+    {
+        return phase is MarketPhase.Dump
+            or MarketPhase.BreakoutDown
+            or MarketPhase.HighVolatility
+            or MarketPhase.Exhaustion;
+    }
+
+    private static string ResolveGridSource(GridBotSettings? profile)
+    {
+        return profile?.StrategyType switch
+        {
+            TradingStrategyType.Combo => ComboGridSource,
+            TradingStrategyType.Hybrid => HybridGridSource,
+            _ => GridSource
+        };
+    }
+
+    private static string ResolveDipEntrySource(GridBotSettings profile, string entryMarker)
+    {
+        return (profile.StrategyType, entryMarker) switch
+        {
+            (TradingStrategyType.Combo, DcaEntryMarker) => ComboDcaSource,
+            (TradingStrategyType.Hybrid, DcaEntryMarker) => HybridDcaSource,
+            (TradingStrategyType.Hybrid, BtdEntryMarker) => HybridBtdSource,
+            (_, DcaEntryMarker) => DcaSource,
+            (_, BtdEntryMarker) => BtdSource,
+            _ => NormalizeOrderSource(null, entryMarker)
+        };
+    }
+
+    private static string NormalizeOrderSource(string? source, string? parentOrderLinkId)
+    {
+        if (!string.IsNullOrWhiteSpace(source) &&
+            !string.Equals(source, "Managed", StringComparison.OrdinalIgnoreCase))
+        {
+            return source.Trim();
+        }
+
+        return parentOrderLinkId switch
+        {
+            DcaEntryMarker => DcaSource,
+            BtdEntryMarker => BtdSource,
+            SignalEntryMarker or SignalExitMarker => SignalSource,
+            TrendEntryMarker or TrendExitMarker => TrendSource,
+            ReduceOnlyExitMarker => ReduceOnlySource,
+            _ => GridSource
+        };
     }
 
     private DcaStrategyConfig ParseDcaStrategyConfig(GridBotSettings profile)

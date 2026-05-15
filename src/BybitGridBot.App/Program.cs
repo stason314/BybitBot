@@ -159,6 +159,24 @@ app.MapDelete("/api/futures/settings/{symbol}", async (string symbol, IFuturesDa
     return response.Success ? Results.Ok(response) : Results.BadRequest(response);
 });
 
+app.MapPost("/api/futures/settings/{symbol}/enabled", async (string symbol, bool enabled, IFuturesDashboardService dashboardService, CancellationToken cancellationToken) =>
+{
+    var response = await dashboardService.SetProfileEnabledAsync(symbol, enabled, cancellationToken);
+    return response.Success ? Results.Ok(response) : Results.BadRequest(response);
+});
+
+app.MapPost("/api/futures/position/{symbol}/close", async (string symbol, IFuturesDashboardService dashboardService, CancellationToken cancellationToken) =>
+{
+    var response = await dashboardService.ClosePositionAsync(symbol, cancellationToken);
+    return response.Success ? Results.Ok(response) : Results.BadRequest(response);
+});
+
+app.MapPost("/api/futures/orders/{symbol}/cancel-active", async (string symbol, IFuturesDashboardService dashboardService, CancellationToken cancellationToken) =>
+{
+    var response = await dashboardService.CancelActiveOrdersAsync(symbol, cancellationToken);
+    return response.Success ? Results.Ok(response) : Results.BadRequest(response);
+});
+
 app.MapPost("/api/resume", async (string? symbol, IGridDashboardService dashboardService, CancellationToken cancellationToken) =>
 {
     var response = await dashboardService.ResumeTradingAsync(symbol, cancellationToken);

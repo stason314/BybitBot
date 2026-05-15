@@ -2,6 +2,8 @@ namespace BybitGridBot.Domain;
 
 public sealed class FuturesBotSettings
 {
+    public bool Enabled { get; init; } = true;
+
     public string Symbol { get; init; } = "BTCUSDT";
 
     public string Category { get; init; } = "linear";

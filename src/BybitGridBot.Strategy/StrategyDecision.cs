@@ -20,6 +20,7 @@ public sealed record OrderIntent(
     TradeSide Side,
     decimal Price,
     decimal Quantity,
-    string? ParentOrderLinkId = null);
+    string? ParentOrderLinkId = null,
+    string? StrategySource = null);
 
 public sealed record CancelOrderIntent(string OrderLinkId, string? Reason = null);

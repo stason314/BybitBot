@@ -42,6 +42,7 @@ public sealed class SqliteGridRepository : IGridRepository
                 status TEXT NOT NULL,
                 trading_mode TEXT NOT NULL,
                 parent_order_link_id TEXT NULL,
+                strategy_source TEXT NOT NULL DEFAULT 'Grid',
                 position_side TEXT NULL,
                 reduce_only INTEGER NOT NULL DEFAULT 0,
                 position_idx INTEGER NOT NULL DEFAULT 0,
@@ -100,6 +101,7 @@ public sealed class SqliteGridRepository : IGridRepository
 
             CREATE TABLE IF NOT EXISTS futures_settings (
                 settings_id TEXT NOT NULL PRIMARY KEY,
+                enabled INTEGER NOT NULL DEFAULT 1,
                 symbol TEXT NOT NULL,
                 category TEXT NOT NULL,
                 strategy_type TEXT NOT NULL,
@@ -115,6 +117,78 @@ public sealed class SqliteGridRepository : IGridRepository
                 liquidation_buffer_percent TEXT NOT NULL,
                 reduce_only_enabled INTEGER NOT NULL,
                 updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS futures_orders (
+                order_link_id TEXT NOT NULL PRIMARY KEY,
+                bybit_order_id TEXT NULL,
+                symbol TEXT NOT NULL,
+                category TEXT NOT NULL,
+                action TEXT NOT NULL,
+                side TEXT NOT NULL,
+                price TEXT NOT NULL,
+                quantity TEXT NOT NULL,
+                filled_quantity TEXT NOT NULL,
+                average_fill_price TEXT NOT NULL,
+                fee_paid TEXT NOT NULL,
+                status TEXT NOT NULL,
+                trading_mode TEXT NOT NULL,
+                position_side TEXT NOT NULL,
+                reduce_only INTEGER NOT NULL,
+                position_idx INTEGER NOT NULL,
+                leverage TEXT NOT NULL,
+                margin_mode TEXT NOT NULL,
+                stop_loss_price TEXT NOT NULL,
+                take_profit_price TEXT NOT NULL,
+                realized_pnl TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                filled_at TEXT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS futures_positions (
+                symbol TEXT NOT NULL PRIMARY KEY,
+                category TEXT NOT NULL,
+                side TEXT NOT NULL,
+                size TEXT NOT NULL,
+                entry_price TEXT NOT NULL,
+                mark_price TEXT NOT NULL,
+                liquidation_price TEXT NOT NULL,
+                position_value_usdt TEXT NOT NULL,
+                margin_used_usdt TEXT NOT NULL,
+                leverage TEXT NOT NULL,
+                unrealized_pnl TEXT NOT NULL,
+                realized_pnl TEXT NOT NULL,
+                position_idx INTEGER NOT NULL,
+                trading_mode TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS futures_fills (
+                fill_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                order_link_id TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                action TEXT NOT NULL,
+                side TEXT NOT NULL,
+                quantity TEXT NOT NULL,
+                price TEXT NOT NULL,
+                fee TEXT NOT NULL,
+                realized_pnl TEXT NOT NULL,
+                funding TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS futures_risk_decisions (
+                risk_decision_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                source TEXT NOT NULL,
+                order_link_id TEXT NULL,
+                action TEXT NULL,
+                is_allowed INTEGER NOT NULL,
+                reason TEXT NOT NULL,
+                severity TEXT NOT NULL,
+                suggested_action TEXT NOT NULL,
+                created_at TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS strategy_decisions (
@@ -301,9 +375,11 @@ public sealed class SqliteGridRepository : IGridRepository
         await EnsureColumnAsync(connection, "runtime_settings", "strategy_selection_mode", "TEXT NOT NULL DEFAULT 'Manual'", cancellationToken);
         await EnsureColumnAsync(connection, "runtime_settings", "strategy_type", "TEXT NOT NULL DEFAULT 'Grid'", cancellationToken);
         await EnsureColumnAsync(connection, "runtime_settings", "strategy_config_json", "TEXT NOT NULL DEFAULT '{}'", cancellationToken);
+        await EnsureColumnAsync(connection, "grid_orders", "strategy_source", "TEXT NOT NULL DEFAULT 'Grid'", cancellationToken);
         await EnsureFuturesOrderColumnsAsync(connection, "grid_orders", cancellationToken);
         await EnsureFuturesOrderColumnsAsync(connection, "orders", cancellationToken);
         await EnsureFuturesStateColumnsAsync(connection, "bot_state", cancellationToken);
+        await EnsureColumnAsync(connection, "futures_settings", "enabled", "INTEGER NOT NULL DEFAULT 1", cancellationToken);
         _logger.LogInformation("SQLite repository initialized.");
     }
 
@@ -431,7 +507,7 @@ public sealed class SqliteGridRepository : IGridRepository
     public async Task<FuturesBotSettings?> GetFuturesSettingsAsync(string symbol, CancellationToken cancellationToken)
     {
         const string sql = """
-            SELECT symbol, category, strategy_type, strategy_config_json, leverage, margin_mode, position_mode,
+            SELECT enabled, symbol, category, strategy_type, strategy_config_json, leverage, margin_mode, position_mode,
                    direction, max_notional_usdt, max_margin_usdt, stop_loss_percent, take_profit_percent,
                    liquidation_buffer_percent, reduce_only_enabled, updated_at
             FROM futures_settings
@@ -456,7 +532,7 @@ public sealed class SqliteGridRepository : IGridRepository
     public async Task<IReadOnlyList<FuturesBotSettings>> GetFuturesSettingsProfilesAsync(CancellationToken cancellationToken)
     {
         const string sql = """
-            SELECT symbol, category, strategy_type, strategy_config_json, leverage, margin_mode, position_mode,
+            SELECT enabled, symbol, category, strategy_type, strategy_config_json, leverage, margin_mode, position_mode,
                    direction, max_notional_usdt, max_margin_usdt, stop_loss_percent, take_profit_percent,
                    liquidation_buffer_percent, reduce_only_enabled, updated_at
             FROM futures_settings
@@ -481,16 +557,17 @@ public sealed class SqliteGridRepository : IGridRepository
     {
         const string sql = """
             INSERT INTO futures_settings (
-                settings_id, symbol, category, strategy_type, strategy_config_json, leverage, margin_mode, position_mode,
+                settings_id, enabled, symbol, category, strategy_type, strategy_config_json, leverage, margin_mode, position_mode,
                 direction, max_notional_usdt, max_margin_usdt, stop_loss_percent, take_profit_percent,
                 liquidation_buffer_percent, reduce_only_enabled, updated_at
             )
             VALUES (
-                $settings_id, $symbol, $category, $strategy_type, $strategy_config_json, $leverage, $margin_mode, $position_mode,
+                $settings_id, $enabled, $symbol, $category, $strategy_type, $strategy_config_json, $leverage, $margin_mode, $position_mode,
                 $direction, $max_notional_usdt, $max_margin_usdt, $stop_loss_percent, $take_profit_percent,
                 $liquidation_buffer_percent, $reduce_only_enabled, $updated_at
             )
             ON CONFLICT(settings_id) DO UPDATE SET
+                enabled = excluded.enabled,
                 symbol = excluded.symbol,
                 category = excluded.category,
                 strategy_type = excluded.strategy_type,
@@ -512,6 +589,7 @@ public sealed class SqliteGridRepository : IGridRepository
         await using var command = connection.CreateCommand();
         command.CommandText = sql;
         command.Parameters.AddWithValue("$settings_id", settings.Symbol);
+        command.Parameters.AddWithValue("$enabled", settings.Enabled);
         command.Parameters.AddWithValue("$symbol", settings.Symbol);
         command.Parameters.AddWithValue("$category", settings.Category);
         command.Parameters.AddWithValue("$strategy_type", settings.StrategyType.ToString());
@@ -538,6 +616,258 @@ public sealed class SqliteGridRepository : IGridRepository
         await using var command = connection.CreateCommand();
         command.CommandText = sql;
         command.Parameters.AddWithValue("$settings_id", symbol);
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    public async Task<IReadOnlyList<FuturesOrderRecord>> GetFuturesOrdersAsync(string symbol, CancellationToken cancellationToken)
+    {
+        const string sql = """
+            SELECT order_link_id, bybit_order_id, symbol, category, action, side, price, quantity, filled_quantity,
+                   average_fill_price, fee_paid, status, trading_mode, position_side, reduce_only, position_idx,
+                   leverage, margin_mode, stop_loss_price, take_profit_price, realized_pnl, created_at, updated_at, filled_at
+            FROM futures_orders
+            WHERE symbol = $symbol
+            ORDER BY updated_at DESC
+            LIMIT 100;
+            """;
+
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        command.Parameters.AddWithValue("$symbol", symbol);
+        return await ReadFuturesOrdersAsync(command, cancellationToken);
+    }
+
+    public async Task<IReadOnlyList<FuturesOrderRecord>> GetActiveFuturesOrdersAsync(string symbol, CancellationToken cancellationToken)
+    {
+        const string sql = """
+            SELECT order_link_id, bybit_order_id, symbol, category, action, side, price, quantity, filled_quantity,
+                   average_fill_price, fee_paid, status, trading_mode, position_side, reduce_only, position_idx,
+                   leverage, margin_mode, stop_loss_price, take_profit_price, realized_pnl, created_at, updated_at, filled_at
+            FROM futures_orders
+            WHERE symbol = $symbol
+              AND status IN ('New', 'PartiallyFilled')
+            ORDER BY updated_at DESC;
+            """;
+
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        command.Parameters.AddWithValue("$symbol", symbol);
+        return await ReadFuturesOrdersAsync(command, cancellationToken);
+    }
+
+    public async Task<FuturesOrderRecord?> GetFuturesOrderByLinkIdAsync(string orderLinkId, CancellationToken cancellationToken)
+    {
+        const string sql = """
+            SELECT order_link_id, bybit_order_id, symbol, category, action, side, price, quantity, filled_quantity,
+                   average_fill_price, fee_paid, status, trading_mode, position_side, reduce_only, position_idx,
+                   leverage, margin_mode, stop_loss_price, take_profit_price, realized_pnl, created_at, updated_at, filled_at
+            FROM futures_orders
+            WHERE order_link_id = $order_link_id
+            LIMIT 1;
+            """;
+
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        command.Parameters.AddWithValue("$order_link_id", orderLinkId);
+        return (await ReadFuturesOrdersAsync(command, cancellationToken)).FirstOrDefault();
+    }
+
+    public async Task UpsertFuturesOrderAsync(FuturesOrderRecord order, CancellationToken cancellationToken)
+    {
+        const string sql = """
+            INSERT INTO futures_orders (
+                order_link_id, bybit_order_id, symbol, category, action, side, price, quantity, filled_quantity,
+                average_fill_price, fee_paid, status, trading_mode, position_side, reduce_only, position_idx,
+                leverage, margin_mode, stop_loss_price, take_profit_price, realized_pnl, created_at, updated_at, filled_at
+            )
+            VALUES (
+                $order_link_id, $bybit_order_id, $symbol, $category, $action, $side, $price, $quantity, $filled_quantity,
+                $average_fill_price, $fee_paid, $status, $trading_mode, $position_side, $reduce_only, $position_idx,
+                $leverage, $margin_mode, $stop_loss_price, $take_profit_price, $realized_pnl, $created_at, $updated_at, $filled_at
+            )
+            ON CONFLICT(order_link_id) DO UPDATE SET
+                bybit_order_id = excluded.bybit_order_id,
+                symbol = excluded.symbol,
+                category = excluded.category,
+                action = excluded.action,
+                side = excluded.side,
+                price = excluded.price,
+                quantity = excluded.quantity,
+                filled_quantity = excluded.filled_quantity,
+                average_fill_price = excluded.average_fill_price,
+                fee_paid = excluded.fee_paid,
+                status = excluded.status,
+                trading_mode = excluded.trading_mode,
+                position_side = excluded.position_side,
+                reduce_only = excluded.reduce_only,
+                position_idx = excluded.position_idx,
+                leverage = excluded.leverage,
+                margin_mode = excluded.margin_mode,
+                stop_loss_price = excluded.stop_loss_price,
+                take_profit_price = excluded.take_profit_price,
+                realized_pnl = excluded.realized_pnl,
+                created_at = excluded.created_at,
+                updated_at = excluded.updated_at,
+                filled_at = excluded.filled_at;
+            """;
+
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        AddFuturesOrderParameters(command, order);
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    public async Task<FuturesPositionSnapshot?> GetFuturesPositionAsync(string symbol, CancellationToken cancellationToken)
+    {
+        const string sql = """
+            SELECT symbol, category, side, size, entry_price, mark_price, liquidation_price, position_value_usdt,
+                   margin_used_usdt, leverage, unrealized_pnl, realized_pnl, position_idx, updated_at
+            FROM futures_positions
+            WHERE symbol = $symbol
+            LIMIT 1;
+            """;
+
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        command.Parameters.AddWithValue("$symbol", symbol);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return null;
+        }
+
+        return ReadFuturesPosition(reader);
+    }
+
+    public async Task UpsertFuturesPositionAsync(FuturesPositionSnapshot position, TradingMode tradingMode, CancellationToken cancellationToken)
+    {
+        const string sql = """
+            INSERT INTO futures_positions (
+                symbol, category, side, size, entry_price, mark_price, liquidation_price, position_value_usdt,
+                margin_used_usdt, leverage, unrealized_pnl, realized_pnl, position_idx, trading_mode, updated_at
+            )
+            VALUES (
+                $symbol, $category, $side, $size, $entry_price, $mark_price, $liquidation_price, $position_value_usdt,
+                $margin_used_usdt, $leverage, $unrealized_pnl, $realized_pnl, $position_idx, $trading_mode, $updated_at
+            )
+            ON CONFLICT(symbol) DO UPDATE SET
+                category = excluded.category,
+                side = excluded.side,
+                size = excluded.size,
+                entry_price = excluded.entry_price,
+                mark_price = excluded.mark_price,
+                liquidation_price = excluded.liquidation_price,
+                position_value_usdt = excluded.position_value_usdt,
+                margin_used_usdt = excluded.margin_used_usdt,
+                leverage = excluded.leverage,
+                unrealized_pnl = excluded.unrealized_pnl,
+                realized_pnl = excluded.realized_pnl,
+                position_idx = excluded.position_idx,
+                trading_mode = excluded.trading_mode,
+                updated_at = excluded.updated_at;
+            """;
+
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        command.Parameters.AddWithValue("$symbol", position.Symbol);
+        command.Parameters.AddWithValue("$category", position.Category);
+        command.Parameters.AddWithValue("$side", position.Side);
+        command.Parameters.AddWithValue("$size", FormatDecimal(position.Size));
+        command.Parameters.AddWithValue("$entry_price", FormatDecimal(position.EntryPrice));
+        command.Parameters.AddWithValue("$mark_price", FormatDecimal(position.MarkPrice));
+        command.Parameters.AddWithValue("$liquidation_price", FormatDecimal(position.LiquidationPrice));
+        command.Parameters.AddWithValue("$position_value_usdt", FormatDecimal(position.PositionValueUsdt));
+        command.Parameters.AddWithValue("$margin_used_usdt", FormatDecimal(position.MarginUsedUsdt));
+        command.Parameters.AddWithValue("$leverage", FormatDecimal(position.Leverage));
+        command.Parameters.AddWithValue("$unrealized_pnl", FormatDecimal(position.UnrealizedPnl));
+        command.Parameters.AddWithValue("$realized_pnl", FormatDecimal(position.RealizedPnl));
+        command.Parameters.AddWithValue("$position_idx", position.PositionIdx);
+        command.Parameters.AddWithValue("$trading_mode", tradingMode.ToString());
+        command.Parameters.AddWithValue("$updated_at", position.UpdatedAt.ToString("O", CultureInfo.InvariantCulture));
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    public async Task AddFuturesFillAsync(FuturesFillRecord fill, CancellationToken cancellationToken)
+    {
+        const string sql = """
+            INSERT INTO futures_fills (
+                order_link_id, symbol, action, side, quantity, price, fee, realized_pnl, funding, created_at
+            )
+            VALUES (
+                $order_link_id, $symbol, $action, $side, $quantity, $price, $fee, $realized_pnl, $funding, $created_at
+            );
+            """;
+
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        command.Parameters.AddWithValue("$order_link_id", fill.OrderLinkId);
+        command.Parameters.AddWithValue("$symbol", fill.Symbol);
+        command.Parameters.AddWithValue("$action", fill.Action.ToString());
+        command.Parameters.AddWithValue("$side", fill.Side.ToString());
+        command.Parameters.AddWithValue("$quantity", FormatDecimal(fill.Quantity));
+        command.Parameters.AddWithValue("$price", FormatDecimal(fill.Price));
+        command.Parameters.AddWithValue("$fee", FormatDecimal(fill.Fee));
+        command.Parameters.AddWithValue("$realized_pnl", FormatDecimal(fill.RealizedPnl));
+        command.Parameters.AddWithValue("$funding", FormatDecimal(fill.Funding));
+        command.Parameters.AddWithValue("$created_at", fill.CreatedAt.ToString("O", CultureInfo.InvariantCulture));
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    public async Task<IReadOnlyList<FuturesRiskDecisionRecord>> GetFuturesRiskDecisionsAsync(string symbol, int limit, CancellationToken cancellationToken)
+    {
+        const string sql = """
+            SELECT risk_decision_id, symbol, source, order_link_id, action, is_allowed, reason, severity, suggested_action, created_at
+            FROM futures_risk_decisions
+            WHERE symbol = $symbol
+            ORDER BY created_at DESC
+            LIMIT $limit;
+            """;
+
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        command.Parameters.AddWithValue("$symbol", symbol);
+        command.Parameters.AddWithValue("$limit", limit);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        var result = new List<FuturesRiskDecisionRecord>();
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            result.Add(ReadFuturesRiskDecision(reader));
+        }
+
+        return result;
+    }
+
+    public async Task AddFuturesRiskDecisionAsync(FuturesRiskDecisionRecord decision, CancellationToken cancellationToken)
+    {
+        const string sql = """
+            INSERT INTO futures_risk_decisions (
+                symbol, source, order_link_id, action, is_allowed, reason, severity, suggested_action, created_at
+            )
+            VALUES (
+                $symbol, $source, $order_link_id, $action, $is_allowed, $reason, $severity, $suggested_action, $created_at
+            );
+            """;
+
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        command.Parameters.AddWithValue("$symbol", decision.Symbol);
+        command.Parameters.AddWithValue("$source", decision.Source);
+        command.Parameters.AddWithValue("$order_link_id", (object?)decision.OrderLinkId ?? DBNull.Value);
+        command.Parameters.AddWithValue("$action", decision.Action is null ? (object)DBNull.Value : decision.Action.Value.ToString());
+        command.Parameters.AddWithValue("$is_allowed", decision.IsAllowed);
+        command.Parameters.AddWithValue("$reason", decision.Reason);
+        command.Parameters.AddWithValue("$severity", decision.Severity);
+        command.Parameters.AddWithValue("$suggested_action", decision.SuggestedAction);
+        command.Parameters.AddWithValue("$created_at", decision.CreatedAt.ToString("O", CultureInfo.InvariantCulture));
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
@@ -598,7 +928,7 @@ public sealed class SqliteGridRepository : IGridRepository
         const string sql = """
             SELECT order_link_id, bybit_order_id, symbol, category, side, price, quantity, filled_quantity,
                    average_fill_price, fee_paid, status, trading_mode, parent_order_link_id,
-                   position_side, reduce_only, position_idx, leverage, margin_mode, entry_price, mark_price,
+                   strategy_source, position_side, reduce_only, position_idx, leverage, margin_mode, entry_price, mark_price,
                    liquidation_price, unrealized_pnl, realized_pnl,
                    created_at, updated_at, filled_at
             FROM grid_orders
@@ -619,7 +949,7 @@ public sealed class SqliteGridRepository : IGridRepository
         const string sql = """
             SELECT order_link_id, bybit_order_id, symbol, category, side, price, quantity, filled_quantity,
                    average_fill_price, fee_paid, status, trading_mode, parent_order_link_id,
-                   position_side, reduce_only, position_idx, leverage, margin_mode, entry_price, mark_price,
+                   strategy_source, position_side, reduce_only, position_idx, leverage, margin_mode, entry_price, mark_price,
                    liquidation_price, unrealized_pnl, realized_pnl,
                    created_at, updated_at, filled_at
             FROM grid_orders
@@ -640,7 +970,7 @@ public sealed class SqliteGridRepository : IGridRepository
         const string sql = """
             SELECT order_link_id, bybit_order_id, symbol, category, side, price, quantity, filled_quantity,
                    average_fill_price, fee_paid, status, trading_mode, parent_order_link_id,
-                   position_side, reduce_only, position_idx, leverage, margin_mode, entry_price, mark_price,
+                   strategy_source, position_side, reduce_only, position_idx, leverage, margin_mode, entry_price, mark_price,
                    liquidation_price, unrealized_pnl, realized_pnl,
                    created_at, updated_at, filled_at
             FROM grid_orders
@@ -662,7 +992,7 @@ public sealed class SqliteGridRepository : IGridRepository
         const string sql = """
             SELECT order_link_id, bybit_order_id, symbol, category, side, price, quantity, filled_quantity,
                    average_fill_price, fee_paid, status, trading_mode, parent_order_link_id,
-                   position_side, reduce_only, position_idx, leverage, margin_mode, entry_price, mark_price,
+                   strategy_source, position_side, reduce_only, position_idx, leverage, margin_mode, entry_price, mark_price,
                    liquidation_price, unrealized_pnl, realized_pnl,
                    created_at, updated_at, filled_at
             FROM grid_orders
@@ -690,6 +1020,7 @@ public sealed class SqliteGridRepository : IGridRepository
             INSERT INTO grid_orders (
                 order_link_id, bybit_order_id, symbol, category, side, price, quantity, filled_quantity,
                 average_fill_price, fee_paid, status, trading_mode, parent_order_link_id,
+                strategy_source,
                 position_side, reduce_only, position_idx, leverage, margin_mode, entry_price, mark_price,
                 liquidation_price, unrealized_pnl, realized_pnl,
                 created_at, updated_at, filled_at
@@ -697,6 +1028,7 @@ public sealed class SqliteGridRepository : IGridRepository
             VALUES (
                 $order_link_id, $bybit_order_id, $symbol, $category, $side, $price, $quantity, $filled_quantity,
                 $average_fill_price, $fee_paid, $status, $trading_mode, $parent_order_link_id,
+                $strategy_source,
                 $position_side, $reduce_only, $position_idx, $leverage, $margin_mode, $entry_price, $mark_price,
                 $liquidation_price, $unrealized_pnl, $realized_pnl,
                 $created_at, $updated_at, $filled_at
@@ -714,6 +1046,7 @@ public sealed class SqliteGridRepository : IGridRepository
                 status = excluded.status,
                 trading_mode = excluded.trading_mode,
                 parent_order_link_id = excluded.parent_order_link_id,
+                strategy_source = excluded.strategy_source,
                 position_side = excluded.position_side,
                 reduce_only = excluded.reduce_only,
                 position_idx = excluded.position_idx,
@@ -745,6 +1078,7 @@ public sealed class SqliteGridRepository : IGridRepository
         command.Parameters.AddWithValue("$status", order.Status.ToString());
         command.Parameters.AddWithValue("$trading_mode", order.TradingMode.ToString());
         command.Parameters.AddWithValue("$parent_order_link_id", (object?)order.ParentOrderLinkId ?? DBNull.Value);
+        command.Parameters.AddWithValue("$strategy_source", NormalizeStrategySource(order.StrategySource, order.ParentOrderLinkId));
         command.Parameters.AddWithValue("$position_side", (object?)order.PositionSide ?? DBNull.Value);
         command.Parameters.AddWithValue("$reduce_only", order.ReduceOnly);
         command.Parameters.AddWithValue("$position_idx", order.PositionIdx);
@@ -901,22 +1235,121 @@ public sealed class SqliteGridRepository : IGridRepository
     {
         return new FuturesBotSettings
         {
-            Symbol = reader.GetString(0),
-            Category = reader.GetString(1),
-            StrategyType = ParseEnum(reader.GetString(2), FuturesStrategyType.Pause),
-            StrategyConfigJson = reader.GetString(3),
-            Leverage = ParseDecimal(reader.GetString(4)),
-            MarginMode = ParseEnum(reader.GetString(5), FuturesMarginMode.Isolated),
-            PositionMode = ParseEnum(reader.GetString(6), FuturesPositionMode.OneWay),
-            Direction = ParseEnum(reader.GetString(7), FuturesDirection.LongOnly),
-            MaxNotionalUsdt = ParseDecimal(reader.GetString(8)),
-            MaxMarginUsdt = ParseDecimal(reader.GetString(9)),
-            StopLossPercent = ParseDecimal(reader.GetString(10)),
-            TakeProfitPercent = ParseDecimal(reader.GetString(11)),
-            LiquidationBufferPercent = ParseDecimal(reader.GetString(12)),
-            ReduceOnlyEnabled = reader.GetBoolean(13),
-            UpdatedAt = DateTimeOffset.Parse(reader.GetString(14), CultureInfo.InvariantCulture)
+            Enabled = reader.GetBoolean(0),
+            Symbol = reader.GetString(1),
+            Category = reader.GetString(2),
+            StrategyType = ParseEnum(reader.GetString(3), FuturesStrategyType.Pause),
+            StrategyConfigJson = reader.GetString(4),
+            Leverage = ParseDecimal(reader.GetString(5)),
+            MarginMode = ParseEnum(reader.GetString(6), FuturesMarginMode.Isolated),
+            PositionMode = ParseEnum(reader.GetString(7), FuturesPositionMode.OneWay),
+            Direction = ParseEnum(reader.GetString(8), FuturesDirection.LongOnly),
+            MaxNotionalUsdt = ParseDecimal(reader.GetString(9)),
+            MaxMarginUsdt = ParseDecimal(reader.GetString(10)),
+            StopLossPercent = ParseDecimal(reader.GetString(11)),
+            TakeProfitPercent = ParseDecimal(reader.GetString(12)),
+            LiquidationBufferPercent = ParseDecimal(reader.GetString(13)),
+            ReduceOnlyEnabled = reader.GetBoolean(14),
+            UpdatedAt = DateTimeOffset.Parse(reader.GetString(15), CultureInfo.InvariantCulture)
         };
+    }
+
+    private static async Task<List<FuturesOrderRecord>> ReadFuturesOrdersAsync(SqliteCommand command, CancellationToken cancellationToken)
+    {
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        var result = new List<FuturesOrderRecord>();
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            result.Add(new FuturesOrderRecord
+            {
+                OrderLinkId = reader.GetString(0),
+                BybitOrderId = reader.IsDBNull(1) ? null : reader.GetString(1),
+                Symbol = reader.GetString(2),
+                Category = reader.GetString(3),
+                Action = ParseEnum(reader.GetString(4), FuturesTradeAction.OpenLong),
+                Side = ParseEnum(reader.GetString(5), TradeSide.Buy),
+                Price = ParseDecimal(reader.GetString(6)),
+                Quantity = ParseDecimal(reader.GetString(7)),
+                FilledQuantity = ParseDecimal(reader.GetString(8)),
+                AverageFillPrice = ParseDecimal(reader.GetString(9)),
+                FeePaid = ParseDecimal(reader.GetString(10)),
+                Status = ParseEnum(reader.GetString(11), OrderStatus.New),
+                TradingMode = ParseEnum(reader.GetString(12), TradingMode.Paper),
+                PositionSide = reader.GetString(13),
+                ReduceOnly = reader.GetBoolean(14),
+                PositionIdx = reader.GetInt32(15),
+                Leverage = ParseDecimal(reader.GetString(16)),
+                MarginMode = reader.GetString(17),
+                StopLossPrice = ParseDecimal(reader.GetString(18)),
+                TakeProfitPrice = ParseDecimal(reader.GetString(19)),
+                RealizedPnl = ParseDecimal(reader.GetString(20)),
+                CreatedAt = DateTimeOffset.Parse(reader.GetString(21), CultureInfo.InvariantCulture),
+                UpdatedAt = DateTimeOffset.Parse(reader.GetString(22), CultureInfo.InvariantCulture),
+                FilledAt = reader.IsDBNull(23) ? null : DateTimeOffset.Parse(reader.GetString(23), CultureInfo.InvariantCulture)
+            });
+        }
+
+        return result;
+    }
+
+    private static FuturesPositionSnapshot ReadFuturesPosition(SqliteDataReader reader) => new()
+    {
+        Symbol = reader.GetString(0),
+        Category = reader.GetString(1),
+        Side = reader.GetString(2),
+        Size = ParseDecimal(reader.GetString(3)),
+        EntryPrice = ParseDecimal(reader.GetString(4)),
+        MarkPrice = ParseDecimal(reader.GetString(5)),
+        LiquidationPrice = ParseDecimal(reader.GetString(6)),
+        PositionValueUsdt = ParseDecimal(reader.GetString(7)),
+        MarginUsedUsdt = ParseDecimal(reader.GetString(8)),
+        Leverage = ParseDecimal(reader.GetString(9)),
+        UnrealizedPnl = ParseDecimal(reader.GetString(10)),
+        RealizedPnl = ParseDecimal(reader.GetString(11)),
+        PositionIdx = reader.GetInt32(12),
+        UpdatedAt = DateTimeOffset.Parse(reader.GetString(13), CultureInfo.InvariantCulture)
+    };
+
+    private static FuturesRiskDecisionRecord ReadFuturesRiskDecision(SqliteDataReader reader) => new()
+    {
+        RiskDecisionId = reader.GetInt64(0),
+        Symbol = reader.GetString(1),
+        Source = reader.GetString(2),
+        OrderLinkId = reader.IsDBNull(3) ? null : reader.GetString(3),
+        Action = reader.IsDBNull(4) ? null : ParseEnum(reader.GetString(4), FuturesTradeAction.OpenLong),
+        IsAllowed = reader.GetBoolean(5),
+        Reason = reader.GetString(6),
+        Severity = reader.GetString(7),
+        SuggestedAction = reader.GetString(8),
+        CreatedAt = DateTimeOffset.Parse(reader.GetString(9), CultureInfo.InvariantCulture)
+    };
+
+    private static void AddFuturesOrderParameters(SqliteCommand command, FuturesOrderRecord order)
+    {
+        command.Parameters.AddWithValue("$order_link_id", order.OrderLinkId);
+        command.Parameters.AddWithValue("$bybit_order_id", (object?)order.BybitOrderId ?? DBNull.Value);
+        command.Parameters.AddWithValue("$symbol", order.Symbol);
+        command.Parameters.AddWithValue("$category", order.Category);
+        command.Parameters.AddWithValue("$action", order.Action.ToString());
+        command.Parameters.AddWithValue("$side", order.Side.ToString());
+        command.Parameters.AddWithValue("$price", FormatDecimal(order.Price));
+        command.Parameters.AddWithValue("$quantity", FormatDecimal(order.Quantity));
+        command.Parameters.AddWithValue("$filled_quantity", FormatDecimal(order.FilledQuantity));
+        command.Parameters.AddWithValue("$average_fill_price", FormatDecimal(order.AverageFillPrice));
+        command.Parameters.AddWithValue("$fee_paid", FormatDecimal(order.FeePaid));
+        command.Parameters.AddWithValue("$status", order.Status.ToString());
+        command.Parameters.AddWithValue("$trading_mode", order.TradingMode.ToString());
+        command.Parameters.AddWithValue("$position_side", order.PositionSide);
+        command.Parameters.AddWithValue("$reduce_only", order.ReduceOnly);
+        command.Parameters.AddWithValue("$position_idx", order.PositionIdx);
+        command.Parameters.AddWithValue("$leverage", FormatDecimal(order.Leverage));
+        command.Parameters.AddWithValue("$margin_mode", order.MarginMode);
+        command.Parameters.AddWithValue("$stop_loss_price", FormatDecimal(order.StopLossPrice));
+        command.Parameters.AddWithValue("$take_profit_price", FormatDecimal(order.TakeProfitPrice));
+        command.Parameters.AddWithValue("$realized_pnl", FormatDecimal(order.RealizedPnl));
+        command.Parameters.AddWithValue("$created_at", order.CreatedAt.ToString("O", CultureInfo.InvariantCulture));
+        command.Parameters.AddWithValue("$updated_at", order.UpdatedAt.ToString("O", CultureInfo.InvariantCulture));
+        command.Parameters.AddWithValue("$filled_at", order.FilledAt?.ToString("O", CultureInfo.InvariantCulture) ?? (object)DBNull.Value);
     }
 
     private async Task<List<GridOrder>> ReadOrdersAsync(SqliteCommand command, CancellationToken cancellationToken)
@@ -926,6 +1359,7 @@ public sealed class SqliteGridRepository : IGridRepository
 
         while (await reader.ReadAsync(cancellationToken))
         {
+            var parentOrderLinkId = reader.IsDBNull(12) ? null : reader.GetString(12);
             result.Add(new GridOrder
             {
                 OrderLinkId = reader.GetString(0),
@@ -940,20 +1374,21 @@ public sealed class SqliteGridRepository : IGridRepository
                 FeePaid = ParseDecimal(reader.GetString(9)),
                 Status = Enum.Parse<OrderStatus>(reader.GetString(10), true),
                 TradingMode = Enum.Parse<TradingMode>(reader.GetString(11), true),
-                ParentOrderLinkId = reader.IsDBNull(12) ? null : reader.GetString(12),
-                PositionSide = reader.IsDBNull(13) ? null : reader.GetString(13),
-                ReduceOnly = reader.GetBoolean(14),
-                PositionIdx = reader.GetInt32(15),
-                Leverage = ParseDecimal(reader.GetString(16)),
-                MarginMode = reader.IsDBNull(17) ? null : reader.GetString(17),
-                EntryPrice = ParseDecimal(reader.GetString(18)),
-                MarkPrice = ParseDecimal(reader.GetString(19)),
-                LiquidationPrice = ParseDecimal(reader.GetString(20)),
-                UnrealizedPnl = ParseDecimal(reader.GetString(21)),
-                RealizedPnl = ParseDecimal(reader.GetString(22)),
-                CreatedAt = DateTimeOffset.Parse(reader.GetString(23), CultureInfo.InvariantCulture),
-                UpdatedAt = DateTimeOffset.Parse(reader.GetString(24), CultureInfo.InvariantCulture),
-                FilledAt = reader.IsDBNull(25) ? null : DateTimeOffset.Parse(reader.GetString(25), CultureInfo.InvariantCulture)
+                ParentOrderLinkId = parentOrderLinkId,
+                StrategySource = NormalizeStrategySource(reader.IsDBNull(13) ? null : reader.GetString(13), parentOrderLinkId),
+                PositionSide = reader.IsDBNull(14) ? null : reader.GetString(14),
+                ReduceOnly = reader.GetBoolean(15),
+                PositionIdx = reader.GetInt32(16),
+                Leverage = ParseDecimal(reader.GetString(17)),
+                MarginMode = reader.IsDBNull(18) ? null : reader.GetString(18),
+                EntryPrice = ParseDecimal(reader.GetString(19)),
+                MarkPrice = ParseDecimal(reader.GetString(20)),
+                LiquidationPrice = ParseDecimal(reader.GetString(21)),
+                UnrealizedPnl = ParseDecimal(reader.GetString(22)),
+                RealizedPnl = ParseDecimal(reader.GetString(23)),
+                CreatedAt = DateTimeOffset.Parse(reader.GetString(24), CultureInfo.InvariantCulture),
+                UpdatedAt = DateTimeOffset.Parse(reader.GetString(25), CultureInfo.InvariantCulture),
+                FilledAt = reader.IsDBNull(26) ? null : DateTimeOffset.Parse(reader.GetString(26), CultureInfo.InvariantCulture)
             });
         }
 
@@ -1034,6 +1469,25 @@ public sealed class SqliteGridRepository : IGridRepository
     private static string FormatDecimal(decimal value) => value.ToString(CultureInfo.InvariantCulture);
 
     private static decimal ParseDecimal(string value) => decimal.Parse(value, CultureInfo.InvariantCulture);
+
+    private static string NormalizeStrategySource(string? source, string? parentOrderLinkId)
+    {
+        if (!string.IsNullOrWhiteSpace(source) &&
+            !string.Equals(source, "Managed", StringComparison.OrdinalIgnoreCase))
+        {
+            return source.Trim();
+        }
+
+        return parentOrderLinkId switch
+        {
+            "dca-entry" => "DCA",
+            "btd-entry" => "BTD",
+            "signal-entry" or "signal-exit" => "Signal",
+            "trend-entry" or "trend-exit" => "Trend",
+            "reduce-only-exit" => "ReduceOnly",
+            _ => "Grid"
+        };
+    }
 
     private static TEnum ParseEnum<TEnum>(string value, TEnum fallback)
         where TEnum : struct, Enum =>

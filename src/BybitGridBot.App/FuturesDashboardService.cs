@@ -13,6 +13,9 @@ public interface IFuturesDashboardService
     Task<UpdateSettingsResponse> ApplyAutoRecommendationAsync(string? symbol, CancellationToken cancellationToken);
     Task<UpdateSettingsResponse> UpdateSettingsAsync(UpdateFuturesSettingsRequest request, CancellationToken cancellationToken);
     Task<UpdateSettingsResponse> DeleteSettingsAsync(string symbol, CancellationToken cancellationToken);
+    Task<UpdateSettingsResponse> SetProfileEnabledAsync(string symbol, bool enabled, CancellationToken cancellationToken);
+    Task<UpdateSettingsResponse> ClosePositionAsync(string symbol, CancellationToken cancellationToken);
+    Task<UpdateSettingsResponse> CancelActiveOrdersAsync(string symbol, CancellationToken cancellationToken);
     string RenderDashboardPage();
 }
 
@@ -28,6 +31,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
 
     private readonly IBybitRestClient _bybitRestClient;
     private readonly AppOptions _appOptions;
+    private readonly FuturesExecutionService _executionService;
     private readonly FuturesOptions _futuresOptions;
     private readonly FuturesAutoConfigRecommender _recommender;
     private readonly IGridRepository _repository;
@@ -35,12 +39,14 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
     public FuturesDashboardService(
         IBybitRestClient bybitRestClient,
         IOptions<AppOptions> appOptions,
+        FuturesExecutionService executionService,
         IOptions<FuturesOptions> futuresOptions,
         FuturesAutoConfigRecommender recommender,
         IGridRepository repository)
     {
         _bybitRestClient = bybitRestClient;
         _appOptions = appOptions.Value;
+        _executionService = executionService;
         _futuresOptions = futuresOptions.Value;
         _recommender = recommender;
         _repository = repository;
@@ -80,6 +86,9 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
 
         var candles = await GetAnalysisCandlesAsync(selectedSettings, cancellationToken);
         var recommendation = _recommender.Recommend(selectedSettings, candles, position.Size > 0m);
+        var activeOrders = await _repository.GetActiveFuturesOrdersAsync(selectedSettings.Symbol, cancellationToken);
+        var riskDecisions = await _repository.GetFuturesRiskDecisionsAsync(selectedSettings.Symbol, 20, cancellationToken);
+        var lastPreflight = riskDecisions.FirstOrDefault(decision => string.Equals(decision.Source, "Preflight", StringComparison.OrdinalIgnoreCase));
 
         return new FuturesDashboardResponse
         {
@@ -88,6 +97,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
                 {
                     Symbol = profile.Symbol,
                     Category = profile.Category,
+                    Enabled = profile.Enabled,
                     IsSelected = string.Equals(profile.Symbol, selectedSettings.Symbol, StringComparison.OrdinalIgnoreCase)
                 })
                 .ToArray(),
@@ -98,6 +108,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
                     Category = profile.Category,
                     StrategyType = FormatEnum(profile.StrategyType),
                     Direction = FormatEnum(profile.Direction),
+                    Enabled = profile.Enabled,
                     Leverage = profile.Leverage,
                     MaxNotionalUsdt = profile.MaxNotionalUsdt,
                     MaxMarginUsdt = profile.MaxMarginUsdt,
@@ -109,6 +120,11 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             Position = position,
             AutoRecommendation = MapAutoRecommendation(recommendation),
             StrategyActions = StrategyActions,
+            ActiveOrders = activeOrders.Select(MapOrder).ToArray(),
+            RiskDecisions = riskDecisions.Select(MapRiskDecision).ToArray(),
+            LastPreflightResult = lastPreflight is null ? null : MapRiskDecision(lastPreflight),
+            TradingMode = _appOptions.TradingMode.ToString(),
+            FuturesEnabled = _futuresOptions.Enabled,
             PositionError = positionError,
             GeneratedAt = DateTimeOffset.UtcNow
         };
@@ -219,6 +235,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
 
         var settings = new FuturesBotSettings
         {
+            Enabled = request.Enabled,
             Symbol = symbol,
             Category = category,
             StrategyType = strategyType!.Value,
@@ -254,6 +271,150 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             Success = true,
             Symbol = normalizedSymbol,
             Message = $"Futures settings deleted for {normalizedSymbol}."
+        };
+    }
+
+    public async Task<UpdateSettingsResponse> SetProfileEnabledAsync(string symbol, bool enabled, CancellationToken cancellationToken)
+    {
+        var normalizedSymbol = NormalizeSymbol(symbol);
+        var settings = await _repository.GetFuturesSettingsAsync(normalizedSymbol, cancellationToken);
+        if (settings is null)
+        {
+            return new UpdateSettingsResponse
+            {
+                Success = false,
+                Symbol = normalizedSymbol,
+                Message = "Futures profile not found.",
+                Errors = [$"Futures profile {normalizedSymbol} does not exist."]
+            };
+        }
+
+        await _repository.SaveFuturesSettingsAsync(WithEnabled(settings, enabled), cancellationToken);
+        return new UpdateSettingsResponse
+        {
+            Success = true,
+            Symbol = normalizedSymbol,
+            Message = enabled ? $"Futures profile enabled for {normalizedSymbol}." : $"Futures profile disabled for {normalizedSymbol}."
+        };
+
+        static FuturesBotSettings WithEnabled(FuturesBotSettings current, bool value) => new()
+        {
+            Enabled = value,
+            Symbol = current.Symbol,
+            Category = current.Category,
+            StrategyType = current.StrategyType,
+            StrategyConfigJson = current.StrategyConfigJson,
+            Leverage = current.Leverage,
+            MarginMode = current.MarginMode,
+            PositionMode = current.PositionMode,
+            Direction = current.Direction,
+            MaxNotionalUsdt = current.MaxNotionalUsdt,
+            MaxMarginUsdt = current.MaxMarginUsdt,
+            StopLossPercent = current.StopLossPercent,
+            TakeProfitPercent = current.TakeProfitPercent,
+            LiquidationBufferPercent = current.LiquidationBufferPercent,
+            ReduceOnlyEnabled = current.ReduceOnlyEnabled,
+            UpdatedAt = DateTimeOffset.UtcNow
+        };
+    }
+
+    public async Task<UpdateSettingsResponse> ClosePositionAsync(string symbol, CancellationToken cancellationToken)
+    {
+        var normalizedSymbol = NormalizeSymbol(symbol);
+        var settings = await _repository.GetFuturesSettingsAsync(normalizedSymbol, cancellationToken);
+        if (settings is null)
+        {
+            return new UpdateSettingsResponse
+            {
+                Success = false,
+                Symbol = normalizedSymbol,
+                Message = "Futures profile not found.",
+                Errors = [$"Futures profile {normalizedSymbol} does not exist."]
+            };
+        }
+
+        var position = await ResolvePositionSnapshotAsync(settings, cancellationToken);
+        if (position.Size <= 0m)
+        {
+            return new UpdateSettingsResponse
+            {
+                Success = false,
+                Symbol = normalizedSymbol,
+                Message = "No open futures position.",
+                Errors = ["No open long position to close."]
+            };
+        }
+
+        var instrument = await _bybitRestClient.GetInstrumentInfoAsync(settings.Category, settings.Symbol, cancellationToken);
+        var referencePrice = position.MarkPrice > 0m ? position.MarkPrice : position.EntryPrice;
+        if (referencePrice <= 0m)
+        {
+            referencePrice = (await _bybitRestClient.GetTickerAsync(settings.Category, settings.Symbol, cancellationToken)).LastPrice;
+        }
+
+        var price = instrument.RoundPrice(referencePrice);
+        var quantity = instrument.RoundQuantity(position.Size);
+        var result = await _executionService.ExecuteAsync(new FuturesExecutionRequest
+        {
+            Settings = settings,
+            Intent = new FuturesTradeIntent
+            {
+                Symbol = settings.Symbol,
+                Category = settings.Category,
+                Action = FuturesTradeAction.CloseLong,
+                Price = price,
+                Quantity = quantity,
+                Leverage = settings.Leverage,
+                PositionIdx = 0,
+                OrderLinkId = FuturesOrderLinkIds.Create(FuturesTradeAction.CloseLong),
+                Reason = "dashboard-reduce-only-close"
+            },
+            Position = position,
+            MarkPrice = price,
+            Instrument = MapInstrumentRules(instrument)
+        }, cancellationToken);
+
+        return new UpdateSettingsResponse
+        {
+            Success = true,
+            Symbol = normalizedSymbol,
+            Message = result.IsPaper ? "Paper futures position closed reduce-only." : "Futures reduce-only close submitted."
+        };
+    }
+
+    public async Task<UpdateSettingsResponse> CancelActiveOrdersAsync(string symbol, CancellationToken cancellationToken)
+    {
+        var normalizedSymbol = NormalizeSymbol(symbol);
+        var settings = await _repository.GetFuturesSettingsAsync(normalizedSymbol, cancellationToken);
+        if (settings is null)
+        {
+            return new UpdateSettingsResponse
+            {
+                Success = false,
+                Symbol = normalizedSymbol,
+                Message = "Futures profile not found.",
+                Errors = [$"Futures profile {normalizedSymbol} does not exist."]
+            };
+        }
+
+        var activeOrders = await _repository.GetActiveFuturesOrdersAsync(normalizedSymbol, cancellationToken);
+        foreach (var order in activeOrders)
+        {
+            if (_appOptions.TradingMode == TradingMode.Testnet)
+            {
+                await _bybitRestClient.CancelOrderAsync(settings.Category, settings.Symbol, order.BybitOrderId, order.OrderLinkId, cancellationToken);
+            }
+
+            order.Status = OrderStatus.Cancelled;
+            order.UpdatedAt = DateTimeOffset.UtcNow;
+            await _repository.UpsertFuturesOrderAsync(order, cancellationToken);
+        }
+
+        return new UpdateSettingsResponse
+        {
+            Success = true,
+            Symbol = normalizedSymbol,
+            Message = $"Cancelled {activeOrders.Count} futures orders."
         };
     }
 
@@ -368,6 +529,18 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
 
     <section class="panel" style="margin-bottom:18px;">
       <div class="actions" style="justify-content:space-between;">
+        <div id="runtimeStatus" class="actions"></div>
+        <div class="actions">
+          <button type="button" id="toggleProfile">Toggle</button>
+          <button type="button" class="danger" id="closePosition">Close Position</button>
+          <button type="button" class="danger" id="cancelFuturesOrders">Cancel Orders</button>
+        </div>
+      </div>
+      <div class="status" id="controlStatus"></div>
+    </section>
+
+    <section class="panel" style="margin-bottom:18px;">
+      <div class="actions" style="justify-content:space-between;">
         <h2 style="margin:0;">Auto Recommendation</h2>
         <div class="actions">
           <button type="button" id="refreshAutoRecommendation">Refresh</button>
@@ -396,6 +569,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         <form id="settingsForm">
           <div><label for="symbol">Symbol</label><input id="symbol" name="symbol" required /></div>
           <div><label for="category">Category</label><input id="category" name="category" value="linear" required /></div>
+          <div><label for="enabled">Profile</label><select id="enabled" name="enabled"><option value="true">Enabled</option><option value="false">Disabled</option></select></div>
           <div><label for="strategyType">Strategy</label><select id="strategyType" name="strategyType"><option value="pause">Pause</option><option value="trendfollow">Trend Follow</option><option value="breakout">Breakout</option><option value="gridlongonly">Grid Long Only</option><option value="reduceonly">Reduce Only</option></select></div>
           <div><label for="direction">Direction</label><select id="direction" name="direction"><option value="long-only">Long only</option></select></div>
           <div><label for="leverage">Leverage</label><input id="leverage" name="leverage" type="number" step="0.01" min="1" required /></div>
@@ -418,6 +592,26 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
     </div>
 
     <section class="panel" style="margin-top:18px;">
+      <h2>Active Futures Orders</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Link</th><th>Action</th><th>Side</th><th>Qty</th><th>Filled</th><th>Price</th><th>Status</th><th>Reduce</th><th>Updated</th></tr></thead>
+          <tbody id="activeOrderRows"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel" style="margin-top:18px;">
+      <h2>Risk Decisions</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Time</th><th>Source</th><th>Action</th><th>Allowed</th><th>Severity</th><th>Reason</th></tr></thead>
+          <tbody id="riskDecisionRows"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel" style="margin-top:18px;">
       <h2>Strategy Action Model</h2>
       <div class="actions-list" id="strategyActions"></div>
     </section>
@@ -425,10 +619,11 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
 
   <script>
     const byId = (id) => document.getElementById(id);
-    const fields = ['symbol','category','strategyType','strategyConfigJson','leverage','marginMode','positionMode','direction','maxNotionalUsdt','maxMarginUsdt','stopLossPercent','takeProfitPercent','liquidationBufferPercent','reduceOnlyEnabled'];
+    const fields = ['symbol','category','enabled','strategyType','strategyConfigJson','leverage','marginMode','positionMode','direction','maxNotionalUsdt','maxMarginUsdt','stopLossPercent','takeProfitPercent','liquidationBufferPercent','reduceOnlyEnabled'];
     const defaults = {
       symbol: 'BTCUSDT',
       category: 'linear',
+      enabled: true,
       strategyType: 'pause',
       strategyConfigJson: '{}',
       leverage: 2,
@@ -469,6 +664,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
     const updateForm = (settings) => {
       byId('symbol').value = settings.symbol;
       byId('category').value = settings.category;
+      byId('enabled').value = String(settings.enabled);
       byId('strategyType').value = settings.strategyType;
       byId('strategyConfigJson').value = settings.strategyConfigJson || '{}';
       byId('leverage').value = settings.leverage;
@@ -485,6 +681,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
     const readPayload = () => ({
       symbol: byId('symbol').value,
       category: byId('category').value,
+      enabled: byId('enabled').value === 'true',
       strategyType: byId('strategyType').value,
       strategyConfigJson: byId('strategyConfigJson').value,
       leverage: Number(byId('leverage').value),
@@ -513,7 +710,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
           <tr data-symbol="${escapeHtml(config.symbol)}" class="${config.isSelected && !creating ? 'selected' : ''}">
             <td><strong>${escapeHtml(config.symbol)}</strong><br><span class="subtle">${escapeHtml(config.category)}</span></td>
             <td>${escapeHtml(config.strategyType)}</td>
-            <td>${escapeHtml(config.direction)}</td>
+            <td>${escapeHtml(config.direction)}<br><span class="subtle">${config.enabled ? 'enabled' : 'disabled'}</span></td>
             <td>${formatNumber(config.leverage)}x</td>
             <td>${formatNumber(config.maxNotionalUsdt)}</td>
             <td>${formatNumber(config.maxMarginUsdt)}</td>
@@ -534,6 +731,48 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         ['Funding', formatPnl(p.funding)]
       ].map(([label, value]) => `<div class="stat"><div class="label">${label}</div><div class="value">${value}</div></div>`).join('');
       byId('positionStats').insertAdjacentHTML('beforebegin', error);
+    };
+    const renderRuntime = (data) => {
+      const preflight = data.lastPreflightResult;
+      byId('runtimeStatus').innerHTML = [
+        `<span class="chip">${escapeHtml(data.tradingMode)}</span>`,
+        `<span class="chip">${data.futuresEnabled ? 'Futures enabled' : 'Futures disabled'}</span>`,
+        `<span class="chip">${data.settings.enabled ? 'Profile enabled' : 'Profile disabled'}</span>`,
+        `<span class="chip">${preflight ? escapeHtml(preflight.isAllowed ? 'Preflight ok' : 'Preflight blocked') : 'No preflight'}</span>`
+      ].join('');
+      if (preflight) {
+        byId('controlStatus').textContent = `${new Date(preflight.createdAt).toLocaleString()} - ${preflight.reason}`;
+        byId('controlStatus').className = `status ${preflight.isAllowed ? 'ok' : 'error'}`;
+      }
+    };
+    const renderOrders = (orders) => {
+      byId('activeOrderRows').innerHTML = orders.length === 0
+        ? '<tr><td colspan="9">No active futures orders.</td></tr>'
+        : orders.map(order => `
+          <tr>
+            <td>${escapeHtml(order.orderLinkId)}</td>
+            <td>${escapeHtml(order.action)}</td>
+            <td>${escapeHtml(order.side)}</td>
+            <td>${formatNumber(order.quantity)}</td>
+            <td>${formatNumber(order.filledQuantity)}</td>
+            <td>${formatNumber(order.price)}</td>
+            <td>${escapeHtml(order.status)}</td>
+            <td>${order.reduceOnly ? 'yes' : 'no'}</td>
+            <td>${formatDate(order.updatedAt)}</td>
+          </tr>`).join('');
+    };
+    const renderRiskDecisions = (decisions) => {
+      byId('riskDecisionRows').innerHTML = decisions.length === 0
+        ? '<tr><td colspan="6">No futures risk decisions yet.</td></tr>'
+        : decisions.map(decision => `
+          <tr>
+            <td>${formatDate(decision.createdAt)}</td>
+            <td>${escapeHtml(decision.source)}</td>
+            <td>${escapeHtml(decision.action || '-')}</td>
+            <td>${decision.isAllowed ? 'yes' : 'no'}</td>
+            <td>${escapeHtml(decision.severity)}</td>
+            <td>${escapeHtml(decision.reason)}</td>
+          </tr>`).join('');
     };
     const renderAutoRecommendation = (recommendation) => {
       byId('autoRecommendationReason').textContent = recommendation.reason || '-';
@@ -561,6 +800,9 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
       renderTabs(data.profiles);
       renderConfigs(data.configSummaries || []);
       renderPosition(data);
+      renderRuntime(data);
+      renderOrders(data.activeOrders || []);
+      renderRiskDecisions(data.riskDecisions || []);
       renderAutoRecommendation(data.autoRecommendation);
       byId('strategyActions').innerHTML = data.strategyActions.map(action => `<span class="chip">${escapeHtml(action)}</span>`).join('');
       if (force || !dirty) {
@@ -649,6 +891,34 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
       setUrl();
       await load(true);
     });
+    byId('toggleProfile').addEventListener('click', async () => {
+      const symbol = selectedSymbol || latest?.settings?.symbol;
+      if (!symbol) return;
+      const enabled = !(latest?.settings?.enabled ?? true);
+      const response = await fetch(`/api/futures/settings/${encodeURIComponent(symbol)}/enabled?enabled=${enabled}`, { method: 'POST' });
+      const result = await response.json();
+      byId('controlStatus').className = `status ${response.ok ? 'ok' : 'error'}`;
+      byId('controlStatus').textContent = response.ok ? result.message : (result.errors?.join(' | ') || result.message);
+      await load(true);
+    });
+    byId('closePosition').addEventListener('click', async () => {
+      const symbol = selectedSymbol || latest?.settings?.symbol;
+      if (!symbol) return;
+      const response = await fetch(`/api/futures/position/${encodeURIComponent(symbol)}/close`, { method: 'POST' });
+      const result = await response.json();
+      byId('controlStatus').className = `status ${response.ok ? 'ok' : 'error'}`;
+      byId('controlStatus').textContent = response.ok ? result.message : (result.errors?.join(' | ') || result.message);
+      await load(true);
+    });
+    byId('cancelFuturesOrders').addEventListener('click', async () => {
+      const symbol = selectedSymbol || latest?.settings?.symbol;
+      if (!symbol) return;
+      const response = await fetch(`/api/futures/orders/${encodeURIComponent(symbol)}/cancel-active`, { method: 'POST' });
+      const result = await response.json();
+      byId('controlStatus').className = `status ${response.ok ? 'ok' : 'error'}`;
+      byId('controlStatus').textContent = response.ok ? result.message : (result.errors?.join(' | ') || result.message);
+      await load(true);
+    });
     byId('settingsForm').addEventListener('submit', async (event) => {
       event.preventDefault();
       const payload = readPayload();
@@ -681,6 +951,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
 
     private static FuturesSettingsView MapSettings(FuturesBotSettings settings) => new()
     {
+        Enabled = settings.Enabled,
         Symbol = settings.Symbol,
         Category = settings.Category,
         StrategyType = FormatEnum(settings.StrategyType),
@@ -716,13 +987,66 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         UpdatedAt = position.UpdatedAt
     };
 
+    private static FuturesOrderView MapOrder(FuturesOrderRecord order) => new()
+    {
+        OrderLinkId = order.OrderLinkId,
+        BybitOrderId = order.BybitOrderId,
+        Symbol = order.Symbol,
+        Action = order.Action.ToString(),
+        Side = order.Side.ToString(),
+        Price = order.Price,
+        Quantity = order.Quantity,
+        FilledQuantity = order.FilledQuantity,
+        Status = order.Status.ToString(),
+        ReduceOnly = order.ReduceOnly,
+        PositionIdx = order.PositionIdx,
+        UpdatedAt = order.UpdatedAt
+    };
+
+    private static FuturesRiskDecisionView MapRiskDecision(FuturesRiskDecisionRecord decision) => new()
+    {
+        Source = decision.Source,
+        OrderLinkId = decision.OrderLinkId,
+        Action = decision.Action?.ToString(),
+        IsAllowed = decision.IsAllowed,
+        Reason = decision.Reason,
+        Severity = decision.Severity,
+        SuggestedAction = decision.SuggestedAction,
+        CreatedAt = decision.CreatedAt
+    };
+
     private async Task<FuturesPositionView?> GetPaperPositionAsync(
         FuturesBotSettings settings,
         CancellationToken cancellationToken)
     {
+        var futuresPosition = await _repository.GetFuturesPositionAsync(settings.Symbol, cancellationToken);
+        if (futuresPosition is not null)
+        {
+            return MapPosition(settings, futuresPosition);
+        }
+
         var state = await _repository.GetBotStateAsync(FuturesStateKeys.ForSymbol(settings.Symbol), cancellationToken);
         return state is null ? null : MapPosition(settings, state);
     }
+
+    private static FuturesPositionView MapPosition(FuturesBotSettings settings, FuturesPositionSnapshot position) => new()
+    {
+        Symbol = settings.Symbol,
+        Category = settings.Category,
+        Side = position.Size <= 0m ? "None" : position.Side,
+        Size = position.Size,
+        EntryPrice = position.EntryPrice,
+        MarkPrice = position.MarkPrice,
+        LiquidationPrice = position.LiquidationPrice,
+        PositionValueUsdt = position.PositionValueUsdt,
+        MarginUsedUsdt = position.MarginUsedUsdt,
+        Leverage = position.Leverage,
+        UnrealizedPnl = position.UnrealizedPnl,
+        RealizedPnl = position.RealizedPnl,
+        Funding = 0m,
+        PositionIdx = position.PositionIdx,
+        UpdatedAt = position.UpdatedAt
+    };
 
     private static FuturesPositionView MapPosition(FuturesBotSettings settings, BotState state)
     {
@@ -755,6 +1079,76 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         Category = settings.Category,
         Side = "None",
         UpdatedAt = DateTimeOffset.UtcNow
+    };
+
+    private async Task<FuturesPositionSnapshot> ResolvePositionSnapshotAsync(
+        FuturesBotSettings settings,
+        CancellationToken cancellationToken)
+    {
+        if (_appOptions.TradingMode == TradingMode.Paper)
+        {
+            return await _repository.GetFuturesPositionAsync(settings.Symbol, cancellationToken)
+                ?? MapStateToSnapshot(settings, await _repository.GetBotStateAsync(FuturesStateKeys.ForSymbol(settings.Symbol), cancellationToken));
+        }
+
+        var bybitPosition = await _bybitRestClient.GetPositionAsync(settings.Category, settings.Symbol, cancellationToken);
+        return bybitPosition is null
+            ? new FuturesPositionSnapshot { Symbol = settings.Symbol, Category = settings.Category }
+            : new FuturesPositionSnapshot
+            {
+                Symbol = settings.Symbol,
+                Category = settings.Category,
+                Side = bybitPosition.Size > 0m ? bybitPosition.Side : "None",
+                Size = bybitPosition.Size,
+                EntryPrice = bybitPosition.AveragePrice,
+                MarkPrice = bybitPosition.MarkPrice,
+                LiquidationPrice = bybitPosition.LiquidationPrice,
+                PositionValueUsdt = bybitPosition.PositionValue,
+                MarginUsedUsdt = bybitPosition.PositionInitialMargin,
+                Leverage = bybitPosition.Leverage,
+                UnrealizedPnl = bybitPosition.UnrealizedPnl,
+                RealizedPnl = bybitPosition.RealizedPnl,
+                PositionIdx = bybitPosition.PositionIdx,
+                UpdatedAt = bybitPosition.UpdatedAt
+            };
+    }
+
+    private static FuturesPositionSnapshot MapStateToSnapshot(FuturesBotSettings settings, BotState? state)
+    {
+        if (state is null)
+        {
+            return new FuturesPositionSnapshot { Symbol = settings.Symbol, Category = settings.Category };
+        }
+
+        var markPrice = state.MarkPrice > 0m ? state.MarkPrice : state.LastObservedPrice ?? 0m;
+        var size = state.BaseAssetQuantity;
+        var leverage = state.Leverage > 0m ? state.Leverage : settings.Leverage;
+        return new FuturesPositionSnapshot
+        {
+            Symbol = settings.Symbol,
+            Category = settings.Category,
+            Side = size > 0m ? state.PositionSide ?? "Buy" : "None",
+            Size = size,
+            EntryPrice = state.EntryPrice > 0m ? state.EntryPrice : state.AverageEntryPrice,
+            MarkPrice = markPrice,
+            LiquidationPrice = state.LiquidationPrice,
+            PositionValueUsdt = size * markPrice,
+            MarginUsedUsdt = leverage > 0m ? size * markPrice / leverage : 0m,
+            Leverage = leverage,
+            UnrealizedPnl = state.UnrealizedPnl,
+            RealizedPnl = state.TotalRealizedPnl,
+            PositionIdx = state.PositionIdx,
+            UpdatedAt = state.UpdatedAt
+        };
+    }
+
+    private static FuturesInstrumentRules MapInstrumentRules(BybitInstrumentInfo instrument) => new()
+    {
+        TickSize = instrument.TickSize,
+        QtyStep = instrument.QtyStep,
+        BasePrecision = instrument.BasePrecision,
+        MinOrderQty = instrument.MinOrderQty,
+        MinOrderAmount = instrument.MinOrderAmount
     };
 
     private async Task<IReadOnlyList<Candle>> GetAnalysisCandlesAsync(
@@ -802,6 +1196,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         FuturesBotSettings currentSettings,
         FuturesAutoConfigRecommendation recommendation) => new()
     {
+        Enabled = currentSettings.Enabled,
         Symbol = currentSettings.Symbol,
         Category = currentSettings.Category,
         StrategyType = recommendation.StrategyType,
@@ -821,6 +1216,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
 
     private static FuturesBotSettings BuildDefaultSettings(FuturesOptions options, string symbol = "BTCUSDT") => new()
     {
+        Enabled = true,
         Symbol = symbol,
         Category = NormalizeCategory(options.Category),
         StrategyType = FuturesStrategyType.Pause,

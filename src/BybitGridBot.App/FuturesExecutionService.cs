@@ -75,6 +75,21 @@ public sealed class FuturesExecutionService
             order.LiquidationPrice = simulation.Position.LiquidationPrice;
             order.UnrealizedPnl = simulation.Position.UnrealizedPnl;
             await _repository.UpsertOrderAsync(order, cancellationToken);
+            await _repository.UpsertFuturesOrderAsync(ToFuturesOrder(request, order), cancellationToken);
+            await _repository.UpsertFuturesPositionAsync(simulation.Position, _appOptions.TradingMode, cancellationToken);
+            await _repository.AddFuturesFillAsync(new FuturesFillRecord
+            {
+                OrderLinkId = request.Intent.OrderLinkId,
+                Symbol = request.Settings.Symbol,
+                Action = request.Intent.Action,
+                Side = order.Side,
+                Quantity = request.Intent.Quantity,
+                Price = request.Intent.Price,
+                Fee = simulation.FeePaid,
+                RealizedPnl = order.RealizedPnl,
+                Funding = simulation.FundingPaid,
+                CreatedAt = now
+            }, cancellationToken);
 
             return new FuturesExecutionResult
             {
@@ -94,6 +109,7 @@ public sealed class FuturesExecutionService
         var ack = await _bybitRestClient.CreateOrderAsync(bybitRequest, cancellationToken);
         order.BybitOrderId = ack.OrderId;
         await _repository.UpsertOrderAsync(order, cancellationToken);
+        await _repository.UpsertFuturesOrderAsync(ToFuturesOrder(request, order), cancellationToken);
 
         return new FuturesExecutionResult
         {
@@ -200,6 +216,34 @@ public sealed class FuturesExecutionService
             FuturesTradeAction.OpenShort or FuturesTradeAction.CloseShort => "Short",
             _ => "None"
         };
+
+    private static FuturesOrderRecord ToFuturesOrder(FuturesExecutionRequest request, GridOrder order) => new()
+    {
+        OrderLinkId = order.OrderLinkId,
+        BybitOrderId = order.BybitOrderId,
+        Symbol = order.Symbol,
+        Category = order.Category,
+        Action = request.Intent.Action,
+        Side = order.Side,
+        Price = order.Price,
+        Quantity = order.Quantity,
+        FilledQuantity = order.FilledQuantity,
+        AverageFillPrice = order.AverageFillPrice,
+        FeePaid = order.FeePaid,
+        Status = order.Status,
+        TradingMode = order.TradingMode,
+        PositionSide = order.PositionSide ?? "Long",
+        ReduceOnly = order.ReduceOnly,
+        PositionIdx = order.PositionIdx,
+        Leverage = order.Leverage,
+        MarginMode = order.MarginMode ?? request.Settings.MarginMode.ToString(),
+        StopLossPrice = request.Intent.StopLossPrice ?? 0m,
+        TakeProfitPrice = request.Intent.TakeProfitPrice ?? 0m,
+        RealizedPnl = order.RealizedPnl,
+        CreatedAt = order.CreatedAt,
+        UpdatedAt = order.UpdatedAt,
+        FilledAt = order.FilledAt
+    };
 }
 
 public sealed class FuturesExecutionRequest

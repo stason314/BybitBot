@@ -280,6 +280,16 @@ public sealed class FuturesDashboardResponse
 
     public required IReadOnlyList<string> StrategyActions { get; init; }
 
+    public required IReadOnlyList<FuturesOrderView> ActiveOrders { get; init; }
+
+    public required IReadOnlyList<FuturesRiskDecisionView> RiskDecisions { get; init; }
+
+    public FuturesRiskDecisionView? LastPreflightResult { get; init; }
+
+    public required string TradingMode { get; init; }
+
+    public bool FuturesEnabled { get; init; }
+
     public string? PositionError { get; init; }
 
     public DateTimeOffset GeneratedAt { get; init; }
@@ -292,6 +302,8 @@ public sealed class FuturesProfileItem
     public required string Category { get; init; }
 
     public bool IsSelected { get; init; }
+
+    public bool Enabled { get; init; }
 }
 
 public sealed class FuturesConfigSummaryItem
@@ -303,6 +315,8 @@ public sealed class FuturesConfigSummaryItem
     public required string StrategyType { get; init; }
 
     public required string Direction { get; init; }
+
+    public bool Enabled { get; init; }
 
     public decimal Leverage { get; init; }
 
@@ -344,6 +358,54 @@ public sealed class FuturesSettingsView
     public decimal LiquidationBufferPercent { get; init; }
 
     public bool ReduceOnlyEnabled { get; init; }
+
+    public bool Enabled { get; init; }
+}
+
+public sealed class FuturesOrderView
+{
+    public required string OrderLinkId { get; init; }
+
+    public string? BybitOrderId { get; init; }
+
+    public required string Symbol { get; init; }
+
+    public required string Action { get; init; }
+
+    public required string Side { get; init; }
+
+    public decimal Price { get; init; }
+
+    public decimal Quantity { get; init; }
+
+    public decimal FilledQuantity { get; init; }
+
+    public required string Status { get; init; }
+
+    public bool ReduceOnly { get; init; }
+
+    public int PositionIdx { get; init; }
+
+    public DateTimeOffset UpdatedAt { get; init; }
+}
+
+public sealed class FuturesRiskDecisionView
+{
+    public required string Source { get; init; }
+
+    public string? OrderLinkId { get; init; }
+
+    public string? Action { get; init; }
+
+    public bool IsAllowed { get; init; }
+
+    public required string Reason { get; init; }
+
+    public required string Severity { get; init; }
+
+    public required string SuggestedAction { get; init; }
+
+    public DateTimeOffset CreatedAt { get; init; }
 }
 
 public sealed class FuturesPositionView
@@ -420,6 +482,8 @@ public sealed class FuturesAutoRecommendationView
 
 public sealed class UpdateFuturesSettingsRequest
 {
+    public bool Enabled { get; init; } = true;
+
     public string Symbol { get; init; } = string.Empty;
 
     public string Category { get; init; } = "linear";

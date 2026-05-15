@@ -1,6 +1,7 @@
 using System.Globalization;
 using BybitGridBot.Bybit;
 using BybitGridBot.Domain;
+using BybitGridBot.Storage;
 using Microsoft.Extensions.Options;
 
 namespace BybitGridBot.App;
@@ -10,15 +11,18 @@ public sealed class FuturesPreflightService
     private readonly IBybitRestClient _bybitRestClient;
     private readonly FuturesOptions _futuresOptions;
     private readonly ILogger<FuturesPreflightService> _logger;
+    private readonly IGridRepository _repository;
     private readonly HashSet<string> _configuredSymbols = new(StringComparer.OrdinalIgnoreCase);
 
     public FuturesPreflightService(
         IOptions<FuturesOptions> futuresOptions,
         IBybitRestClient bybitRestClient,
+        IGridRepository repository,
         ILogger<FuturesPreflightService> logger)
     {
         _futuresOptions = futuresOptions.Value;
         _bybitRestClient = bybitRestClient;
+        _repository = repository;
         _logger = logger;
     }
 
@@ -27,68 +31,77 @@ public sealed class FuturesPreflightService
         BybitInstrumentInfo instrument,
         CancellationToken cancellationToken)
     {
-        ValidateSettings(settings);
-        ValidateInstrumentRules(instrument);
-        var setupKey = $"{settings.Symbol}:{settings.MarginMode}:{settings.PositionMode}:{settings.Leverage}";
-        if (!_configuredSymbols.Add(setupKey))
+        try
         {
-            return;
+            ValidateSettings(settings);
+            ValidateInstrumentRules(instrument);
+            var setupKey = $"{settings.Symbol}:{settings.MarginMode}:{settings.PositionMode}:{settings.Leverage}";
+            if (!_configuredSymbols.Add(setupKey))
+            {
+                return;
+            }
+
+            var leverage = FormatDecimal(settings.Leverage);
+            await _bybitRestClient.SwitchPositionModeAsync(new BybitSwitchPositionModeRequest
+            {
+                Category = settings.Category,
+                Symbol = settings.Symbol,
+                Mode = 0
+            }, cancellationToken);
+            await _bybitRestClient.SwitchIsolatedMarginAsync(new BybitSwitchIsolatedMarginRequest
+            {
+                Category = settings.Category,
+                Symbol = settings.Symbol,
+                TradeMode = 1,
+                BuyLeverage = leverage,
+                SellLeverage = leverage
+            }, cancellationToken);
+            await _bybitRestClient.SetLeverageAsync(new BybitSetLeverageRequest
+            {
+                Category = settings.Category,
+                Symbol = settings.Symbol,
+                BuyLeverage = leverage,
+                SellLeverage = leverage
+            }, cancellationToken);
+
+            var position = await _bybitRestClient.GetPositionAsync(settings.Category, settings.Symbol, cancellationToken);
+            if (position is not null)
+            {
+                if (position.PositionIdx != 0)
+                {
+                    throw new InvalidOperationException("Futures pre-flight requires one-way positionIdx=0.");
+                }
+
+                if (position.Size > 0m && string.Equals(position.Side, "Sell", StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidOperationException("Futures pre-flight does not allow an existing short position.");
+                }
+
+                if (position.Size > 0m && position.TradeMode != 1)
+                {
+                    throw new InvalidOperationException("Futures pre-flight requires isolated margin for the existing position.");
+                }
+
+                if (position.Leverage > 0m && position.Leverage != settings.Leverage)
+                {
+                    throw new InvalidOperationException("Futures pre-flight leverage verification failed.");
+                }
+            }
+
+            await AddPreflightDecisionAsync(settings.Symbol, true, "Futures pre-flight completed.", cancellationToken);
+            _logger.LogInformation(
+                "Futures pre-flight completed for {Symbol}. Category: {Category}, Margin: {MarginMode}, Position mode: {PositionMode}, Leverage: {Leverage}",
+                settings.Symbol,
+                settings.Category,
+                settings.MarginMode,
+                settings.PositionMode,
+                settings.Leverage);
         }
-
-        var leverage = FormatDecimal(settings.Leverage);
-        await _bybitRestClient.SwitchPositionModeAsync(new BybitSwitchPositionModeRequest
+        catch (Exception exception)
         {
-            Category = settings.Category,
-            Symbol = settings.Symbol,
-            Mode = 0
-        }, cancellationToken);
-        await _bybitRestClient.SwitchIsolatedMarginAsync(new BybitSwitchIsolatedMarginRequest
-        {
-            Category = settings.Category,
-            Symbol = settings.Symbol,
-            TradeMode = 1,
-            BuyLeverage = leverage,
-            SellLeverage = leverage
-        }, cancellationToken);
-        await _bybitRestClient.SetLeverageAsync(new BybitSetLeverageRequest
-        {
-            Category = settings.Category,
-            Symbol = settings.Symbol,
-            BuyLeverage = leverage,
-            SellLeverage = leverage
-        }, cancellationToken);
-
-        var position = await _bybitRestClient.GetPositionAsync(settings.Category, settings.Symbol, cancellationToken);
-        if (position is not null)
-        {
-            if (position.PositionIdx != 0)
-            {
-                throw new InvalidOperationException("Futures pre-flight requires one-way positionIdx=0.");
-            }
-
-            if (position.Size > 0m && string.Equals(position.Side, "Sell", StringComparison.OrdinalIgnoreCase))
-            {
-                throw new InvalidOperationException("Futures pre-flight does not allow an existing short position.");
-            }
-
-            if (position.Size > 0m && position.TradeMode != 1)
-            {
-                throw new InvalidOperationException("Futures pre-flight requires isolated margin for the existing position.");
-            }
-
-            if (position.Leverage > 0m && position.Leverage != settings.Leverage)
-            {
-                throw new InvalidOperationException("Futures pre-flight leverage verification failed.");
-            }
+            await AddPreflightDecisionAsync(settings.Symbol, false, exception.Message, cancellationToken);
+            throw;
         }
-
-        _logger.LogInformation(
-            "Futures pre-flight completed for {Symbol}. Category: {Category}, Margin: {MarginMode}, Position mode: {PositionMode}, Leverage: {Leverage}",
-            settings.Symbol,
-            settings.Category,
-            settings.MarginMode,
-            settings.PositionMode,
-            settings.Leverage);
     }
 
     private void ValidateSettings(FuturesBotSettings settings)
@@ -148,4 +161,16 @@ public sealed class FuturesPreflightService
     }
 
     private static string FormatDecimal(decimal value) => value.ToString(CultureInfo.InvariantCulture);
+
+    private Task AddPreflightDecisionAsync(string symbol, bool isAllowed, string reason, CancellationToken cancellationToken) =>
+        _repository.AddFuturesRiskDecisionAsync(new FuturesRiskDecisionRecord
+        {
+            Symbol = symbol,
+            Source = "Preflight",
+            IsAllowed = isAllowed,
+            Reason = reason,
+            Severity = isAllowed ? "Info" : "Critical",
+            SuggestedAction = isAllowed ? "Allow" : "BlockNewOrders",
+            CreatedAt = DateTimeOffset.UtcNow
+        }, cancellationToken);
 }

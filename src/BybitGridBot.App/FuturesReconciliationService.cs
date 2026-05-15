@@ -51,6 +51,7 @@ public sealed class FuturesReconciliationService
         {
             var order = MapSnapshot(settings, snapshot, localOrders.GetValueOrDefault(snapshot.OrderLinkId));
             await _repository.UpsertOrderAsync(order, cancellationToken);
+            await _repository.UpsertFuturesOrderAsync(MapFuturesOrder(settings, snapshot, order), cancellationToken);
             syncedOrders++;
         }
 
@@ -71,7 +72,9 @@ public sealed class FuturesReconciliationService
                 .FirstOrDefault();
             if (snapshot is not null)
             {
-                await _repository.UpsertOrderAsync(MapSnapshot(settings, snapshot, order), cancellationToken);
+                var syncedOrder = MapSnapshot(settings, snapshot, order);
+                await _repository.UpsertOrderAsync(syncedOrder, cancellationToken);
+                await _repository.UpsertFuturesOrderAsync(MapFuturesOrder(settings, snapshot, syncedOrder), cancellationToken);
                 syncedOrders++;
                 continue;
             }
@@ -79,6 +82,7 @@ public sealed class FuturesReconciliationService
             order.Status = OrderStatus.Cancelled;
             order.UpdatedAt = DateTimeOffset.UtcNow;
             await _repository.UpsertOrderAsync(order, cancellationToken);
+            await _repository.UpsertFuturesOrderAsync(MapFuturesOrder(settings, order), cancellationToken);
             fixedHangingOrders++;
             _logger.LogWarning(
                 "Marked hanging futures order as cancelled locally. Symbol: {Symbol}, OrderLinkId: {OrderLinkId}",
@@ -99,6 +103,7 @@ public sealed class FuturesReconciliationService
         ValidateMvpPosition(position);
         ApplyPositionToState(state, position);
         await _repository.SaveBotStateAsync(state, cancellationToken);
+        await _repository.UpsertFuturesPositionAsync(position, _appOptions.TradingMode, cancellationToken);
 
         return new FuturesReconciliationResult
         {
@@ -149,6 +154,64 @@ public sealed class FuturesReconciliationService
             FilledAt = status == OrderStatus.Filled ? updatedAt : existing?.FilledAt
         };
     }
+
+    private static FuturesOrderRecord MapFuturesOrder(
+        FuturesBotSettings settings,
+        BybitOrderSnapshot snapshot,
+        GridOrder order) => new()
+    {
+        OrderLinkId = order.OrderLinkId,
+        BybitOrderId = order.BybitOrderId,
+        Symbol = order.Symbol,
+        Category = order.Category,
+        Action = ResolveAction(order.Side, order.ReduceOnly),
+        Side = order.Side,
+        Price = order.Price,
+        Quantity = order.Quantity,
+        FilledQuantity = order.FilledQuantity,
+        AverageFillPrice = order.AverageFillPrice,
+        FeePaid = order.FeePaid,
+        Status = order.Status,
+        TradingMode = order.TradingMode,
+        PositionSide = order.PositionSide ?? "Long",
+        ReduceOnly = order.ReduceOnly || snapshot.ReduceOnly,
+        PositionIdx = snapshot.PositionIdx != 0 ? snapshot.PositionIdx : order.PositionIdx,
+        Leverage = order.Leverage == 0m ? settings.Leverage : order.Leverage,
+        MarginMode = order.MarginMode ?? settings.MarginMode.ToString(),
+        RealizedPnl = order.RealizedPnl,
+        CreatedAt = order.CreatedAt,
+        UpdatedAt = order.UpdatedAt,
+        FilledAt = order.FilledAt
+    };
+
+    private static FuturesOrderRecord MapFuturesOrder(FuturesBotSettings settings, GridOrder order) => new()
+    {
+        OrderLinkId = order.OrderLinkId,
+        BybitOrderId = order.BybitOrderId,
+        Symbol = order.Symbol,
+        Category = order.Category,
+        Action = ResolveAction(order.Side, order.ReduceOnly),
+        Side = order.Side,
+        Price = order.Price,
+        Quantity = order.Quantity,
+        FilledQuantity = order.FilledQuantity,
+        AverageFillPrice = order.AverageFillPrice,
+        FeePaid = order.FeePaid,
+        Status = order.Status,
+        TradingMode = order.TradingMode,
+        PositionSide = order.PositionSide ?? "Long",
+        ReduceOnly = order.ReduceOnly,
+        PositionIdx = order.PositionIdx,
+        Leverage = order.Leverage == 0m ? settings.Leverage : order.Leverage,
+        MarginMode = order.MarginMode ?? settings.MarginMode.ToString(),
+        RealizedPnl = order.RealizedPnl,
+        CreatedAt = order.CreatedAt,
+        UpdatedAt = order.UpdatedAt,
+        FilledAt = order.FilledAt
+    };
+
+    private static FuturesTradeAction ResolveAction(TradeSide side, bool reduceOnly) =>
+        side == TradeSide.Buy && !reduceOnly ? FuturesTradeAction.OpenLong : FuturesTradeAction.CloseLong;
 
     private static FuturesPositionSnapshot MapPosition(
         FuturesBotSettings settings,

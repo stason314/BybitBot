@@ -2123,16 +2123,46 @@ public sealed class GridDashboardService : IGridDashboardService
 
     private static string ResolveOrderSource(GridOrder order, OrderSourceContext context)
     {
+        var directSource = ResolveDirectOrderSource(order);
+        if (directSource is not null)
+        {
+            return directSource;
+        }
+
+        return context.DefaultLabel;
+    }
+
+    private static string? ResolveDirectOrderSource(GridOrder order)
+    {
+        var persistedSource = NormalizeOrderSource(order.StrategySource);
+        if (persistedSource is not null &&
+            (!string.Equals(persistedSource, "Grid", StringComparison.OrdinalIgnoreCase) ||
+             string.IsNullOrWhiteSpace(order.ParentOrderLinkId)))
+        {
+            return persistedSource;
+        }
+
         return order.ParentOrderLinkId switch
         {
-            "dca-entry" => context.DcaEntryLabel,
-            "btd-entry" => context.BtdEntryLabel,
+            "dca-entry" => "DCA",
+            "btd-entry" => "BTD",
             "signal-entry" or "signal-exit" => "Signal",
             "trend-entry" or "trend-exit" => "Trend",
             "reduce-only-exit" => "ReduceOnly",
-            null or "" => context.DefaultLabel,
-            _ => context.DefaultLabel
+            null or "" => persistedSource,
+            _ => null
         };
+    }
+
+    private static string? NormalizeOrderSource(string? source)
+    {
+        if (string.IsNullOrWhiteSpace(source) ||
+            string.Equals(source, "Managed", StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        return source.Trim();
     }
 
     private static IReadOnlyDictionary<string, string> ResolveOrderSourceLabels(
@@ -2161,19 +2191,24 @@ public sealed class GridDashboardService : IGridDashboardService
             return cachedLabel;
         }
 
-        var directLabel = ResolveOrderSource(order, context);
-        if (directLabel != context.DefaultLabel || string.IsNullOrWhiteSpace(order.ParentOrderLinkId))
+        var directLabel = ResolveDirectOrderSource(order);
+        if (directLabel is not null)
         {
             return directLabel;
+        }
+
+        if (string.IsNullOrWhiteSpace(order.ParentOrderLinkId))
+        {
+            return context.DefaultLabel;
         }
 
         if (!orderByLinkId.TryGetValue(order.ParentOrderLinkId, out var parentOrder))
         {
-            return directLabel;
+            return context.DefaultLabel;
         }
 
         var parentLabel = ResolveOrderSource(parentOrder, context, orderByLinkId, labels);
-        return parentLabel == context.DefaultLabel ? directLabel : parentLabel;
+        return parentLabel == context.DefaultLabel ? context.DefaultLabel : parentLabel;
     }
 
     private sealed record OrderSourceContext(

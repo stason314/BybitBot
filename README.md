@@ -51,6 +51,8 @@ Current scope:
 - `FuturesExecutionService` is the dedicated execution layer: `OpenLong` maps to Bybit `Buy` with `reduceOnly=false`; `CloseLong` and `ReduceOnlyClose` map to Bybit `Sell` with `reduceOnly=true`
 - `FuturesPreflightService` validates `FUTURES_ENABLED=true`, `category=linear`, isolated margin, one-way mode, leverage, and instrument min qty/min notional before testnet trading
 - every futures `OpenLong` must attach `stopLoss` in Bybit order create; missing stop-loss protection blocks the order before it reaches Bybit
+- futures state now has dedicated SQLite tables: `futures_orders`, `futures_positions`, `futures_fills`, and `futures_risk_decisions`
+- `/futures` includes profile enable/disable, paper/testnet status, active futures orders, reduce-only close, cancel active futures orders, risk decision log, and latest pre-flight result
 - MVP futures strategies are separate implementations: `FuturesPause`, `FuturesReduceOnly`, `FuturesTrendFollowLongOnly`, `FuturesBreakoutLongOnly`, and `FuturesGridLongOnly`
 - `FuturesReconciliationService` syncs Bybit open orders, recent order history, and current position before each testnet strategy decision; locally active managed orders missing from Bybit are marked cancelled after a per-order history check
 - Bybit futures client methods are present for `/v5/position/set-leverage`, `/v5/position/switch-isolated`, `/v5/position/switch-mode`, and `/v5/position/trading-stop`

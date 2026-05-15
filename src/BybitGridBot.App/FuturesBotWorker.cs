@@ -100,6 +100,12 @@ public sealed class FuturesBotWorker : BackgroundService
 
     private async Task RunProfileCycleAsync(FuturesBotSettings settings, CancellationToken cancellationToken)
     {
+        if (!settings.Enabled)
+        {
+            _logger.LogInformation("Futures profile disabled. Symbol: {Symbol}", settings.Symbol);
+            return;
+        }
+
         ValidateMvpSettings(settings);
         var ticker = await _bybitRestClient.GetTickerAsync(settings.Category, settings.Symbol, cancellationToken);
         var currentPrice = ticker.LastPrice;
@@ -153,6 +159,18 @@ public sealed class FuturesBotWorker : BackgroundService
                 DailyRealizedPnl = state.DailyRealizedPnl,
                 MaxDailyLossUsdt = 20m
             });
+            await _repository.AddFuturesRiskDecisionAsync(new FuturesRiskDecisionRecord
+            {
+                Symbol = settings.Symbol,
+                Source = "Risk",
+                OrderLinkId = intent.OrderLinkId,
+                Action = intent.Action,
+                IsAllowed = riskDecision.IsAllowed,
+                Reason = riskDecision.Reason,
+                Severity = riskDecision.Severity.ToString(),
+                SuggestedAction = riskDecision.SuggestedAction.ToString(),
+                CreatedAt = DateTimeOffset.UtcNow
+            }, cancellationToken);
             if (!riskDecision.IsAllowed)
             {
                 _logger.LogInformation(
@@ -175,6 +193,7 @@ public sealed class FuturesBotWorker : BackgroundService
             position = result.Position;
             FuturesReconciliationService.ApplyPositionToState(state, position);
             await _repository.SaveBotStateAsync(state, cancellationToken);
+            await _repository.UpsertFuturesPositionAsync(position, _appOptions.TradingMode, cancellationToken);
             _logger.LogInformation(
                 "Futures intent executed for {Symbol}. Action: {Action}. Paper: {IsPaper}. Message: {Message}",
                 settings.Symbol,
@@ -187,6 +206,7 @@ public sealed class FuturesBotWorker : BackgroundService
         {
             FuturesReconciliationService.ApplyPositionToState(state, position);
             await _repository.SaveBotStateAsync(state, cancellationToken);
+            await _repository.UpsertFuturesPositionAsync(position, _appOptions.TradingMode, cancellationToken);
         }
     }
 

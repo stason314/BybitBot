@@ -28,6 +28,8 @@ public sealed class GridOrder
 
     public string? ParentOrderLinkId { get; init; }
 
+    public string StrategySource { get; set; } = "Grid";
+
     public string? PositionSide { get; set; }
 
     public bool ReduceOnly { get; set; }
