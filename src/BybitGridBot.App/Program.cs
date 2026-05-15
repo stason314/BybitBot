@@ -36,6 +36,7 @@ builder.Services.AddOptions<GridOptions>().Bind(builder.Configuration);
 builder.Services.AddOptions<RiskOptions>().Bind(builder.Configuration);
 builder.Services.AddOptions<FuturesOptions>().Bind(builder.Configuration);
 builder.Services.AddOptions<FuturesRiskOptions>().Bind(builder.Configuration);
+builder.Services.AddOptions<FuturesStrategyQualityOptions>().Bind(builder.Configuration);
 builder.Services.AddOptions<TelegramOptions>().Bind(builder.Configuration);
 
 builder.Services.AddSingleton<BybitSigner>();
