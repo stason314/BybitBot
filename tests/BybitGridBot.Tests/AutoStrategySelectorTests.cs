@@ -357,6 +357,53 @@ public sealed class AutoStrategySelectorTests
         Assert.Equal(3, config.RootElement.GetProperty("maxActiveBuyOrders").GetInt32());
     }
 
+    [Theory]
+    [InlineData(MarketPhase.RangeBound, TradingStrategyType.Grid)]
+    [InlineData(MarketPhase.Uptrend, TradingStrategyType.TrendFollowing)]
+    [InlineData(MarketPhase.PullbackInUptrend, TradingStrategyType.Btd)]
+    [InlineData(MarketPhase.BreakoutUp, TradingStrategyType.Breakout)]
+    [InlineData(MarketPhase.Dump, TradingStrategyType.NoTrade)]
+    [InlineData(MarketPhase.HighVolatility, TradingStrategyType.NoTrade)]
+    [InlineData(MarketPhase.BreakoutDown, TradingStrategyType.NoTrade)]
+    public void Recommend_UsesMarketPhase_AsPrimaryAutoSelector(MarketPhase phase, TradingStrategyType expectedStrategy)
+    {
+        var selector = new AutoStrategySelector();
+        var options = new GridOptions
+        {
+            LowerPrice = 2.0m,
+            UpperPrice = 2.2m,
+            Step = 0.01m,
+            OrderSizeUsdt = 20m,
+            MinOrderSizeUsdt = 15m,
+            StopLowerPrice = 1.9m,
+            StopUpperPrice = 2.3m
+        };
+        var candles = BuildCandles(2.10m, 2.14m, 2.08m, 60);
+        var phaseResult = new MarketPhaseResult
+        {
+            Phase = phase,
+            Confidence = 0.8m,
+            Score = 80m,
+            Reason = "test phase",
+            SuggestedStrategy = StrategyType.Grid,
+            DetectedAt = DateTimeOffset.UtcNow
+        };
+
+        var recommendation = selector.Recommend(
+            options,
+            new MarketRegimeAnalysis
+            {
+                Regime = MarketRegimeType.Range,
+                Recommendation = "Range",
+                Support = 2.08m,
+                Resistance = 2.14m
+            },
+            phaseResult,
+            candles);
+
+        Assert.Equal(expectedStrategy, recommendation.StrategyType);
+    }
+
     private static IReadOnlyList<Candle> BuildCandles(decimal open, decimal high, decimal low, int count)
     {
         var now = DateTimeOffset.UtcNow;

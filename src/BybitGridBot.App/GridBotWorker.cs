@@ -422,11 +422,18 @@ public sealed class GridBotWorker : BackgroundService
         }
 
         var regime = _marketRegimeAnalyzer.Analyze(candles);
+        var currentPrice = candles.OrderBy(candle => candle.OpenTime).LastOrDefault()?.Close ?? 0m;
+        var btcCandles = await GetBtcCandlesForPhaseAsync(gridOptions, cancellationToken);
+        var marketPhase = _priceActionPhaseDetector.Detect(gridOptions, currentPrice, candles, btcCandles);
         _logger.LogInformation(
-            "Strategy scores for {Symbol}: {StrategyScores}",
+            "Strategy scores for {Symbol}: {StrategyScores}. MarketPhase: {MarketPhase}, Score: {PhaseScore}, Confidence: {PhaseConfidence}, Reason: {PhaseReason}",
             profile.Symbol,
-            FormatStrategyScoresForLog(regime));
-        var recommendation = _autoStrategySelector.Recommend(gridOptions, regime, candles);
+            FormatStrategyScoresForLog(regime),
+            marketPhase.Phase,
+            marketPhase.Score,
+            marketPhase.Confidence,
+            marketPhase.Reason);
+        var recommendation = _autoStrategySelector.Recommend(gridOptions, regime, marketPhase, candles);
         var state = await _repository.GetBotStateAsync(profile.Symbol, cancellationToken);
         var recommendedSettings = new GridBotSettings
         {
@@ -517,6 +524,31 @@ public sealed class GridBotWorker : BackgroundService
         }
 
         return now - lastCheck >= TimedAutoRecommendationApplyInterval;
+    }
+
+    private async Task<IReadOnlyList<Candle>> GetBtcCandlesForPhaseAsync(
+        GridOptions gridOptions,
+        CancellationToken cancellationToken)
+    {
+        if (!gridOptions.BtcFilterEnabled)
+        {
+            return [];
+        }
+
+        try
+        {
+            return await _bybitRestClient.GetKlinesAsync(
+                "spot",
+                "BTCUSDT",
+                AnalysisDefaults.AutoRecommendationCandleInterval,
+                Math.Max(20, gridOptions.BtcLookbackCandles),
+                cancellationToken);
+        }
+        catch (Exception exception)
+        {
+            _logger.LogInformation(exception, "BTC phase candles unavailable for {Symbol}; continuing without BTC risk-off input.", gridOptions.Symbol);
+            return [];
+        }
     }
 
     private static string FormatStrategyScoresForLog(MarketRegimeAnalysis regime)

@@ -27,6 +27,7 @@ public sealed class GridDashboardService : IGridDashboardService
     private readonly GridOptions _defaultGridOptions;
     private readonly IBybitRestClient _bybitRestClient;
     private readonly MarketRegimeAnalyzer _marketRegimeAnalyzer;
+    private readonly PriceActionPhaseDetector _priceActionPhaseDetector;
     private readonly IGridRepository _repository;
     private readonly RiskOptions _riskOptions;
     private readonly SignalAnalyzer _signalAnalyzer;
@@ -38,6 +39,7 @@ public sealed class GridDashboardService : IGridDashboardService
         AutoStrategySelector autoStrategySelector,
         IBybitRestClient bybitRestClient,
         MarketRegimeAnalyzer marketRegimeAnalyzer,
+        PriceActionPhaseDetector priceActionPhaseDetector,
         IGridRepository repository,
         IOptions<RiskOptions> riskOptions,
         SignalAnalyzer signalAnalyzer,
@@ -48,6 +50,7 @@ public sealed class GridDashboardService : IGridDashboardService
         _defaultGridOptions = defaultGridOptions.Value;
         _bybitRestClient = bybitRestClient;
         _marketRegimeAnalyzer = marketRegimeAnalyzer;
+        _priceActionPhaseDetector = priceActionPhaseDetector;
         _repository = repository;
         _riskOptions = riskOptions.Value;
         _signalAnalyzer = signalAnalyzer;
@@ -123,7 +126,8 @@ public sealed class GridDashboardService : IGridDashboardService
         var analysisCandles = await GetAnalysisCandlesAsync(gridOptions, cancellationToken);
         var marketRegime = AnalyzeMarketRegime(analysisCandles);
         var signalAnalysis = AnalyzeSignal(analysisCandles);
-        var autoRecommendation = _autoStrategySelector.Recommend(gridOptions, marketRegime, analysisCandles);
+        var marketPhase = await DetectMarketPhaseAsync(gridOptions, analysisCandles, currentPrice, cancellationToken);
+        var autoRecommendation = _autoStrategySelector.Recommend(gridOptions, marketRegime, marketPhase, analysisCandles);
         var recommendedSettings = BuildRecommendedSettings(runtimeSettings, autoRecommendation, StrategySelectionMode.Auto, generatedAt);
         recommendedSettings = UseReduceOnlyWhenNoTradeWouldLeavePosition(recommendedSettings, state);
         autoRecommendation = UseReduceOnlyRecommendationWhenNoTradeWouldLeavePosition(autoRecommendation, recommendedSettings);
@@ -270,6 +274,41 @@ public sealed class GridDashboardService : IGridDashboardService
         return _signalAnalyzer.Analyze(candles);
     }
 
+    private async Task<MarketPhaseResult> DetectMarketPhaseAsync(
+        GridOptions gridOptions,
+        IReadOnlyList<Candle> candles,
+        decimal? currentPrice,
+        CancellationToken cancellationToken)
+    {
+        var price = currentPrice ?? candles.OrderBy(candle => candle.OpenTime).LastOrDefault()?.Close ?? 0m;
+        var btcCandles = await GetBtcCandlesForPhaseAsync(gridOptions, cancellationToken);
+        return _priceActionPhaseDetector.Detect(gridOptions, price, candles, btcCandles);
+    }
+
+    private async Task<IReadOnlyList<Candle>> GetBtcCandlesForPhaseAsync(
+        GridOptions gridOptions,
+        CancellationToken cancellationToken)
+    {
+        if (!gridOptions.BtcFilterEnabled)
+        {
+            return [];
+        }
+
+        try
+        {
+            return await _bybitRestClient.GetKlinesAsync(
+                "spot",
+                "BTCUSDT",
+                AnalysisDefaults.AutoRecommendationCandleInterval,
+                Math.Max(20, gridOptions.BtcLookbackCandles),
+                cancellationToken);
+        }
+        catch
+        {
+            return [];
+        }
+    }
+
     public async Task<UpdateSettingsResponse> ApplyAutoRecommendationAsync(string? symbol, CancellationToken cancellationToken)
     {
         var profiles = await EnsureRuntimeSettingsProfilesAsync(cancellationToken);
@@ -301,8 +340,10 @@ public sealed class GridDashboardService : IGridDashboardService
             };
         }
 
-        var recommendation = _autoStrategySelector.Recommend(gridOptions, AnalyzeMarketRegime(candles), candles);
         var state = await _repository.GetBotStateAsync(runtimeSettings.Symbol, cancellationToken);
+        var marketRegime = AnalyzeMarketRegime(candles);
+        var marketPhase = await DetectMarketPhaseAsync(gridOptions, candles, state?.LastObservedPrice, cancellationToken);
+        var recommendation = _autoStrategySelector.Recommend(gridOptions, marketRegime, marketPhase, candles);
         var activeOrders = await _repository.GetActiveOrdersAsync(runtimeSettings.Symbol, cancellationToken);
         var recommendedSettings = BuildRecommendedSettings(runtimeSettings, recommendation, StrategySelectionMode.Auto, DateTimeOffset.UtcNow);
         recommendedSettings = UseReduceOnlyWhenNoTradeWouldLeavePosition(recommendedSettings, state);

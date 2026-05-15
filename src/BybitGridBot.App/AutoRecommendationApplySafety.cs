@@ -37,6 +37,7 @@ internal static class AutoRecommendationApplySafety
 
         if (state is not null &&
             state.AverageEntryPrice > 0m &&
+            recommendedSettings.StrategySelectionMode != StrategySelectionMode.Auto &&
             HasProfitableSellThatWouldBeCancelled(state, activeOrders, recommendation, recommendedSettings, strategy))
         {
             errors.Add("Applying this recommendation would cancel at least one profitable active sell order without preserving its price level. Leave the sell in place or cancel active orders manually if you intentionally want to rebuild.");

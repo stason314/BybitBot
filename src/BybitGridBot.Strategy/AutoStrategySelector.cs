@@ -203,6 +203,53 @@ public sealed class AutoStrategySelector
         };
     }
 
+    public AutoConfigRecommendation Recommend(
+        GridOptions currentOptions,
+        MarketRegimeAnalysis regime,
+        MarketPhaseResult phase,
+        IReadOnlyList<Candle> candles)
+    {
+        var baseline = Recommend(currentOptions, regime, candles);
+        var strategyType = StrategyForPhase(phase, currentOptions.SpotOnly);
+        if (phase.Phase != MarketPhase.Dump &&
+            phase.Phase != MarketPhase.HighVolatility &&
+            phase.Phase != MarketPhase.BreakoutDown &&
+            phase.Phase != MarketPhase.Unknown &&
+            (phase.Confidence < currentOptions.MinPhaseConfidence ||
+             phase.Score < decimal.Max(currentOptions.StrategyMinScore, currentOptions.MinStrategyScore)))
+        {
+            strategyType = TradingStrategyType.NoTrade;
+        }
+
+        var orderSize = strategyType switch
+        {
+            TradingStrategyType.NoTrade or TradingStrategyType.Pause => currentOptions.MinOrderSizeUsdt,
+            TradingStrategyType.Btd or TradingStrategyType.TrendFollow or TradingStrategyType.TrendFollowing or TradingStrategyType.Breakout =>
+                RecommendActiveOrderSize(currentOptions, baseline.OrderSizeUsdt * 0.75m),
+            _ => baseline.OrderSizeUsdt
+        };
+        var strategyConfigJson = BuildStrategyConfig(
+            strategyType,
+            orderSize,
+            currentOptions.MinOrderSizeUsdt,
+            baseline.LowerPrice,
+            baseline.StopLowerPrice,
+            baseline.StopUpperPrice,
+            baseline.Metrics);
+
+        return Build(
+            strategyType,
+            BuildPhaseRecommendationReason(phase, strategyType),
+            baseline.LowerPrice,
+            baseline.UpperPrice,
+            baseline.Step,
+            orderSize,
+            baseline.StopLowerPrice,
+            baseline.StopUpperPrice,
+            strategyConfigJson,
+            baseline.Metrics);
+    }
+
     public AutoConfigRecommendation RecommendForStrategy(
         GridOptions currentOptions,
         MarketRegimeAnalysis regime,
@@ -270,6 +317,35 @@ public sealed class AutoStrategySelector
         StrategyConfigJson = strategyConfigJson,
         Metrics = metrics
     };
+
+    private static TradingStrategyType StrategyForPhase(MarketPhaseResult phase, bool spotOnly)
+    {
+        return phase.Phase switch
+        {
+            MarketPhase.RangeBound => TradingStrategyType.Grid,
+            MarketPhase.Uptrend => TradingStrategyType.TrendFollowing,
+            MarketPhase.PullbackInUptrend => TradingStrategyType.Btd,
+            MarketPhase.BreakoutUp => TradingStrategyType.Breakout,
+            MarketPhase.BreakoutDown when spotOnly => TradingStrategyType.NoTrade,
+            MarketPhase.Dump => TradingStrategyType.NoTrade,
+            MarketPhase.HighVolatility => TradingStrategyType.NoTrade,
+            MarketPhase.Exhaustion => TradingStrategyType.NoTrade,
+            MarketPhase.Unknown => TradingStrategyType.NoTrade,
+            _ => TradingStrategyType.NoTrade
+        };
+    }
+
+    private static string BuildPhaseRecommendationReason(MarketPhaseResult phase, TradingStrategyType strategyType)
+    {
+        return strategyType switch
+        {
+            TradingStrategyType.Grid => $"RangeBound phase. Use Grid while price stays inside the range. Phase confidence: {phase.Confidence:0.####}. {phase.Reason}",
+            TradingStrategyType.TrendFollowing => $"Uptrend phase. Use TrendFollowing and avoid passive grid sell pressure. Phase confidence: {phase.Confidence:0.####}. {phase.Reason}",
+            TradingStrategyType.Btd => $"PullbackInUptrend phase. Use BTD for controlled dip buys instead of full grid accumulation. Phase confidence: {phase.Confidence:0.####}. {phase.Reason}",
+            TradingStrategyType.Breakout => $"BreakoutUp phase. Use Breakout strategy; grid handoff should stop premature sells. Phase confidence: {phase.Confidence:0.####}. {phase.Reason}",
+            _ => $"Protective phase {phase.Phase}. Do not open new buy orders; use ReduceOnly if a position is open. Phase confidence: {phase.Confidence:0.####}. {phase.Reason}"
+        };
+    }
 
     private static bool ShouldRecommendSignalBot(MarketRegimeAnalysis regime, SignalAnalysis signal)
     {
