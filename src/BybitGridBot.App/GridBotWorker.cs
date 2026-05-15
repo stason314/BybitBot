@@ -1390,6 +1390,7 @@ public sealed class GridBotWorker : BackgroundService
 
             await CleanRiskyActiveOrdersAsync(profile, state, levels, activeOrders, cancellationToken);
             await SimulatePaperFillsAsync(state, levels, profile, currentPrice, cancellationToken);
+            await EnsureProtectiveSellLifecycleAsync(profile, state, levels, instrument, currentPrice, cancellationToken);
         }
         else
         {
@@ -1402,6 +1403,7 @@ public sealed class GridBotWorker : BackgroundService
             }
 
             await CleanRiskyActiveOrdersAsync(profile, state, levels, activeOrders, cancellationToken);
+            await EnsureProtectiveSellLifecycleAsync(profile, state, levels, instrument, currentPrice, cancellationToken);
         }
 
         if (state.IsPaused)
@@ -3130,6 +3132,122 @@ public sealed class GridBotWorker : BackgroundService
                 OrderIntents = [new OrderIntent(TradeSide.Sell, takeProfitPrice, quantity, filledOrder.OrderLinkId, filledOrder.StrategySource, expectedProfitPercent)]
             },
             cancellationToken);
+    }
+
+    private async Task EnsureProtectiveSellLifecycleAsync(
+        GridBotSettings? profile,
+        BotState state,
+        IReadOnlyList<GridLevel> levels,
+        BybitInstrumentInfo instrument,
+        decimal currentPrice,
+        CancellationToken cancellationToken)
+    {
+        if (state.BaseAssetQuantity <= 0m)
+        {
+            return;
+        }
+
+        var orders = await _repository.GetOrdersAsync(_gridOptions.Symbol, cancellationToken);
+        var filledBuys = orders
+            .Where(order => order.Side == TradeSide.Buy && order.FilledQuantity > 0m)
+            .OrderBy(order => order.FilledAt ?? order.UpdatedAt)
+            .ToArray();
+
+        foreach (var buy in filledBuys)
+        {
+            var remainingBuy = BuildUnprotectedBuySlice(buy, orders);
+            if (remainingBuy is null)
+            {
+                continue;
+            }
+
+            if (ShouldUseDcaFollowUp(profile, buy))
+            {
+                await EnsureDcaTakeProfitOrderAsync(state, ParseDcaStrategyConfig(profile!), remainingBuy, cancellationToken);
+                continue;
+            }
+
+            if (ShouldUseBtdFollowUp(profile, buy))
+            {
+                await EnsureDcaTakeProfitOrderAsync(state, ParseBtdStrategyConfig(profile!), remainingBuy, cancellationToken);
+                continue;
+            }
+
+            var activeOrders = await _repository.GetActiveOrdersAsync(_gridOptions.Symbol, cancellationToken);
+            var wallet = _appOptions.TradingMode == TradingMode.Paper
+                ? null
+                : await _bybitRestClient.GetWalletBalanceAsync(cancellationToken, _quoteAsset, _baseAsset);
+
+            if (IsSignalOrder(buy) && profile is not null)
+            {
+                await EnsureSignalSellOrderAsync(
+                    ParseSignalStrategyConfig(profile),
+                    state,
+                    instrument,
+                    currentPrice,
+                    activeOrders,
+                    wallet,
+                    "protective-lifecycle",
+                    cancellationToken);
+                continue;
+            }
+
+            if (IsTrendOrder(buy) && profile is not null)
+            {
+                await EnsureTrendSellOrderAsync(
+                    ParseTrendFollowingStrategyConfig(profile),
+                    state,
+                    instrument,
+                    currentPrice,
+                    activeOrders,
+                    wallet,
+                    "protective-lifecycle",
+                    cancellationToken);
+                continue;
+            }
+
+            if (ShouldSkipGridFollowUp(profile, buy))
+            {
+                continue;
+            }
+
+            await EnsureOppositeGridOrderAsync(state, levels, remainingBuy, cancellationToken);
+        }
+    }
+
+    private static GridOrder? BuildUnprotectedBuySlice(GridOrder buy, IReadOnlyCollection<GridOrder> allOrders)
+    {
+        var protectedQuantity = allOrders
+            .Where(order => order.Side == TradeSide.Sell &&
+                string.Equals(order.ParentOrderLinkId, buy.OrderLinkId, StringComparison.Ordinal) &&
+                order.Status is not OrderStatus.Cancelled and not OrderStatus.Rejected)
+            .Sum(order => order.FilledQuantity + (order.IsActive ? Math.Max(0m, order.Quantity - order.FilledQuantity) : 0m));
+        var remaining = buy.FilledQuantity - protectedQuantity;
+        if (remaining <= 0m)
+        {
+            return null;
+        }
+
+        return new GridOrder
+        {
+            OrderLinkId = buy.OrderLinkId,
+            BybitOrderId = buy.BybitOrderId,
+            Symbol = buy.Symbol,
+            Category = buy.Category,
+            Side = buy.Side,
+            Price = buy.AverageFillPrice > 0m ? buy.AverageFillPrice : buy.Price,
+            Quantity = remaining,
+            FilledQuantity = remaining,
+            AverageFillPrice = buy.AverageFillPrice,
+            FeePaid = buy.FeePaid,
+            Status = buy.Status,
+            TradingMode = buy.TradingMode,
+            ParentOrderLinkId = buy.ParentOrderLinkId,
+            StrategySource = buy.StrategySource,
+            CreatedAt = buy.CreatedAt,
+            UpdatedAt = buy.UpdatedAt,
+            FilledAt = buy.FilledAt
+        };
     }
 
     private async Task<IReadOnlyList<GridOrder>> CleanRiskyActiveOrdersAsync(
