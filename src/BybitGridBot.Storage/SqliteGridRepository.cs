@@ -904,6 +904,25 @@ public sealed class SqliteGridRepository : IGridRepository
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
+    public async Task ClearFuturesPaperHistoryAsync(string symbol, CancellationToken cancellationToken)
+    {
+        const string sql = """
+            DELETE FROM futures_fills WHERE symbol = $symbol;
+            DELETE FROM futures_orders WHERE symbol = $symbol;
+            DELETE FROM futures_risk_decisions WHERE symbol = $symbol;
+            DELETE FROM futures_positions WHERE symbol = $symbol;
+            """;
+
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = sql;
+        command.Parameters.AddWithValue("$symbol", symbol);
+        await command.ExecuteNonQueryAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+    }
+
     public async Task<IReadOnlyList<GridLevel>> GetGridLevelsAsync(string symbol, CancellationToken cancellationToken)
     {
         const string sql = """
