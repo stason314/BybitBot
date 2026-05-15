@@ -144,8 +144,15 @@ public sealed class GridDashboardService : IGridDashboardService
         var signalAnalysis = AnalyzeSignal(analysisCandles);
         var btcCandles = await GetBtcCandlesForPhaseAsync(gridOptions, cancellationToken);
         var marketPhase = DetectMarketPhase(gridOptions, analysisCandles, btcCandles, currentPrice);
-        var btdDiagnostics = BuildBtdDiagnostics(gridOptions, runtimeSettings, analysisCandles, btcCandles, marketPhase, currentPrice);
         var aggressiveModeActive = IsAggressiveModeActive(gridOptions, state, generatedAt);
+        var btdDiagnostics = BuildBtdDiagnostics(
+            gridOptions,
+            runtimeSettings,
+            analysisCandles,
+            btcCandles,
+            marketPhase,
+            currentPrice,
+            aggressiveModeActive);
         var autoRecommendation = _autoStrategySelector.Recommend(
             gridOptions,
             marketRegime,
@@ -2817,7 +2824,8 @@ public sealed class GridDashboardService : IGridDashboardService
         IReadOnlyList<Candle> candles,
         IReadOnlyCollection<Candle> btcCandles,
         MarketPhaseResult phase,
-        decimal? currentPrice)
+        decimal? currentPrice,
+        bool aggressiveModeActive)
     {
         var price = currentPrice ?? candles.OrderBy(candle => candle.OpenTime).LastOrDefault()?.Close ?? 0m;
         var ordered = candles.OrderBy(candle => candle.OpenTime).ToArray();
@@ -2845,33 +2853,35 @@ public sealed class GridDashboardService : IGridDashboardService
         var dipTriggered = config.DipPercent <= 0m || dipDrawdownPercent >= config.DipPercent;
 
         var isAllowed = true;
-        var reason = "BTD conditions pass.";
+        var reason = aggressiveModeActive
+            ? "BTD aggressive conditions pass. Trend filters are relaxed; hard risk filters remain active."
+            : "BTD conditions pass.";
         if (phase.Phase is MarketPhase.Dump or MarketPhase.HighVolatility or MarketPhase.BreakoutDown)
         {
             isAllowed = false;
             reason = $"BTD silent: blocked by phase {phase.Phase}. {phase.Reason}";
-        }
-        else if (options.BtdRequireUptrend && phase.Phase != MarketPhase.PullbackInUptrend)
-        {
-            isAllowed = false;
-            reason = $"BTD silent: phase is {phase.Phase}, expected PullbackInUptrend. {phase.Reason}";
         }
         else if (btcRiskOff)
         {
             isAllowed = false;
             reason = "BTD silent: BTC risk-off is active.";
         }
-        else if (emaFast <= emaSlow)
+        else if (!aggressiveModeActive && options.BtdRequireUptrend && phase.Phase != MarketPhase.PullbackInUptrend)
+        {
+            isAllowed = false;
+            reason = $"BTD silent: phase is {phase.Phase}, expected PullbackInUptrend. {phase.Reason}";
+        }
+        else if (!aggressiveModeActive && emaFast <= emaSlow)
         {
             isAllowed = false;
             reason = "BTD silent: EMA fast is below or equal to EMA slow.";
         }
-        else if (distanceToEma > options.BtdMaxDistanceFromEmaPercent)
+        else if (!aggressiveModeActive && distanceToEma > options.BtdMaxDistanceFromEmaPercent)
         {
             isAllowed = false;
             reason = $"BTD silent: price is {distanceToEma:F2}% from EMA, max {options.BtdMaxDistanceFromEmaPercent:F2}%.";
         }
-        else if (pullbackPercent < options.BtdMinPullbackPercent)
+        else if (!aggressiveModeActive && pullbackPercent < options.BtdMinPullbackPercent)
         {
             isAllowed = false;
             reason = $"BTD silent: pullback is {pullbackPercent:F2}%, min {options.BtdMinPullbackPercent:F2}%.";

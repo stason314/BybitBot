@@ -1165,10 +1165,13 @@ public sealed class GridBotWorker : BackgroundService
                 cancellationToken)
             : [];
         var marketPhase = _priceActionPhaseDetector.Detect(_gridOptions, currentPrice, candles, btcCandles);
-        if (!_btdStrategy.IsDipAllowedByPhase(_gridOptions, marketPhase, currentPrice, candles, btcCandles))
+        var aggressiveModeActive = IsAggressiveModeActive(_gridOptions, state, DateTimeOffset.UtcNow);
+        if (!_btdStrategy.IsDipAllowedByPhase(_gridOptions, marketPhase, currentPrice, candles, btcCandles, aggressiveModeActive))
         {
             var reasonCode = ResolveNoTradeReason(marketPhase);
-            var reason = $"BTD skipped: trend not confirmed. Phase={marketPhase.Phase}; Reason={marketPhase.Reason}";
+            var reason = aggressiveModeActive
+                ? $"BTD skipped: hard risk filter blocked aggressive mode. Phase={marketPhase.Phase}; Reason={marketPhase.Reason}"
+                : $"BTD skipped: trend not confirmed. Phase={marketPhase.Phase}; Reason={marketPhase.Reason}";
             _logger.LogInformation(reason);
             await RecordNoTradeReasonAsync(profile, reasonCode, reason, cancellationToken);
             return;

@@ -40,6 +40,45 @@ public sealed class StrategyIntentTests
     }
 
     [Fact]
+    public void Btd_AggressiveModeRelaxesTrendFiltersButKeepsRiskBlocks()
+    {
+        var strategy = new BtdStrategy();
+        var options = Options();
+        var candles = Enumerable.Range(0, 40)
+            .Select(index => Candle(index, 2.40m - index * 0.001m))
+            .ToArray();
+        var unknownPhase = new MarketPhaseResult
+        {
+            Phase = MarketPhase.Unknown,
+            Confidence = 0.35m,
+            Score = 35m,
+            Reason = "No reliable phase match.",
+            SuggestedStrategy = StrategyType.Pause,
+            DetectedAt = DateTimeOffset.UtcNow
+        };
+        var dumpPhase = new MarketPhaseResult
+        {
+            Phase = MarketPhase.Dump,
+            Confidence = 0.9m,
+            Score = 92m,
+            Reason = "Dump detected.",
+            SuggestedStrategy = StrategyType.Pause,
+            DetectedAt = DateTimeOffset.UtcNow
+        };
+
+        Assert.False(strategy.IsDipAllowedByPhase(options, unknownPhase, 2.35m, candles, []));
+        Assert.True(strategy.IsDipAllowedByPhase(options, unknownPhase, 2.35m, candles, [], aggressiveModeActive: true));
+        Assert.False(strategy.IsDipAllowedByPhase(options, dumpPhase, 2.35m, candles, [], aggressiveModeActive: true));
+        Assert.False(strategy.IsDipAllowedByPhase(
+            options,
+            unknownPhase,
+            2.35m,
+            candles,
+            BtcRiskOffCandles(),
+            aggressiveModeActive: true));
+    }
+
+    [Fact]
     public void Dca_RespectsMaxAllocation()
     {
         var strategy = new DcaStrategy();
@@ -78,9 +117,16 @@ public sealed class StrategyIntentTests
         Step = 0.05m,
         OrderSizeUsdt = 10m,
         StopLowerPrice = 2.25m,
-        StopUpperPrice = 2.65m
+        StopUpperPrice = 2.65m,
+        BtcLookbackCandles = 2
     };
 
     private static Candle Candle(int index, decimal close) =>
         new(DateTimeOffset.UtcNow.AddMinutes(index), close, close + 0.01m, close - 0.01m, close, 100m, 0m);
+
+    private static IReadOnlyList<Candle> BtcRiskOffCandles() =>
+    [
+        new(DateTimeOffset.UtcNow.AddMinutes(-2), 100m, 100m, 100m, 100m, 100m, 0m),
+        new(DateTimeOffset.UtcNow.AddMinutes(-1), 93m, 93m, 93m, 93m, 100m, 0m)
+    ];
 }
