@@ -26,4 +26,10 @@ public interface IGridTradingStrategy : ITradingStrategy
     bool IsBelowStop(GridOptions options, decimal price);
 
     bool IsAboveStop(GridOptions options, decimal price);
+
+    bool CanCreateGridIntents(
+        GridOptions options,
+        MarketPhaseResult marketPhase,
+        decimal currentPrice,
+        bool bigRedGuardActive);
 }

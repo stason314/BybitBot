@@ -99,6 +99,71 @@ public sealed class SqliteGridRepository : IGridRepository
                 created_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS market_phases (
+                phase_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                phase TEXT NOT NULL,
+                confidence TEXT NOT NULL,
+                score TEXT NOT NULL,
+                suggested_strategy TEXT NOT NULL,
+                key_levels_json TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS strategy_switches (
+                switch_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                previous_strategy TEXT NULL,
+                selected_strategy TEXT NOT NULL,
+                market_phase TEXT NOT NULL,
+                score TEXT NOT NULL,
+                confidence TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS no_trade_reasons (
+                reason_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                strategy_type TEXT NULL,
+                reason_code TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS strategy_performance (
+                performance_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                strategy_type TEXT NOT NULL,
+                gross_pnl TEXT NOT NULL,
+                fees_paid TEXT NOT NULL,
+                slippage_cost TEXT NOT NULL,
+                net_pnl TEXT NOT NULL,
+                max_drawdown TEXT NOT NULL,
+                trades_count INTEGER NOT NULL,
+                win_rate TEXT NOT NULL,
+                profit_factor TEXT NOT NULL,
+                average_win TEXT NOT NULL,
+                average_loss TEXT NOT NULL,
+                time_in_strategy_percent TEXT NOT NULL,
+                pause_time_percent TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS strategy_daily_performance (
+                symbol TEXT NOT NULL,
+                strategy_type TEXT NOT NULL,
+                performance_date TEXT NOT NULL,
+                gross_pnl TEXT NOT NULL,
+                fees_paid TEXT NOT NULL,
+                net_pnl TEXT NOT NULL,
+                trades_count INTEGER NOT NULL,
+                win_rate TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(symbol, strategy_type, performance_date)
+            );
+
             CREATE TABLE IF NOT EXISTS signals (
                 signal_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 symbol TEXT NOT NULL,

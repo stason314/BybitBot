@@ -123,9 +123,17 @@ public sealed class GridOptions
     [Range(typeof(decimal), "0", "100")]
     public decimal StrategyMinScore { get; init; } = 65m;
 
+    [ConfigurationKeyName("MIN_STRATEGY_SCORE")]
+    [Range(typeof(decimal), "0", "100")]
+    public decimal MinStrategyScore { get; init; } = 65m;
+
     [ConfigurationKeyName("STRATEGY_MIN_CONFIDENCE")]
     [Range(typeof(decimal), "0", "1")]
     public decimal StrategyMinConfidence { get; init; } = 0.6m;
+
+    [ConfigurationKeyName("MIN_PHASE_CONFIDENCE")]
+    [Range(typeof(decimal), "0", "1")]
+    public decimal MinPhaseConfidence { get; init; } = 0.6m;
 
     [ConfigurationKeyName("STRATEGY_SWITCH_COOLDOWN_MINUTES")]
     [Range(0, 10080)]
@@ -134,6 +142,10 @@ public sealed class GridOptions
     [ConfigurationKeyName("STRATEGY_CONFIRMATION_CANDLES")]
     [Range(1, 100)]
     public int StrategyConfirmationCandles { get; init; } = 2;
+
+    [ConfigurationKeyName("PHASE_CONFIRMATION_CANDLES")]
+    [Range(1, 100)]
+    public int PhaseConfirmationCandles { get; init; } = 2;
 
     [ConfigurationKeyName("GRID_CAPITAL_PERCENT")]
     [Range(typeof(decimal), "0", "100")]
@@ -178,6 +190,17 @@ public sealed class GridOptions
     [Range(typeof(decimal), "0.00000001", "1000")]
     public decimal BreakoutAtrStopMultiplier { get; init; } = 1.5m;
 
+    [ConfigurationKeyName("BREAKOUT_RISK_REWARD")]
+    [Range(typeof(decimal), "0.00000001", "1000")]
+    public decimal BreakoutRiskReward { get; init; } = 2m;
+
+    [ConfigurationKeyName("BREAKOUT_MAX_DISTANCE_FROM_EMA_PERCENT")]
+    [Range(typeof(decimal), "0", "1000")]
+    public decimal BreakoutMaxDistanceFromEmaPercent { get; init; } = 5m;
+
+    [ConfigurationKeyName("BREAKOUT_USE_RETEST")]
+    public bool BreakoutUseRetest { get; init; } = true;
+
     [ConfigurationKeyName("BREAKOUT_CAPITAL_PERCENT")]
     [Range(typeof(decimal), "0", "100")]
     public decimal BreakoutCapitalPercent { get; init; } = 20m;
@@ -189,6 +212,30 @@ public sealed class GridOptions
     [ConfigurationKeyName("TREND_EMA_SLOW")]
     [Range(2, 500)]
     public int TrendEmaSlow { get; init; } = 50;
+
+    [ConfigurationKeyName("EMA_FAST")]
+    [Range(2, 500)]
+    public int EmaFast { get; init; } = 20;
+
+    [ConfigurationKeyName("EMA_SLOW")]
+    [Range(2, 500)]
+    public int EmaSlow { get; init; } = 50;
+
+    [ConfigurationKeyName("TREND_MAX_DISTANCE_FROM_EMA_PERCENT")]
+    [Range(typeof(decimal), "0", "1000")]
+    public decimal TrendMaxDistanceFromEmaPercent { get; init; } = 4m;
+
+    [ConfigurationKeyName("TREND_TRAILING_STOP_ATR_MULTIPLIER")]
+    [Range(typeof(decimal), "0.00000001", "1000")]
+    public decimal TrendTrailingStopAtrMultiplier { get; init; } = 1.5m;
+
+    [ConfigurationKeyName("TREND_PARTIAL_TAKE_PROFIT_PERCENT")]
+    [Range(typeof(decimal), "0", "100")]
+    public decimal TrendPartialTakeProfitPercent { get; init; } = 50m;
+
+    [ConfigurationKeyName("TREND_PARTIAL_TAKE_PROFIT_AT_R")]
+    [Range(typeof(decimal), "0.00000001", "1000")]
+    public decimal TrendPartialTakeProfitAtR { get; init; } = 1.5m;
 
     [ConfigurationKeyName("TREND_CAPITAL_PERCENT")]
     [Range(typeof(decimal), "0", "100")]
@@ -210,6 +257,10 @@ public sealed class GridOptions
     [Range(typeof(decimal), "0", "100")]
     public decimal SlippagePercent { get; init; } = 0.05m;
 
+    [ConfigurationKeyName("MIN_EXPECTED_PROFIT_PERCENT")]
+    [Range(typeof(decimal), "0", "100")]
+    public decimal MinExpectedProfitPercent { get; init; } = 0.7m;
+
     [ConfigurationKeyName("BOT_LOOP_INTERVAL_SECONDS")]
     [Range(1, 3600)]
     public int BotLoopIntervalSeconds { get; init; } = 10;
@@ -227,6 +278,90 @@ public sealed class GridOptions
 
     [ConfigurationKeyName("CANDLE_INTERVAL")]
     public string CandleInterval { get; init; } = "60";
+
+    [ConfigurationKeyName("BIG_RED_CANDLE_PERCENT")]
+    [Range(typeof(decimal), "0", "1000")]
+    public decimal BigRedCandlePercent { get; init; } = 4m;
+
+    [ConfigurationKeyName("DUMP_MOVE_PERCENT")]
+    [Range(typeof(decimal), "0", "1000")]
+    public decimal DumpMovePercent { get; init; } = 6m;
+
+    [ConfigurationKeyName("DUMP_LOOKBACK_CANDLES")]
+    [Range(1, 100)]
+    public int DumpLookbackCandles { get; init; } = 3;
+
+    [ConfigurationKeyName("DUMP_PAUSE_CANDLES")]
+    [Range(1, 1000)]
+    public int DumpPauseCandles { get; init; } = 4;
+
+    [ConfigurationKeyName("CANCEL_GRID_BUYS_ON_DUMP")]
+    public bool CancelGridBuysOnDump { get; init; } = true;
+
+    [ConfigurationKeyName("GRID_DYNAMIC_STEP_ENABLED")]
+    public bool GridDynamicStepEnabled { get; init; } = true;
+
+    [ConfigurationKeyName("GRID_STEP_ATR_MULTIPLIER")]
+    [Range(typeof(decimal), "0.00000001", "1000")]
+    public decimal GridStepAtrMultiplier { get; init; } = 0.2m;
+
+    [ConfigurationKeyName("GRID_MIN_STEP_PERCENT")]
+    [Range(typeof(decimal), "0", "100")]
+    public decimal GridMinStepPercent { get; init; } = 1m;
+
+    [ConfigurationKeyName("GRID_MAX_STEP_PERCENT")]
+    [Range(typeof(decimal), "0", "100")]
+    public decimal GridMaxStepPercent { get; init; } = 3m;
+
+    [ConfigurationKeyName("GRID_CANCEL_BUYS_ON_DUMP")]
+    public bool GridCancelBuysOnDump { get; init; } = true;
+
+    [ConfigurationKeyName("GRID_HANDOFF_TO_BREAKOUT")]
+    public bool GridHandoffToBreakout { get; init; } = true;
+
+    [ConfigurationKeyName("ENABLE_BREAKOUT_HANDOFF")]
+    public bool EnableBreakoutHandoff { get; init; } = true;
+
+    [ConfigurationKeyName("BTD_REQUIRE_UPTREND")]
+    public bool BtdRequireUptrend { get; init; } = true;
+
+    [ConfigurationKeyName("BTD_MAX_DISTANCE_FROM_EMA_PERCENT")]
+    [Range(typeof(decimal), "0", "1000")]
+    public decimal BtdMaxDistanceFromEmaPercent { get; init; } = 3m;
+
+    [ConfigurationKeyName("BTD_MIN_PULLBACK_PERCENT")]
+    [Range(typeof(decimal), "0", "1000")]
+    public decimal BtdMinPullbackPercent { get; init; } = 2m;
+
+    [ConfigurationKeyName("BTD_BLOCK_ON_BTC_RISK_OFF")]
+    public bool BtdBlockOnBtcRiskOff { get; init; } = true;
+
+    [ConfigurationKeyName("PROFIT_PROTECTION_ENABLED")]
+    public bool ProfitProtectionEnabled { get; init; } = true;
+
+    [ConfigurationKeyName("PROFIT_PROTECTION_TRIGGER_PERCENT")]
+    [Range(typeof(decimal), "0", "1000")]
+    public decimal ProfitProtectionTriggerPercent { get; init; } = 5m;
+
+    [ConfigurationKeyName("TRAILING_STOP_ENABLED")]
+    public bool TrailingStopEnabled { get; init; } = true;
+
+    [ConfigurationKeyName("TRAILING_STOP_PERCENT")]
+    [Range(typeof(decimal), "0", "100")]
+    public decimal TrailingStopPercent { get; init; } = 2.5m;
+
+    [ConfigurationKeyName("PARTIAL_TAKE_PROFIT_ENABLED")]
+    public bool PartialTakeProfitEnabled { get; init; } = true;
+
+    [ConfigurationKeyName("PARTIAL_TAKE_PROFIT_PERCENT")]
+    [Range(typeof(decimal), "0", "100")]
+    public decimal PartialTakeProfitPercent { get; init; } = 50m;
+
+    [ConfigurationKeyName("ENABLE_NO_TRADE_REASON_TRACKING")]
+    public bool EnableNoTradeReasonTracking { get; init; } = true;
+
+    [ConfigurationKeyName("ENABLE_STRATEGY_PERFORMANCE_ANALYTICS")]
+    public bool EnableStrategyPerformanceAnalytics { get; init; } = true;
 
     [ConfigurationKeyName("AUTO_RECENTER_ENABLED")]
     public bool AutoRecenterEnabled { get; init; } = false;

@@ -6,6 +6,8 @@ public sealed class StrategyDecision
 
     public MarketRegime MarketRegime { get; init; } = MarketRegime.Unknown;
 
+    public MarketPhase MarketPhase { get; init; } = MarketPhase.Unknown;
+
     public IReadOnlyList<StrategyScore> Scores { get; init; } = [];
 
     public string Reason { get; init; } = string.Empty;

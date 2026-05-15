@@ -34,6 +34,30 @@ public sealed class GridStrategy : IGridTradingStrategy
         return levels;
     }
 
+    public IReadOnlyList<GridLevel> BuildGrid(GridOptions options, decimal atr, decimal referencePrice)
+    {
+        if (!options.GridDynamicStepEnabled || atr <= 0m || referencePrice <= 0m)
+        {
+            return BuildGrid(options);
+        }
+
+        var dynamicStep = CalculateDynamicStep(options, atr, referencePrice);
+        return BuildGrid(options, dynamicStep);
+    }
+
+    public decimal CalculateDynamicStep(GridOptions options, decimal atr, decimal referencePrice)
+    {
+        if (atr <= 0m || referencePrice <= 0m)
+        {
+            return options.Step;
+        }
+
+        var atrStep = atr * options.GridStepAtrMultiplier;
+        var minStep = referencePrice * options.GridMinStepPercent / 100m;
+        var maxStep = referencePrice * options.GridMaxStepPercent / 100m;
+        return decimal.Round(Clamp(atrStep, minStep, maxStep), 8, MidpointRounding.AwayFromZero);
+    }
+
     public IReadOnlyList<GridLevel> GetBuyLevels(IReadOnlyList<GridLevel> levels, decimal currentPrice) =>
         levels.Where(level => level.Price < currentPrice).ToArray();
 
@@ -52,6 +76,29 @@ public sealed class GridStrategy : IGridTradingStrategy
     public bool IsBelowStop(GridOptions options, decimal price) => price < options.StopLowerPrice;
 
     public bool IsAboveStop(GridOptions options, decimal price) => price > options.StopUpperPrice;
+
+    public bool CanCreateGridIntents(
+        GridOptions options,
+        MarketPhaseResult marketPhase,
+        decimal currentPrice,
+        bool bigRedGuardActive)
+    {
+        if (bigRedGuardActive ||
+            marketPhase.Phase is MarketPhase.Dump or MarketPhase.HighVolatility or MarketPhase.BreakoutDown or MarketPhase.Unknown)
+        {
+            return false;
+        }
+
+        if (marketPhase.Phase == MarketPhase.BreakoutUp && (options.GridHandoffToBreakout || options.EnableBreakoutHandoff))
+        {
+            return false;
+        }
+
+        return marketPhase.Phase == MarketPhase.RangeBound &&
+               IsWithinTradingRange(options, currentPrice) &&
+               !IsBelowStop(options, currentPrice) &&
+               !IsAboveStop(options, currentPrice);
+    }
 
     public IReadOnlyList<TradeIntent> BuildRebalanceIntents(
         GridOptions options,
@@ -83,6 +130,19 @@ public sealed class GridStrategy : IGridTradingStrategy
         return intents;
     }
 
+    public IReadOnlyList<TradeIntent> BuildRebalanceIntents(
+        GridOptions options,
+        IReadOnlyList<GridLevel> levels,
+        decimal currentPrice,
+        IReadOnlyCollection<GridOrder> activeOrders,
+        MarketPhaseResult marketPhase,
+        bool bigRedGuardActive)
+    {
+        return CanCreateGridIntents(options, marketPhase, currentPrice, bigRedGuardActive)
+            ? BuildRebalanceIntents(options, levels, currentPrice, activeOrders)
+            : [];
+    }
+
     private static bool HasActiveOrder(IReadOnlyCollection<GridOrder> activeOrders, TradeSide side, decimal price)
     {
         return activeOrders.Any(order => order.IsActive && order.Side == side && order.Price == price);
@@ -103,5 +163,25 @@ public sealed class GridStrategy : IGridTradingStrategy
             ExpectedRisk = options.Step,
             ExpectedReward = options.Step
         };
+    }
+
+    private IReadOnlyList<GridLevel> BuildGrid(GridOptions options, decimal withStep)
+    {
+        return BuildGrid(new GridOptions
+        {
+            Symbol = options.Symbol,
+            Category = options.Category,
+            LowerPrice = options.LowerPrice,
+            UpperPrice = options.UpperPrice,
+            Step = withStep,
+            OrderSizeUsdt = options.OrderSizeUsdt,
+            StopLowerPrice = options.StopLowerPrice,
+            StopUpperPrice = options.StopUpperPrice
+        });
+    }
+
+    private static decimal Clamp(decimal value, decimal min, decimal max)
+    {
+        return value < min ? min : value > max ? max : value;
     }
 }

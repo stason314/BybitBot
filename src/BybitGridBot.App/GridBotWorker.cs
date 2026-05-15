@@ -36,6 +36,8 @@ public sealed class GridBotWorker : BackgroundService
     private readonly ILogger<GridBotWorker> _logger;
     private readonly MarketRegimeAnalyzer _marketRegimeAnalyzer;
     private readonly MarketRegimeFilter _marketRegimeFilter;
+    private readonly PriceActionPhaseDetector _priceActionPhaseDetector;
+    private readonly BigRedCandleGuard _bigRedCandleGuard;
     private readonly ITelegramNotifier _notifier;
     private readonly IGridRepository _repository;
     private readonly RiskManager _riskManager;
@@ -74,6 +76,8 @@ public sealed class GridBotWorker : BackgroundService
         RiskManager riskManager,
         MarketRegimeAnalyzer marketRegimeAnalyzer,
         MarketRegimeFilter marketRegimeFilter,
+        PriceActionPhaseDetector priceActionPhaseDetector,
+        BigRedCandleGuard bigRedCandleGuard,
         SignalAnalyzer signalAnalyzer,
         IGridRepository repository,
         ITelegramNotifier notifier,
@@ -92,6 +96,8 @@ public sealed class GridBotWorker : BackgroundService
         _riskManager = riskManager;
         _marketRegimeAnalyzer = marketRegimeAnalyzer;
         _marketRegimeFilter = marketRegimeFilter;
+        _priceActionPhaseDetector = priceActionPhaseDetector;
+        _bigRedCandleGuard = bigRedCandleGuard;
         _signalAnalyzer = signalAnalyzer;
         _repository = repository;
         _notifier = notifier;
@@ -1353,7 +1359,7 @@ public sealed class GridBotWorker : BackgroundService
             _gridOptions.Category,
             _gridOptions.Symbol,
             _gridOptions.CandleInterval,
-            50,
+            Math.Max(120, Math.Max(_gridOptions.EmaSlow + 10, _gridOptions.VolumeSmaPeriod + _gridOptions.AtrPeriod * 3)),
             cancellationToken);
 
         var marketRegime = _marketRegimeAnalyzer.Analyze(symbolCandles);
@@ -1382,8 +1388,54 @@ public sealed class GridBotWorker : BackgroundService
         }
 
         var btcCandles = _gridOptions.BtcFilterEnabled
-            ? await _bybitRestClient.GetKlinesAsync("spot", "BTCUSDT", _gridOptions.CandleInterval, 20, cancellationToken)
+            ? await _bybitRestClient.GetKlinesAsync("spot", "BTCUSDT", _gridOptions.CandleInterval, Math.Max(20, _gridOptions.BtcLookbackCandles), cancellationToken)
             : [];
+
+        var marketPhase = _priceActionPhaseDetector.Detect(_gridOptions, currentPrice, symbolCandles, btcCandles);
+        _logger.LogInformation(
+            "MarketPhase for {Symbol}: {MarketPhase}. SelectedStrategy: {SuggestedStrategy}. Score: {Score}. Confidence: {Confidence}. Reason: {Reason}",
+            _gridOptions.Symbol,
+            marketPhase.Phase,
+            marketPhase.SuggestedStrategy,
+            marketPhase.Score,
+            marketPhase.Confidence,
+            marketPhase.Reason);
+
+        var bigRedGuard = _bigRedCandleGuard.Evaluate(_gridOptions, symbolCandles, btcCandles);
+        if (bigRedGuard.IsActive)
+        {
+            _logger.LogWarning(
+                "NoTradeReason={NoTradeReason}. {Reason}. BlocksBuy={BlocksBuy}. CancelGridBuyOrders={CancelGridBuyOrders}.",
+                bigRedGuard.NoTradeReason,
+                bigRedGuard.Reason,
+                bigRedGuard.BlocksBuy,
+                bigRedGuard.CancelGridBuyOrders);
+
+            if (bigRedGuard.CancelGridBuyOrders)
+            {
+                await CancelActiveGridBuyOrdersAsync(activeGridOrders, cancellationToken);
+                activeGridOrders = await _repository.GetActiveOrdersAsync(_gridOptions.Symbol, cancellationToken);
+            }
+
+            await _repository.SaveBotStateAsync(state, cancellationToken);
+            return state;
+        }
+
+        if (!_strategy.CanCreateGridIntents(_gridOptions, marketPhase, currentPrice, bigRedGuard.IsActive))
+        {
+            _logger.LogInformation(
+                "NoTradeReason={NoTradeReason}. Grid orders skipped for {Symbol}. MarketPhase={MarketPhase}, SuggestedStrategy={SuggestedStrategy}, Reason={Reason}",
+                marketPhase.Phase is MarketPhase.Unknown ? NoTradeReason.UnknownMarketPhase :
+                    marketPhase.Phase is MarketPhase.HighVolatility ? NoTradeReason.HighVolatility :
+                    marketPhase.Phase is MarketPhase.Dump ? NoTradeReason.DumpDetected :
+                    NoTradeReason.ScoreTooLow,
+                _gridOptions.Symbol,
+                marketPhase.Phase,
+                marketPhase.SuggestedStrategy,
+                marketPhase.Reason);
+            await _repository.SaveBotStateAsync(state, cancellationToken);
+            return state;
+        }
 
         if (_marketRegimeFilter.ShouldBlockNewOrders(_gridOptions, symbolCandles, btcCandles))
         {
@@ -2608,6 +2660,19 @@ public sealed class GridBotWorker : BackgroundService
         CancellationToken cancellationToken)
     {
         foreach (var order in activeOrders.Where(order => order.IsActive && order.Side == TradeSide.Buy && IsSignalOrder(order)).ToArray())
+        {
+            await CancelManagedOrderAsync(order, cancellationToken);
+        }
+    }
+
+    private async Task CancelActiveGridBuyOrdersAsync(
+        IReadOnlyCollection<GridOrder> activeOrders,
+        CancellationToken cancellationToken)
+    {
+        foreach (var order in activeOrders.Where(order =>
+                     order.IsActive &&
+                     order.Side == TradeSide.Buy &&
+                     string.IsNullOrWhiteSpace(order.ParentOrderLinkId)).ToArray())
         {
             await CancelManagedOrderAsync(order, cancellationToken);
         }

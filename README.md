@@ -7,8 +7,11 @@
 ```text
 MarketDataService
   -> SignalEngine
+  -> PriceActionPhaseDetector
+  -> BigRedCandleGuard
   -> MarketRegimeDetector
   -> StrategyRouter
+  -> ExpectedProfitFilter
   -> CapitalAllocator
   -> RiskManager
   -> ExecutionEngine
@@ -30,7 +33,29 @@ The existing worker still owns execution and Bybit synchronization. The new arch
 - `trend`: trend-following strategy.
 - `pause`: no new trades.
 
-`signal` is an engine, not a standalone trading strategy by default. `hybrid` uses manual strategy intent/weights, while `auto` uses `MarketRegimeDetector` and score thresholds. Auto-select is a risk-adjusted selector; it does not guarantee profit.
+`signal` is an engine, not a standalone trading strategy by default. `hybrid` uses manual strategy intent/weights, while `auto` uses price-action phase detection, market regime, and score thresholds. Auto-select is a risk-adjusted selector; it does not guarantee profit.
+
+## How Auto/Hybrid Mode Works
+
+The bot is not supposed to trade every loop. It first classifies the market phase, then picks the strategy. If the market is dangerous, `Pause` is a valid protective state.
+
+- `Uptrend` -> `TrendFollowing`
+- `PullbackInUptrend` -> `BTD`
+- `RangeBound` -> `Grid`
+- `BreakoutUp` -> `Breakout`
+- `BreakoutDown`, `Dump`, `HighVolatility`, `Unknown` -> `Pause`
+
+`BigRedCandleGuard` is the fast protection path. If a 15m/30m-style candle or recent candle sequence drops beyond the configured thresholds, new buy intents are blocked and grid buys can be cancelled. Dump can switch to `Pause` without waiting for the normal strategy cooldown.
+
+`ExpectedProfitFilter` blocks trades whose expected move is too small after round-trip fees, slippage, and the configured minimum profit buffer. This is important for tight grids where fee drag can turn frequent trades into negative net PnL.
+
+SQLite initializes tables for:
+
+- `market_phases`
+- `strategy_switches`
+- `no_trade_reasons`
+- `strategy_performance`
+- `strategy_daily_performance`
 
 ## Safe Defaults
 
@@ -68,7 +93,25 @@ STRATEGY_MIN_SCORE=65
 STRATEGY_MIN_CONFIDENCE=0.6
 STRATEGY_SWITCH_COOLDOWN_MINUTES=30
 ALLOW_HIGH_VOLATILITY_TRADING=false
+PHASE_CONFIRMATION_CANDLES=2
+MIN_PHASE_CONFIDENCE=0.6
+MIN_STRATEGY_SCORE=65
+BIG_RED_CANDLE_PERCENT=4.0
+DUMP_MOVE_PERCENT=6.0
+CANCEL_GRID_BUYS_ON_DUMP=true
+MIN_EXPECTED_PROFIT_PERCENT=0.7
 ```
+
+## Why Bot Did Not Trade
+
+Look for these log fields/reasons:
+
+- `MarketPhase`: current price-action phase.
+- `SelectedStrategy`: strategy chosen by router.
+- `StrategyScore`: score used for routing.
+- `NoTradeReason`: e.g. `DumpDetected`, `HighVolatility`, `ExpectedProfitTooLow`, `BtcRiskOff`, `PriceOutsideRange`.
+- `RiskDecision`: whether risk manager rejected the trade.
+- `ExpectedProfit`: expected move versus fee/slippage threshold.
 
 ## Local Commands
 

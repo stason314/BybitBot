@@ -29,4 +29,46 @@ public sealed class BreakoutStrategy : ITradingStrategy
         return confirmed.Length >= Math.Max(1, confirmationCandles) &&
                confirmed.All(candle => candle.Close > breakoutLevel);
     }
+
+    public bool CanEnter(
+        GridOptions options,
+        MarketPhaseResult phase,
+        IReadOnlyCollection<Candle> candles,
+        decimal currentPrice)
+    {
+        if (phase.Phase != MarketPhase.BreakoutUp)
+        {
+            return false;
+        }
+
+        var ordered = candles.OrderBy(candle => candle.OpenTime).ToArray();
+        if (ordered.Length < Math.Max(options.EmaSlow, options.VolumeSmaPeriod) + options.BreakoutConfirmationCandles)
+        {
+            return false;
+        }
+
+        var resistance = phase.KeyLevels.TryGetValue("resistance", out var phaseResistance)
+            ? phaseResistance
+            : ordered.TakeLast(30).Max(candle => candle.High);
+        var emaFast = MarketRegimeDetector.CalculateEma(ordered, options.EmaFast);
+        var emaSlow = MarketRegimeDetector.CalculateEma(ordered, options.EmaSlow);
+        var volumeSma = ordered.TakeLast(options.VolumeSmaPeriod).Average(candle => candle.Volume);
+        var volumeSpike = volumeSma > 0m && ordered[^1].Volume >= volumeSma * options.BreakoutVolumeMultiplier;
+        var distanceFromEma = Math.Min(PercentDistance(currentPrice, emaFast), PercentDistance(currentPrice, emaSlow));
+
+        return HasConfirmation(ordered, resistance, options.BreakoutConfirmationCandles) &&
+               volumeSpike &&
+               distanceFromEma <= options.BreakoutMaxDistanceFromEmaPercent;
+    }
+
+    public decimal CalculateStopLoss(GridOptions options, decimal breakoutLevel, decimal atr)
+    {
+        var atrStop = breakoutLevel - (atr * options.BreakoutAtrStopMultiplier);
+        return decimal.Round(Math.Min(breakoutLevel, atrStop), 8, MidpointRounding.ToZero);
+    }
+
+    private static decimal PercentDistance(decimal value, decimal reference)
+    {
+        return reference <= 0m ? 0m : Math.Abs(value - reference) / reference * 100m;
+    }
 }
