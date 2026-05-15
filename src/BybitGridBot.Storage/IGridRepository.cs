@@ -35,6 +35,8 @@ public interface IGridRepository
     Task UpsertOrderAsync(GridOrder order, CancellationToken cancellationToken);
     Task<bool> SpotExecutionExistsAsync(string execId, CancellationToken cancellationToken);
     Task<bool> AddSpotExecutionAsync(SpotExecutionRecord execution, CancellationToken cancellationToken);
+    Task<StrategyCooldownRecord?> GetActiveStrategyCooldownAsync(string symbol, string strategyType, DateTimeOffset now, CancellationToken cancellationToken);
+    Task UpsertStrategyCooldownAsync(StrategyCooldownRecord cooldown, CancellationToken cancellationToken);
     Task<int> ResetSpotStatisticsAsync(CancellationToken cancellationToken);
     Task<NoTradeReasonRecord?> GetLatestNoTradeReasonAsync(string symbol, CancellationToken cancellationToken);
     Task<IReadOnlyList<NoTradeReasonRecord>> GetNoTradeReasonsAsync(string symbol, int limit, CancellationToken cancellationToken);

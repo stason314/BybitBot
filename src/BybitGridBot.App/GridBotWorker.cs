@@ -1737,6 +1737,7 @@ public sealed class GridBotWorker : BackgroundService
 
             var fillFee = CalculateFee(order.Price * remainingQuantity);
             var pnlDelta = ApplyFillDelta(state, order.Side, remainingQuantity, order.Price, fillFee);
+            await RecordStrategyCooldownAfterLossAsync(order, pnlDelta, cancellationToken);
 
             order.FilledQuantity = order.Quantity;
             order.AverageFillPrice = order.Price;
@@ -1893,6 +1894,11 @@ public sealed class GridBotWorker : BackgroundService
             if (result.IsApplied && result.BecameFilled && result.Order is not null)
             {
                 appliedFilledOrders.Add(result.Order);
+            }
+
+            if (result.IsApplied && result.Order is not null)
+            {
+                await RecordStrategyCooldownAfterLossAsync(result.Order, result.PnlDelta, cancellationToken);
             }
         }
 
@@ -3539,6 +3545,12 @@ public sealed class GridBotWorker : BackgroundService
 
         foreach (var intent in decision.OrderIntents)
         {
+            if (intent.Side == TradeSide.Buy &&
+                await IsStrategyInCooldownAsync(intent, cancellationToken))
+            {
+                continue;
+            }
+
             if (!await ShouldAllowOrderByExpectedProfitAsync(intent, cancellationToken))
             {
                 continue;
@@ -3548,6 +3560,50 @@ public sealed class GridBotWorker : BackgroundService
         }
 
         return createdOrders;
+    }
+
+    private async Task<bool> IsStrategyInCooldownAsync(OrderIntent intent, CancellationToken cancellationToken)
+    {
+        var source = NormalizeOrderSource(intent.StrategySource, intent.ParentOrderLinkId);
+        var cooldown = await _repository.GetActiveStrategyCooldownAsync(_gridOptions.Symbol, source, DateTimeOffset.UtcNow, cancellationToken);
+        if (cooldown is null)
+        {
+            return false;
+        }
+
+        var reason = $"{source} buy skipped: strategy cooldown is active until {cooldown.CooldownUntil:O}. Reason: {cooldown.Reason}";
+        _logger.LogInformation(reason);
+        await RecordNoTradeReasonAsync(ResolveCurrentProfile(), NoTradeReason.StrategyCooldown, reason, cancellationToken);
+        return true;
+    }
+
+    private async Task RecordStrategyCooldownAfterLossAsync(
+        GridOrder order,
+        decimal pnlDelta,
+        CancellationToken cancellationToken)
+    {
+        if (order.Side != TradeSide.Sell || pnlDelta >= 0m || _gridOptions.StrategySwitchCooldownMinutes <= 0)
+        {
+            return;
+        }
+
+        var source = NormalizeOrderSource(order.StrategySource, order.ParentOrderLinkId);
+        var now = DateTimeOffset.UtcNow;
+        var cooldown = new StrategyCooldownRecord
+        {
+            Symbol = order.Symbol,
+            StrategyType = source,
+            Reason = $"Loss sell {order.OrderLinkId} realized {pnlDelta}.",
+            CooldownUntil = now.AddMinutes(_gridOptions.StrategySwitchCooldownMinutes),
+            CreatedAt = now
+        };
+        await _repository.UpsertStrategyCooldownAsync(cooldown, cancellationToken);
+        _logger.LogWarning(
+            "Strategy cooldown recorded. Symbol: {Symbol}, Strategy: {Strategy}, Until: {CooldownUntil}, PnL: {PnlDelta}",
+            cooldown.Symbol,
+            cooldown.StrategyType,
+            cooldown.CooldownUntil,
+            pnlDelta);
     }
 
     private async Task<bool> ShouldAllowOrderByExpectedProfitAsync(

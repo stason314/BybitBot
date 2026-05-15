@@ -269,6 +269,15 @@ public sealed class SqliteGridRepository : IGridRepository
                 created_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS strategy_cooldowns (
+                symbol TEXT NOT NULL,
+                strategy_type TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                cooldown_until TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY(symbol, strategy_type)
+            );
+
             CREATE TABLE IF NOT EXISTS strategy_performance (
                 performance_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 symbol TEXT NOT NULL,
@@ -1241,6 +1250,66 @@ public sealed class SqliteGridRepository : IGridRepository
         return await command.ExecuteNonQueryAsync(cancellationToken) > 0;
     }
 
+    public async Task<StrategyCooldownRecord?> GetActiveStrategyCooldownAsync(
+        string symbol,
+        string strategyType,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        const string sql = """
+            SELECT symbol, strategy_type, reason, cooldown_until, created_at
+            FROM strategy_cooldowns
+            WHERE symbol = $symbol
+              AND strategy_type = $strategy_type
+              AND cooldown_until > $now
+            LIMIT 1;
+            """;
+
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        command.Parameters.AddWithValue("$symbol", symbol);
+        command.Parameters.AddWithValue("$strategy_type", strategyType);
+        command.Parameters.AddWithValue("$now", now.ToString("O", CultureInfo.InvariantCulture));
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return null;
+        }
+
+        return new StrategyCooldownRecord
+        {
+            Symbol = reader.GetString(0),
+            StrategyType = reader.GetString(1),
+            Reason = reader.GetString(2),
+            CooldownUntil = DateTimeOffset.Parse(reader.GetString(3), CultureInfo.InvariantCulture),
+            CreatedAt = DateTimeOffset.Parse(reader.GetString(4), CultureInfo.InvariantCulture)
+        };
+    }
+
+    public async Task UpsertStrategyCooldownAsync(StrategyCooldownRecord cooldown, CancellationToken cancellationToken)
+    {
+        const string sql = """
+            INSERT INTO strategy_cooldowns (symbol, strategy_type, reason, cooldown_until, created_at)
+            VALUES ($symbol, $strategy_type, $reason, $cooldown_until, $created_at)
+            ON CONFLICT(symbol, strategy_type) DO UPDATE SET
+                reason = excluded.reason,
+                cooldown_until = excluded.cooldown_until,
+                created_at = excluded.created_at;
+            """;
+
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        command.Parameters.AddWithValue("$symbol", cooldown.Symbol);
+        command.Parameters.AddWithValue("$strategy_type", cooldown.StrategyType);
+        command.Parameters.AddWithValue("$reason", cooldown.Reason);
+        command.Parameters.AddWithValue("$cooldown_until", cooldown.CooldownUntil.ToString("O", CultureInfo.InvariantCulture));
+        command.Parameters.AddWithValue("$created_at", cooldown.CreatedAt.ToString("O", CultureInfo.InvariantCulture));
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
     public async Task<int> ResetSpotStatisticsAsync(CancellationToken cancellationToken)
     {
         var statements = new[]
@@ -1250,6 +1319,7 @@ public sealed class SqliteGridRepository : IGridRepository
             "DELETE FROM bot_state WHERE symbol NOT LIKE 'futures:%';",
             "DELETE FROM no_trade_reasons;",
             "DELETE FROM spot_executions;",
+            "DELETE FROM strategy_cooldowns;",
             "DELETE FROM strategy_performance;",
             "DELETE FROM strategy_daily_performance;",
             "DELETE FROM strategy_decisions;",
