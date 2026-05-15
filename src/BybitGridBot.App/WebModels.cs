@@ -333,11 +333,17 @@ public sealed class FuturesDashboardResponse
 
     public required FuturesPositionView Position { get; init; }
 
+    public required FuturesPaperAccountView PaperAccount { get; init; }
+
+    public required FuturesPnlStatsView PnlStats { get; init; }
+
     public required FuturesAutoRecommendationView AutoRecommendation { get; init; }
 
     public required IReadOnlyList<string> StrategyActions { get; init; }
 
     public required IReadOnlyList<FuturesOrderView> ActiveOrders { get; init; }
+
+    public required IReadOnlyList<FuturesOrderView> RecentOrders { get; init; }
 
     public required IReadOnlyList<FuturesRiskDecisionView> RiskDecisions { get; init; }
 
@@ -437,13 +443,71 @@ public sealed class FuturesOrderView
 
     public decimal FilledQuantity { get; init; }
 
+    public decimal AverageFillPrice { get; init; }
+
+    public decimal RealizedPnl { get; init; }
+
+    public decimal FeePaid { get; init; }
+
     public required string Status { get; init; }
 
     public bool ReduceOnly { get; init; }
 
     public int PositionIdx { get; init; }
 
+    public DateTimeOffset CreatedAt { get; init; }
+
     public DateTimeOffset UpdatedAt { get; init; }
+
+    public DateTimeOffset? FilledAt { get; init; }
+}
+
+public sealed class FuturesPaperAccountView
+{
+    public decimal InitialEquityUsdt { get; init; }
+
+    public decimal CashUsdt { get; init; }
+
+    public decimal CurrentEquityUsdt { get; init; }
+
+    public decimal PeakEquityUsdt { get; init; }
+
+    public decimal CurrentDrawdownUsdt { get; init; }
+
+    public decimal CurrentDrawdownPercent { get; init; }
+
+    public decimal TotalRealizedPnl { get; init; }
+
+    public decimal DailyRealizedPnl { get; init; }
+
+    public decimal UnrealizedPnl { get; init; }
+
+    public decimal ReturnPercent { get; init; }
+}
+
+public sealed class FuturesPnlStatsView
+{
+    public decimal GrossProfit { get; init; }
+
+    public decimal GrossLoss { get; init; }
+
+    public decimal NetPnl { get; init; }
+
+    public decimal FeesPaid { get; init; }
+
+    public int FilledTradesCount { get; init; }
+
+    public int WinningTradesCount { get; init; }
+
+    public int LosingTradesCount { get; init; }
+
+    public decimal WinRate { get; init; }
+
+    public decimal ProfitFactor { get; init; }
+
+    public decimal AverageWin { get; init; }
+
+    public decimal AverageLoss { get; init; }
 }
 
 public sealed class FuturesRiskDecisionView

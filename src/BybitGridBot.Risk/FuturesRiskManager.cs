@@ -29,8 +29,9 @@ public sealed class FuturesRiskManager
 
         var maxDrawdownUsdt = ResolveMaxDrawdownUsdt(context);
         if (context.Intent.IsPositionIncreasing &&
-            maxDrawdownUsdt > 0m &&
-            context.TotalRealizedPnl <= -maxDrawdownUsdt)
+            ((maxDrawdownUsdt > 0m && context.CurrentDrawdownUsdt >= maxDrawdownUsdt) ||
+             (context.RiskOptions.MaxDrawdownEquityPercent > 0m &&
+              context.CurrentDrawdownPercent >= context.RiskOptions.MaxDrawdownEquityPercent)))
         {
             return Block("FUTURES_MAX_DRAWDOWN_EQUITY_PERCENT limit reached. Increasing futures position is blocked.", RiskSeverity.Critical, RiskSuggestedAction.PauseBot);
         }
@@ -171,6 +172,10 @@ public sealed class FuturesRiskEvaluationContext
     public decimal TotalRealizedPnl { get; init; }
 
     public decimal AccountEquityUsdt { get; init; }
+
+    public decimal CurrentDrawdownUsdt { get; init; }
+
+    public decimal CurrentDrawdownPercent { get; init; }
 
     public int OpenPositionCount { get; init; }
 }

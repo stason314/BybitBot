@@ -60,7 +60,7 @@ Current scope:
 - `FuturesReconciliationService` syncs Bybit open orders, recent order history, recent managed execution fills from `/v5/execution/list`, and current position before each testnet strategy decision; locally active managed orders missing from Bybit are marked cancelled after a per-order history check
 - Bybit futures client methods are present for `/v5/position/set-leverage`, `/v5/position/switch-isolated`, `/v5/position/switch-mode`, and `/v5/position/trading-stop`
 - futures accounting is separated from spot accounting through `FuturesAccounting` and `FuturesPositionSnapshot`
-- futures paper simulation is separated through `FuturesPaperSimulator`: leverage, margin, realized/unrealized PnL, fees, funding cost, and liquidation are simulated under a futures-only state key without touching spot paper state
+- futures paper simulation is separated through `FuturesPaperSimulator`: leverage, margin, realized/unrealized PnL, fees, funding cost, liquidation, paper equity, peak equity, and drawdown are simulated under a futures-only state key without touching spot paper state
 - futures risk checks are separated through `FuturesRiskManager`: max notional, max margin, max leverage, liquidation buffer, stop-loss requirement, absolute/equity-based daily loss, equity-based drawdown, max open positions, emergency pause, and funding cost
 - SQLite migrates futures metadata onto `grid_orders`, legacy `orders`, and `bot_state`: `position_side`, `reduce_only`, `position_idx`, `leverage`, `margin_mode`, `entry_price`, `mark_price`, `liquidation_price`, `unrealized_pnl`
 - `GridBotWorker` hard-fails non-spot runtime categories when the spot worker is registered. Futures profile category is controlled by `FUTURES_CATEGORY`.
@@ -79,6 +79,7 @@ FUTURES_USER_STREAM_ENABLED=true
 LEVERAGE=2
 FUTURES_MVP_MAX_LEVERAGE=2
 FUTURES_MIN_SIZE_ORDER_COUNT=3
+FUTURES_PAPER_INITIAL_EQUITY_USDT=1000
 MARGIN_MODE=isolated
 POSITION_MODE=oneway
 MAX_NOTIONAL_USDT=100

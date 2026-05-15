@@ -42,6 +42,12 @@ public sealed class BotState
 
     public decimal DailyRealizedPnl { get; set; }
 
+    public decimal PeakEquityUsdt { get; set; }
+
+    public decimal CurrentDrawdownUsdt { get; set; }
+
+    public decimal CurrentDrawdownPercent { get; set; }
+
     public DateOnly DailyPnlDate { get; set; } = DateOnly.FromDateTime(DateTime.UtcNow);
 
     public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
