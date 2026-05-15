@@ -1,0 +1,195 @@
+using BybitGridBot.Bybit;
+using BybitGridBot.Domain;
+using BybitGridBot.Storage;
+using BybitGridBot.Strategy;
+using Microsoft.Extensions.Options;
+
+namespace BybitGridBot.App;
+
+public sealed class FuturesExecutionService
+{
+    private readonly AppOptions _appOptions;
+    private readonly IBybitRestClient _bybitRestClient;
+    private readonly FuturesPaperSimulator _paperSimulator;
+    private readonly IGridRepository _repository;
+
+    public FuturesExecutionService(
+        IOptions<AppOptions> appOptions,
+        IBybitRestClient bybitRestClient,
+        FuturesPaperSimulator paperSimulator,
+        IGridRepository repository)
+    {
+        _appOptions = appOptions.Value;
+        _bybitRestClient = bybitRestClient;
+        _paperSimulator = paperSimulator;
+        _repository = repository;
+    }
+
+    public async Task<FuturesExecutionResult> ExecuteAsync(
+        FuturesExecutionRequest request,
+        CancellationToken cancellationToken)
+    {
+        var bybitRequest = CreateBybitRequest(request.Settings, request.Intent);
+        var now = DateTimeOffset.UtcNow;
+        var order = new GridOrder
+        {
+            OrderLinkId = request.Intent.OrderLinkId,
+            Symbol = request.Settings.Symbol,
+            Category = request.Settings.Category,
+            Side = Enum.Parse<TradeSide>(bybitRequest.Side, true),
+            Price = request.Intent.Price,
+            Quantity = request.Intent.Quantity,
+            Status = _appOptions.TradingMode == TradingMode.Paper ? OrderStatus.Filled : OrderStatus.New,
+            TradingMode = _appOptions.TradingMode,
+            PositionSide = ResolvePositionSide(request.Intent.Action),
+            ReduceOnly = bybitRequest.ReduceOnly == true,
+            PositionIdx = bybitRequest.PositionIdx ?? 0,
+            Leverage = request.Intent.Leverage,
+            MarginMode = request.Settings.MarginMode.ToString(),
+            EntryPrice = request.Position.EntryPrice,
+            MarkPrice = request.MarkPrice,
+            LiquidationPrice = request.Intent.LiquidationPrice ?? request.Position.LiquidationPrice,
+            CreatedAt = now,
+            UpdatedAt = now,
+            FilledAt = _appOptions.TradingMode == TradingMode.Paper ? now : null
+        };
+
+        if (_appOptions.TradingMode == TradingMode.Paper)
+        {
+            var simulation = _paperSimulator.Simulate(new FuturesPaperSimulationRequest
+            {
+                Position = request.Position,
+                Intent = request.Intent,
+                MarkPrice = request.MarkPrice,
+                FeeRatePercent = request.FeeRatePercent,
+                FundingCostUsdt = request.Intent.ExpectedFundingCostUsdt
+            });
+
+            order.FilledQuantity = request.Intent.Quantity;
+            order.AverageFillPrice = request.Intent.Price;
+            order.FeePaid = simulation.FeePaid;
+            order.RealizedPnl = simulation.Position.RealizedPnl - request.Position.RealizedPnl;
+            order.EntryPrice = simulation.Position.EntryPrice;
+            order.MarkPrice = simulation.Position.MarkPrice;
+            order.LiquidationPrice = simulation.Position.LiquidationPrice;
+            order.UnrealizedPnl = simulation.Position.UnrealizedPnl;
+            await _repository.UpsertOrderAsync(order, cancellationToken);
+
+            return new FuturesExecutionResult
+            {
+                Order = order,
+                Position = simulation.Position,
+                IsPaper = true,
+                IsLiquidated = simulation.IsLiquidated,
+                Message = simulation.Reason
+            };
+        }
+
+        if (_appOptions.TradingMode == TradingMode.Mainnet)
+        {
+            throw new InvalidOperationException("Live futures mainnet execution is blocked. Use testnet first.");
+        }
+
+        var ack = await _bybitRestClient.CreateOrderAsync(bybitRequest, cancellationToken);
+        order.BybitOrderId = ack.OrderId;
+        await _repository.UpsertOrderAsync(order, cancellationToken);
+
+        return new FuturesExecutionResult
+        {
+            Order = order,
+            Position = request.Position,
+            IsPaper = false,
+            Message = "Futures testnet order submitted."
+        };
+    }
+
+    public BybitCreateOrderRequest CreateBybitRequest(FuturesBotSettings settings, FuturesTradeIntent intent)
+    {
+        ValidateMvpExecution(settings, intent);
+        var request = FuturesOrderRequestFactory.Create(intent);
+        if (intent.IsReduceOnly && request.ReduceOnly != true)
+        {
+            throw new InvalidOperationException("Futures close intents must be sent with reduceOnly=true.");
+        }
+
+        if (intent.IsPositionIncreasing && request.ReduceOnly == true)
+        {
+            throw new InvalidOperationException("Futures open intents must not be reduce-only.");
+        }
+
+        if (request.PositionIdx != 0)
+        {
+            throw new InvalidOperationException("Futures MVP requires positionIdx=0 for one-way mode.");
+        }
+
+        return request;
+    }
+
+    private static void ValidateMvpExecution(FuturesBotSettings settings, FuturesTradeIntent intent)
+    {
+        if (!string.Equals(settings.Category, "linear", StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(intent.Category, "linear", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException("Futures MVP supports only category=linear.");
+        }
+
+        if (settings.MarginMode != FuturesMarginMode.Isolated)
+        {
+            throw new InvalidOperationException("Futures MVP supports only isolated margin.");
+        }
+
+        if (settings.PositionMode != FuturesPositionMode.OneWay)
+        {
+            throw new InvalidOperationException("Futures MVP supports only one-way mode.");
+        }
+
+        if (settings.Direction != FuturesDirection.LongOnly)
+        {
+            throw new InvalidOperationException("Futures MVP supports only long-only direction.");
+        }
+
+        if (intent.PositionIdx != 0)
+        {
+            throw new InvalidOperationException("Futures MVP requires positionIdx=0.");
+        }
+
+        if (intent.Action is FuturesTradeAction.OpenShort or FuturesTradeAction.CloseShort)
+        {
+            throw new InvalidOperationException("Futures MVP does not allow short actions.");
+        }
+    }
+
+    private static string ResolvePositionSide(FuturesTradeAction action) =>
+        action switch
+        {
+            FuturesTradeAction.OpenLong or FuturesTradeAction.CloseLong or FuturesTradeAction.ReduceOnlyClose => "Long",
+            FuturesTradeAction.OpenShort or FuturesTradeAction.CloseShort => "Short",
+            _ => "None"
+        };
+}
+
+public sealed class FuturesExecutionRequest
+{
+    public FuturesBotSettings Settings { get; init; } = new();
+
+    public FuturesTradeIntent Intent { get; init; } = new();
+
+    public FuturesPositionSnapshot Position { get; init; } = new();
+
+    public decimal MarkPrice { get; init; }
+
+    public decimal FeeRatePercent { get; init; } = 0.06m;
+}
+
+public sealed class FuturesExecutionResult
+{
+    public GridOrder Order { get; init; } = new();
+
+    public FuturesPositionSnapshot Position { get; init; } = new();
+
+    public bool IsPaper { get; init; }
+
+    public bool IsLiquidated { get; init; }
+
+    public string Message { get; init; } = string.Empty;
+}

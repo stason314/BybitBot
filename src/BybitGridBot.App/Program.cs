@@ -4,6 +4,7 @@ using BybitGridBot.Notifications;
 using BybitGridBot.Risk;
 using BybitGridBot.Storage;
 using BybitGridBot.Strategy;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Options;
 using Serilog;
 using Serilog.Events;
@@ -57,6 +58,7 @@ builder.Services.AddSingleton<AutoStrategySelector>();
 builder.Services.AddSingleton<FuturesAutoConfigRecommender>();
 builder.Services.AddSingleton<FuturesAccounting>();
 builder.Services.AddSingleton<FuturesPaperSimulator>();
+builder.Services.AddSingleton<FuturesExecutionService>();
 builder.Services.AddSingleton<StrategyRouter>();
 builder.Services.AddSingleton<CapitalAllocator>();
 builder.Services.AddSingleton<ConflictResolver>();
@@ -84,7 +86,12 @@ builder.Services.AddSingleton<IGridRepository>(serviceProvider =>
     return new SqliteGridRepository(options.SqlitePath, logger);
 });
 
-builder.Services.AddHostedService<GridBotWorker>();
+if (ShouldRunSpotWorker(builder.Configuration))
+{
+    builder.Services.AddHostedService<GridBotWorker>();
+}
+
+builder.Services.AddHostedService<FuturesBotWorker>();
 
 var app = builder.Build();
 
@@ -165,4 +172,15 @@ static LogEventLevel ParseLevel(string? value)
     return Enum.TryParse<LogEventLevel>(value, true, out var level)
         ? level
         : LogEventLevel.Information;
+}
+
+static bool ShouldRunSpotWorker(IConfiguration configuration)
+{
+    var category = configuration["CATEGORY"] ?? "spot";
+    if (string.Equals(category, "spot", StringComparison.OrdinalIgnoreCase))
+    {
+        return true;
+    }
+
+    return !bool.TryParse(configuration["FUTURES_ENABLED"], out var futuresEnabled) || !futuresEnabled;
 }

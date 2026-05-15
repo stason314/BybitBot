@@ -8,7 +8,7 @@ public sealed class FuturesOptions
     [ConfigurationKeyName("FUTURES_ENABLED")]
     public bool Enabled { get; init; } = false;
 
-    [ConfigurationKeyName("CATEGORY")]
+    [ConfigurationKeyName("FUTURES_CATEGORY")]
     public string Category { get; init; } = "linear";
 
     [ConfigurationKeyName("LEVERAGE")]

@@ -27,17 +27,20 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
     ];
 
     private readonly IBybitRestClient _bybitRestClient;
+    private readonly AppOptions _appOptions;
     private readonly FuturesOptions _futuresOptions;
     private readonly FuturesAutoConfigRecommender _recommender;
     private readonly IGridRepository _repository;
 
     public FuturesDashboardService(
         IBybitRestClient bybitRestClient,
+        IOptions<AppOptions> appOptions,
         IOptions<FuturesOptions> futuresOptions,
         FuturesAutoConfigRecommender recommender,
         IGridRepository repository)
     {
         _bybitRestClient = bybitRestClient;
+        _appOptions = appOptions.Value;
         _futuresOptions = futuresOptions.Value;
         _recommender = recommender;
         _repository = repository;
@@ -56,15 +59,23 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         string? positionError = null;
         try
         {
-            var bybitPosition = await _bybitRestClient.GetPositionAsync(selectedSettings.Category, selectedSettings.Symbol, cancellationToken);
-            if (bybitPosition is not null)
+            if (_appOptions.TradingMode == TradingMode.Paper)
             {
-                position = MapPosition(selectedSettings, bybitPosition);
+                position = await GetPaperPositionAsync(selectedSettings, cancellationToken) ?? position;
+            }
+            else
+            {
+                var bybitPosition = await _bybitRestClient.GetPositionAsync(selectedSettings.Category, selectedSettings.Symbol, cancellationToken);
+                if (bybitPosition is not null)
+                {
+                    position = MapPosition(selectedSettings, bybitPosition);
+                }
             }
         }
         catch (Exception exception)
         {
             positionError = exception.Message;
+            position = await GetPaperPositionAsync(selectedSettings, cancellationToken) ?? position;
         }
 
         var candles = await GetAnalysisCandlesAsync(selectedSettings, cancellationToken);
@@ -138,7 +149,9 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         var hasOpenPosition = false;
         try
         {
-            hasOpenPosition = (await _bybitRestClient.GetPositionAsync(settings.Category, settings.Symbol, cancellationToken))?.Size > 0m;
+            hasOpenPosition = _appOptions.TradingMode == TradingMode.Paper
+                ? ((await GetPaperPositionAsync(settings, cancellationToken))?.Size ?? 0m) > 0m
+                : ((await _bybitRestClient.GetPositionAsync(settings.Category, settings.Symbol, cancellationToken))?.Size ?? 0m) > 0m;
         }
         catch
         {
@@ -702,6 +715,39 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         PositionIdx = position.PositionIdx,
         UpdatedAt = position.UpdatedAt
     };
+
+    private async Task<FuturesPositionView?> GetPaperPositionAsync(
+        FuturesBotSettings settings,
+        CancellationToken cancellationToken)
+    {
+        var state = await _repository.GetBotStateAsync(FuturesStateKeys.ForSymbol(settings.Symbol), cancellationToken);
+        return state is null ? null : MapPosition(settings, state);
+    }
+
+    private static FuturesPositionView MapPosition(FuturesBotSettings settings, BotState state)
+    {
+        var markPrice = state.MarkPrice > 0m ? state.MarkPrice : state.LastObservedPrice ?? 0m;
+        var positionValue = state.BaseAssetQuantity * markPrice;
+        var marginUsed = state.Leverage > 0m ? positionValue / state.Leverage : 0m;
+        return new FuturesPositionView
+        {
+            Symbol = settings.Symbol,
+            Category = settings.Category,
+            Side = state.BaseAssetQuantity <= 0m ? "None" : state.PositionSide ?? "Buy",
+            Size = state.BaseAssetQuantity,
+            EntryPrice = state.EntryPrice > 0m ? state.EntryPrice : state.AverageEntryPrice,
+            MarkPrice = markPrice,
+            LiquidationPrice = state.LiquidationPrice,
+            PositionValueUsdt = positionValue,
+            MarginUsedUsdt = marginUsed,
+            Leverage = state.Leverage,
+            UnrealizedPnl = state.UnrealizedPnl,
+            RealizedPnl = state.TotalRealizedPnl,
+            Funding = 0m,
+            PositionIdx = state.PositionIdx,
+            UpdatedAt = state.UpdatedAt
+        };
+    }
 
     private static FuturesPositionView BuildEmptyPosition(FuturesBotSettings settings) => new()
     {
