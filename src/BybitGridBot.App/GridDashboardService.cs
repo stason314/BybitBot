@@ -104,6 +104,7 @@ public sealed class GridDashboardService : IGridDashboardService
             .Where(order => order.Status is nameof(OrderStatus.New) or nameof(OrderStatus.PartiallyFilled))
             .ToArray();
         var performanceByStrategy = BuildStrategyPerformance(allOrders, orderSourceLabels);
+        var dailyPerformanceByStrategy = BuildDailyStrategyPerformance(allOrders, orderSourceLabels);
         var lastNoTradeReason = await _repository.GetLatestNoTradeReasonAsync(gridOptions.Symbol, cancellationToken);
 
         decimal? currentPrice = state.LastObservedPrice;
@@ -190,6 +191,7 @@ public sealed class GridDashboardService : IGridDashboardService
             Orders = orders,
             ActiveOrders = activeOrders,
             PerformanceByStrategy = performanceByStrategy,
+            DailyPerformanceByStrategy = dailyPerformanceByStrategy,
             GridLevels = levels.Select(level => level.Price).ToArray(),
             GeneratedAt = generatedAt
         };
@@ -1225,6 +1227,22 @@ public sealed class GridDashboardService : IGridDashboardService
       </div>
     </section>
 
+    <section class="panel section" style="margin-bottom:20px;">
+      <div class="section-head">
+        <h2>Daily Strategy Performance</h2>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Date</th><th>Strategy</th><th>Net PnL</th><th>Fees</th><th>Fills</th><th>Closed</th><th>Win Rate</th>
+            </tr>
+          </thead>
+          <tbody id="dailyStrategyPerformanceRows"></tbody>
+        </table>
+      </div>
+    </section>
+
     <section class="panel section regime-card">
       <div>
         <div class="label">Market Regime</div>
@@ -1576,6 +1594,7 @@ public sealed class GridDashboardService : IGridDashboardService
         gridLevels: latestDashboardData.gridLevels,
         activeOrders: latestDashboardData.activeOrders,
         performanceByStrategy: latestDashboardData.performanceByStrategy,
+        dailyPerformanceByStrategy: latestDashboardData.dailyPerformanceByStrategy,
         recentOrdersWindowHours: hours,
         recentOrders,
         generatedAt: latestDashboardData.generatedAt
@@ -1795,6 +1814,19 @@ public sealed class GridDashboardService : IGridDashboardService
               <td>${formatNumber(item.closedTradesCount)}</td>
               <td>${formatNumber(item.winRate)}%</td>
               <td>${formatNumber(item.activeOrdersCount)}</td>
+            </tr>`).join('');
+
+      byId('dailyStrategyPerformanceRows').innerHTML = (data.dailyPerformanceByStrategy || []).length === 0
+        ? `<tr><td colspan="7">No daily strategy performance yet.</td></tr>`
+        : data.dailyPerformanceByStrategy.map(item => `
+            <tr>
+              <td>${escapeHtml(item.performanceDate)}</td>
+              <td>${escapeHtml(item.strategy)}</td>
+              <td>${formatPnl(item.netPnl)}</td>
+              <td>${formatNumber(item.feesPaid)}</td>
+              <td>${formatNumber(item.filledTradesCount)}</td>
+              <td>${formatNumber(item.closedTradesCount)}</td>
+              <td>${formatNumber(item.winRate)}%</td>
             </tr>`).join('');
 
       byId('gridLevels').innerHTML = data.gridLevels.map(level => `<div class="grid-chip">${formatNumber(level)}</div>`).join('');
@@ -2204,6 +2236,43 @@ public sealed class GridDashboardService : IGridDashboardService
         return result;
     }
 
+    private static IReadOnlyList<DashboardDailyStrategyPerformanceItem> BuildDailyStrategyPerformance(
+        IReadOnlyCollection<GridOrder> orders,
+        IReadOnlyDictionary<string, string> sourceLabels)
+    {
+        return orders
+            .Where(order => order.FilledQuantity > 0m)
+            .GroupBy(order => new
+            {
+                Date = (order.FilledAt ?? order.UpdatedAt).UtcDateTime.Date,
+                Strategy = NormalizePerformanceStrategy(sourceLabels.TryGetValue(order.OrderLinkId, out var source)
+                    ? source
+                    : order.StrategySource)
+            })
+            .OrderByDescending(group => group.Key.Date)
+            .ThenBy(group => PerformanceStrategySortIndex(group.Key.Strategy))
+            .ThenBy(group => group.Key.Strategy, StringComparer.OrdinalIgnoreCase)
+            .Take(42)
+            .Select(group =>
+            {
+                var filledOrders = group.ToArray();
+                var closedOrders = filledOrders.Where(order => order.Side == TradeSide.Sell).ToArray();
+                var wins = closedOrders.Count(order => order.RealizedPnl > 0m);
+
+                return new DashboardDailyStrategyPerformanceItem
+                {
+                    PerformanceDate = group.Key.Date.ToString("yyyy-MM-dd"),
+                    Strategy = group.Key.Strategy,
+                    FeesPaid = filledOrders.Sum(order => order.FeePaid),
+                    NetPnl = filledOrders.Sum(order => order.RealizedPnl),
+                    FilledTradesCount = filledOrders.Length,
+                    ClosedTradesCount = closedOrders.Length,
+                    WinRate = closedOrders.Length == 0 ? 0m : wins * 100m / closedOrders.Length
+                };
+            })
+            .ToArray();
+    }
+
     private static DashboardStrategyPerformanceItem MapStrategyPerformance(
         string strategy,
         IReadOnlyCollection<GridOrder> orders)
@@ -2278,6 +2347,20 @@ public sealed class GridDashboardService : IGridDashboardService
         }
 
         return normalized;
+    }
+
+    private static int PerformanceStrategySortIndex(string strategy)
+    {
+        return strategy switch
+        {
+            "Grid" => 0,
+            "BTD" => 1,
+            "DCA" => 2,
+            "Signal" => 3,
+            "ReduceOnly" => 4,
+            "Hybrid" => 5,
+            _ => 100
+        };
     }
 
     private static OrderSourceContext ResolveOrderSourceContext(TradingStrategyType strategyType)
