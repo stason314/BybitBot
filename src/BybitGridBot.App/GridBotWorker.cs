@@ -31,6 +31,7 @@ public sealed class GridBotWorker : BackgroundService
     private readonly BtdStrategy _btdStrategy;
     private readonly BybitOptions _bybitOptions;
     private readonly DcaStrategy _dcaStrategy;
+    private readonly FuturesOptions _futuresOptions;
     private readonly GridOptions _defaultGridOptions;
     private readonly IBybitRestClient _bybitRestClient;
     private readonly ILogger<GridBotWorker> _logger;
@@ -66,6 +67,7 @@ public sealed class GridBotWorker : BackgroundService
     public GridBotWorker(
         IOptions<AppOptions> appOptions,
         IOptions<BybitOptions> bybitOptions,
+        IOptions<FuturesOptions> futuresOptions,
         IOptions<GridOptions> gridOptions,
         IOptions<RiskOptions> riskOptions,
         AutoStrategySelector autoStrategySelector,
@@ -86,6 +88,7 @@ public sealed class GridBotWorker : BackgroundService
         _appOptions = appOptions.Value;
         _autoStrategySelector = autoStrategySelector;
         _bybitOptions = bybitOptions.Value;
+        _futuresOptions = futuresOptions.Value;
         _defaultGridOptions = gridOptions.Value;
         _gridOptions = _defaultGridOptions;
         _riskOptions = riskOptions.Value;
@@ -3803,6 +3806,8 @@ public sealed class GridBotWorker : BackgroundService
 
     private void ValidateStartupConfiguration()
     {
+        TradingCategoryGuard.ValidateSpotWorkerCategory(_gridOptions.Category, _futuresOptions.Enabled);
+
         if (_gridOptions.LowerPrice >= _gridOptions.UpperPrice)
         {
             throw new InvalidOperationException("GRID_LOWER_PRICE must be lower than GRID_UPPER_PRICE.");

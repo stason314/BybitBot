@@ -51,6 +51,7 @@ Current scope:
 - futures paper simulation is separated through `FuturesPaperSimulator`: leverage, margin, realized/unrealized PnL, fees, funding cost, and liquidation are simulated without touching spot paper state
 - futures risk checks are separated through `FuturesRiskManager`: max notional, max margin, max leverage, liquidation buffer, stop-loss requirement, daily loss block for increasing positions, and funding cost
 - SQLite migrates futures metadata onto `grid_orders`, legacy `orders`, and `bot_state`: `position_side`, `reduce_only`, `position_idx`, `leverage`, `margin_mode`, `entry_price`, `mark_price`, `liquidation_price`, `unrealized_pnl`
+- `GridBotWorker` hard-fails non-spot runtime categories. `CATEGORY=linear` belongs to the dedicated futures context and must not run through spot/grid execution.
 
 Live futures order placement is not enabled in this first step.
 
