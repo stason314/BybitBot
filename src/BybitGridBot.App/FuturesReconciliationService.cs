@@ -297,9 +297,13 @@ public sealed class FuturesReconciliationService
         UpdatedAt = position.UpdatedAt
     };
 
-    public static void ApplyPositionToState(BotState state, FuturesPositionSnapshot position)
+    public static void ApplyPositionToState(
+        BotState state,
+        FuturesPositionSnapshot position,
+        bool updatePaperEquity = false)
     {
         var previousTotalRealizedPnl = state.TotalRealizedPnl;
+        var realizedDelta = position.RealizedPnl - previousTotalRealizedPnl;
         state.PositionSide = position.Side;
         state.BaseAssetQuantity = position.Size;
         state.AverageEntryPrice = position.EntryPrice;
@@ -309,12 +313,25 @@ public sealed class FuturesReconciliationService
         state.LiquidationPrice = position.LiquidationPrice;
         state.UnrealizedPnl = position.UnrealizedPnl;
         state.TotalRealizedPnl = position.RealizedPnl;
-        state.DailyRealizedPnl += position.RealizedPnl - previousTotalRealizedPnl;
+        state.DailyRealizedPnl += realizedDelta;
         state.PositionIdx = position.PositionIdx;
         state.Leverage = position.Leverage;
         state.MarginMode = "Isolated";
         state.ReduceOnly = false;
         state.IsInitialized = true;
+        if (updatePaperEquity)
+        {
+            state.QuoteAssetBalance += realizedDelta;
+            var currentEquity = state.QuoteAssetBalance + state.UnrealizedPnl;
+            state.PeakEquityUsdt = state.PeakEquityUsdt <= 0m
+                ? currentEquity
+                : decimal.Max(state.PeakEquityUsdt, currentEquity);
+            state.CurrentDrawdownUsdt = decimal.Max(0m, state.PeakEquityUsdt - currentEquity);
+            state.CurrentDrawdownPercent = state.PeakEquityUsdt > 0m
+                ? state.CurrentDrawdownUsdt / state.PeakEquityUsdt * 100m
+                : 0m;
+        }
+
         state.UpdatedAt = DateTimeOffset.UtcNow;
     }
 

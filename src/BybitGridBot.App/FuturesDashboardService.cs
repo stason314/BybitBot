@@ -84,8 +84,10 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             position = await GetPaperPositionAsync(selectedSettings, cancellationToken) ?? position;
         }
 
+        var state = await _repository.GetBotStateAsync(FuturesStateKeys.ForSymbol(selectedSettings.Symbol), cancellationToken);
         var candles = await GetAnalysisCandlesAsync(selectedSettings, cancellationToken);
         var recommendation = _recommender.Recommend(selectedSettings, candles, position.Size > 0m);
+        var recentOrders = await _repository.GetFuturesOrdersAsync(selectedSettings.Symbol, cancellationToken);
         var activeOrders = await _repository.GetActiveFuturesOrdersAsync(selectedSettings.Symbol, cancellationToken);
         var riskDecisions = await _repository.GetFuturesRiskDecisionsAsync(selectedSettings.Symbol, 20, cancellationToken);
         var lastPreflight = riskDecisions.FirstOrDefault(decision => string.Equals(decision.Source, "Preflight", StringComparison.OrdinalIgnoreCase));
@@ -118,9 +120,12 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
                 .ToArray(),
             Settings = MapSettings(selectedSettings),
             Position = position,
+            PaperAccount = BuildPaperAccount(state, position, _futuresOptions.PaperInitialEquityUsdt),
+            PnlStats = BuildPnlStats(recentOrders),
             AutoRecommendation = MapAutoRecommendation(recommendation),
             StrategyActions = StrategyActions,
             ActiveOrders = activeOrders.Select(MapOrder).ToArray(),
+            RecentOrders = recentOrders.Select(MapOrder).ToArray(),
             RiskDecisions = riskDecisions.Select(MapRiskDecision).ToArray(),
             LastPreflightResult = lastPreflight is null ? null : MapRiskDecision(lastPreflight),
             TradingMode = _appOptions.TradingMode.ToString(),
@@ -504,6 +509,9 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
     .notice { padding: 12px; border-radius: 8px; background: rgba(177,54,34,.08); color: var(--danger); margin: 0 0 14px; }
     .actions-list { display: flex; gap: 8px; flex-wrap: wrap; }
     .chip { border-radius: 999px; padding: 8px 10px; background: rgba(47,127,143,0.12); color: var(--accent-2); font-size: 12px; font-weight: 700; }
+    .copy-controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .hours-input { max-width: 88px; }
+    .compact-button { padding: 9px 11px; }
     @media (max-width: 980px) {
       .layout, form { grid-template-columns: 1fr; }
       .stats { grid-template-columns: repeat(2, minmax(0,1fr)); }
@@ -526,6 +534,21 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
     <div class="tabs" id="profileTabs"></div>
 
     <section class="stats" id="positionStats"></section>
+
+    <section class="panel" style="margin-bottom:18px;">
+      <div class="actions" style="justify-content:space-between;">
+        <h2 style="margin:0;">Paper Account & PnL</h2>
+        <div class="copy-controls">
+          <input class="hours-input" id="copyHistoryHours" type="number" min="0.1" step="0.5" value="1" aria-label="History hours" />
+          <span class="subtle">hours</span>
+          <button type="button" class="compact-button" id="copyLastHistory">Copy Last</button>
+          <button type="button" class="compact-button" id="copyDiagnostics">Copy Diagnostics</button>
+        </div>
+      </div>
+      <div class="stats" id="paperAccountStats" style="margin-bottom:0;"></div>
+      <div class="stats" id="pnlStats" style="margin-top:12px;margin-bottom:0;"></div>
+      <div class="status" id="copyStatus"></div>
+    </section>
 
     <section class="panel" style="margin-bottom:18px;">
       <div class="actions" style="justify-content:space-between;">
@@ -597,6 +620,16 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         <table>
           <thead><tr><th>Link</th><th>Action</th><th>Side</th><th>Qty</th><th>Filled</th><th>Price</th><th>Status</th><th>Reduce</th><th>Updated</th></tr></thead>
           <tbody id="activeOrderRows"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel" style="margin-top:18px;">
+      <h2>Recent Futures Orders</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Time</th><th>Link</th><th>Action</th><th>Side</th><th>Qty</th><th>Filled</th><th>Avg</th><th>Status</th><th>Realized PnL</th><th>Fee</th></tr></thead>
+          <tbody id="recentOrderRows"></tbody>
         </table>
       </div>
     </section>
@@ -732,6 +765,28 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
       ].map(([label, value]) => `<div class="stat"><div class="label">${label}</div><div class="value">${value}</div></div>`).join('');
       byId('positionStats').insertAdjacentHTML('beforebegin', error);
     };
+    const renderPaperAccount = (account, stats) => {
+      byId('paperAccountStats').innerHTML = [
+        ['Initial Equity', formatNumber(account.initialEquityUsdt)],
+        ['Cash', formatNumber(account.cashUsdt)],
+        ['Current Equity', formatPnl(account.currentEquityUsdt)],
+        ['Return %', formatPnl(account.returnPercent)],
+        ['Peak Equity', formatNumber(account.peakEquityUsdt)],
+        ['Drawdown', formatPnl(-Math.abs(Number(account.currentDrawdownUsdt || 0)))],
+        ['Drawdown %', formatPnl(-Math.abs(Number(account.currentDrawdownPercent || 0)))],
+        ['Daily Realized', formatPnl(account.dailyRealizedPnl)]
+      ].map(([label, value]) => `<div class="stat"><div class="label">${label}</div><div class="value">${value}</div></div>`).join('');
+      byId('pnlStats').innerHTML = [
+        ['Gross Profit', formatPnl(stats.grossProfit)],
+        ['Gross Loss', formatPnl(stats.grossLoss)],
+        ['Net PnL', formatPnl(stats.netPnl)],
+        ['Fees', formatPnl(-Math.abs(Number(stats.feesPaid || 0)))],
+        ['Fills', formatNumber(stats.filledTradesCount)],
+        ['Win Rate %', formatNumber(stats.winRate)],
+        ['Profit Factor', formatNumber(stats.profitFactor)],
+        ['Avg Win / Loss', `${formatPnl(stats.averageWin)} / ${formatPnl(stats.averageLoss)}`]
+      ].map(([label, value]) => `<div class="stat"><div class="label">${label}</div><div class="value">${value}</div></div>`).join('');
+    };
     const renderRuntime = (data) => {
       const preflight = data.lastPreflightResult;
       byId('runtimeStatus').innerHTML = [
@@ -760,6 +815,103 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             <td>${order.reduceOnly ? 'yes' : 'no'}</td>
             <td>${formatDate(order.updatedAt)}</td>
           </tr>`).join('');
+    };
+    const renderRecentOrders = (orders) => {
+      byId('recentOrderRows').innerHTML = orders.length === 0
+        ? '<tr><td colspan="10">No futures order history yet.</td></tr>'
+        : orders.map(order => `
+          <tr>
+            <td>${formatDate(order.updatedAt)}</td>
+            <td>${escapeHtml(order.orderLinkId)}</td>
+            <td>${escapeHtml(order.action)}</td>
+            <td>${escapeHtml(order.side)}</td>
+            <td>${formatNumber(order.quantity)}</td>
+            <td>${formatNumber(order.filledQuantity)}</td>
+            <td>${formatNumber(order.averageFillPrice)}</td>
+            <td>${escapeHtml(order.status)}</td>
+            <td>${formatPnl(order.realizedPnl)}</td>
+            <td>${formatPnl(-Math.abs(Number(order.feePaid || 0)))}</td>
+          </tr>`).join('');
+    };
+    const recentOrdersForHours = (hours) => {
+      const cutoff = Date.now() - hours * 60 * 60 * 1000;
+      return (latest?.recentOrders || []).filter(order => new Date(order.updatedAt).getTime() >= cutoff);
+    };
+    const buildDiagnosticsSnapshot = (hours) => ({
+      schema: 'bybit-futures-bot-diagnostics/v1',
+      generatedAt: new Date().toISOString(),
+      windowHours: hours,
+      tradingMode: latest?.tradingMode,
+      futuresEnabled: latest?.futuresEnabled,
+      settings: latest?.settings,
+      paperAccount: latest?.paperAccount,
+      pnlStats: latest?.pnlStats,
+      position: latest?.position,
+      activeOrders: latest?.activeOrders || [],
+      recentOrders: recentOrdersForHours(hours),
+      riskDecisions: latest?.riskDecisions || [],
+      lastPreflightResult: latest?.lastPreflightResult,
+      autoRecommendation: latest?.autoRecommendation,
+      positionError: latest?.positionError,
+      generatedByServerAt: latest?.generatedAt
+    });
+    const ordersToCsv = (orders) => {
+      const rows = [
+        ['Time', 'Symbol', 'Action', 'Side', 'Price', 'Qty', 'Filled', 'Avg Fill', 'Status', 'Realized PnL', 'Fee', 'Order']
+      ];
+      for (const order of orders) {
+        rows.push([
+          order.updatedAt,
+          order.symbol,
+          order.action,
+          order.side,
+          order.price,
+          order.quantity,
+          order.filledQuantity,
+          order.averageFillPrice,
+          order.status,
+          order.realizedPnl,
+          order.feePaid,
+          order.orderLinkId
+        ]);
+      }
+      return rows.map(row => row.map(value => `"${String(value ?? '').replaceAll('"', '""')}"`).join(',')).join('\n');
+    };
+    const writeClipboard = async (text) => {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+        return;
+      }
+
+      const textarea = document.createElement('textarea');
+      textarea.value = text;
+      textarea.style.position = 'fixed';
+      textarea.style.left = '-9999px';
+      document.body.appendChild(textarea);
+      textarea.focus();
+      textarea.select();
+      try {
+        if (!document.execCommand('copy')) {
+          throw new Error('Browser refused clipboard copy.');
+        }
+      } finally {
+        textarea.remove();
+      }
+    };
+    const copyLastHistory = async () => {
+      const hours = Number(byId('copyHistoryHours').value);
+      const orders = recentOrdersForHours(Number.isFinite(hours) && hours > 0 ? hours : 1);
+      await writeClipboard(ordersToCsv(orders));
+      byId('copyStatus').className = 'status ok';
+      byId('copyStatus').textContent = `Copied ${orders.length} futures order(s).`;
+    };
+    const copyDiagnostics = async () => {
+      const hours = Number(byId('copyHistoryHours').value);
+      const resolvedHours = Number.isFinite(hours) && hours > 0 ? hours : 1;
+      const snapshot = buildDiagnosticsSnapshot(resolvedHours);
+      await writeClipboard(JSON.stringify(snapshot, null, 2));
+      byId('copyStatus').className = 'status ok';
+      byId('copyStatus').textContent = `Copied diagnostics snapshot for ${latest?.settings?.symbol || 'current profile'}.`;
     };
     const renderRiskDecisions = (decisions) => {
       byId('riskDecisionRows').innerHTML = decisions.length === 0
@@ -800,8 +952,10 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
       renderTabs(data.profiles);
       renderConfigs(data.configSummaries || []);
       renderPosition(data);
+      renderPaperAccount(data.paperAccount || {}, data.pnlStats || {});
       renderRuntime(data);
       renderOrders(data.activeOrders || []);
+      renderRecentOrders(data.recentOrders || []);
       renderRiskDecisions(data.riskDecisions || []);
       renderAutoRecommendation(data.autoRecommendation);
       byId('strategyActions').innerHTML = data.strategyActions.map(action => `<span class="chip">${escapeHtml(action)}</span>`).join('');
@@ -919,6 +1073,18 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
       byId('controlStatus').textContent = response.ok ? result.message : (result.errors?.join(' | ') || result.message);
       await load(true);
     });
+    byId('copyLastHistory').addEventListener('click', () => {
+      copyLastHistory().catch((error) => {
+        byId('copyStatus').className = 'status error';
+        byId('copyStatus').textContent = error.message;
+      });
+    });
+    byId('copyDiagnostics').addEventListener('click', () => {
+      copyDiagnostics().catch((error) => {
+        byId('copyStatus').className = 'status error';
+        byId('copyStatus').textContent = error.message;
+      });
+    });
     byId('settingsForm').addEventListener('submit', async (event) => {
       event.preventDefault();
       const payload = readPayload();
@@ -982,7 +1148,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         Leverage = position.Leverage,
         UnrealizedPnl = position.UnrealizedPnl,
         RealizedPnl = position.RealizedPnl,
-        Funding = 0m,
+        Funding = position.Funding,
         PositionIdx = position.PositionIdx,
         UpdatedAt = position.UpdatedAt
     };
@@ -997,11 +1163,82 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         Price = order.Price,
         Quantity = order.Quantity,
         FilledQuantity = order.FilledQuantity,
+        AverageFillPrice = order.AverageFillPrice,
+        RealizedPnl = order.RealizedPnl,
+        FeePaid = order.FeePaid,
         Status = order.Status.ToString(),
         ReduceOnly = order.ReduceOnly,
         PositionIdx = order.PositionIdx,
-        UpdatedAt = order.UpdatedAt
+        CreatedAt = order.CreatedAt,
+        UpdatedAt = order.UpdatedAt,
+        FilledAt = order.FilledAt
     };
+
+    private static FuturesPaperAccountView BuildPaperAccount(
+        BotState? state,
+        FuturesPositionView position,
+        decimal initialEquity)
+    {
+        var cash = state?.QuoteAssetBalance ?? initialEquity;
+        if (cash <= 0m)
+        {
+            cash = initialEquity;
+        }
+
+        var unrealized = state?.UnrealizedPnl ?? position.UnrealizedPnl;
+        var currentEquity = cash + unrealized;
+        var peakEquity = state is { PeakEquityUsdt: > 0m }
+            ? state.PeakEquityUsdt
+            : decimal.Max(initialEquity, currentEquity);
+        var drawdownUsdt = state is { CurrentDrawdownUsdt: > 0m }
+            ? state.CurrentDrawdownUsdt
+            : decimal.Max(0m, peakEquity - currentEquity);
+        var drawdownPercent = state is { CurrentDrawdownPercent: > 0m }
+            ? state.CurrentDrawdownPercent
+            : peakEquity > 0m ? drawdownUsdt / peakEquity * 100m : 0m;
+
+        return new FuturesPaperAccountView
+        {
+            InitialEquityUsdt = initialEquity,
+            CashUsdt = cash,
+            CurrentEquityUsdt = currentEquity,
+            PeakEquityUsdt = peakEquity,
+            CurrentDrawdownUsdt = drawdownUsdt,
+            CurrentDrawdownPercent = drawdownPercent,
+            TotalRealizedPnl = state?.TotalRealizedPnl ?? position.RealizedPnl,
+            DailyRealizedPnl = state?.DailyRealizedPnl ?? 0m,
+            UnrealizedPnl = unrealized,
+            ReturnPercent = initialEquity > 0m ? (currentEquity - initialEquity) / initialEquity * 100m : 0m
+        };
+    }
+
+    private static FuturesPnlStatsView BuildPnlStats(IReadOnlyCollection<FuturesOrderRecord> orders)
+    {
+        var filled = orders
+            .Where(order => order.Status == OrderStatus.Filled || order.FilledQuantity > 0m)
+            .ToArray();
+        var realized = filled.Select(order => order.RealizedPnl).ToArray();
+        var wins = realized.Where(pnl => pnl > 0m).ToArray();
+        var losses = realized.Where(pnl => pnl < 0m).ToArray();
+        var grossProfit = wins.Sum();
+        var grossLoss = losses.Sum();
+        var fees = filled.Sum(order => order.FeePaid);
+
+        return new FuturesPnlStatsView
+        {
+            GrossProfit = grossProfit,
+            GrossLoss = grossLoss,
+            NetPnl = realized.Sum(),
+            FeesPaid = fees,
+            FilledTradesCount = filled.Length,
+            WinningTradesCount = wins.Length,
+            LosingTradesCount = losses.Length,
+            WinRate = filled.Length == 0 ? 0m : (decimal)wins.Length / filled.Length * 100m,
+            ProfitFactor = grossLoss == 0m ? (grossProfit > 0m ? grossProfit : 0m) : grossProfit / Math.Abs(grossLoss),
+            AverageWin = wins.Length == 0 ? 0m : wins.Average(),
+            AverageLoss = losses.Length == 0 ? 0m : losses.Average()
+        };
+    }
 
     private static FuturesRiskDecisionView MapRiskDecision(FuturesRiskDecisionRecord decision) => new()
     {
@@ -1043,7 +1280,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         Leverage = position.Leverage,
         UnrealizedPnl = position.UnrealizedPnl,
         RealizedPnl = position.RealizedPnl,
-        Funding = 0m,
+        Funding = position.Funding,
         PositionIdx = position.PositionIdx,
         UpdatedAt = position.UpdatedAt
     };

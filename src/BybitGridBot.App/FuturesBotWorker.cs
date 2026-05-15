@@ -166,7 +166,7 @@ public sealed class FuturesBotWorker : BackgroundService
             return;
         }
 
-        var accountRisk = await ResolveAccountRiskSnapshotAsync(settings, position, cancellationToken);
+        var accountRisk = await ResolveAccountRiskSnapshotAsync(settings, state, position, cancellationToken);
         var openPositionCount = await CountOpenFuturesPositionsAsync(profiles, cancellationToken);
         var decision = _strategyRouter.Decide(new FuturesStrategyContext
         {
@@ -188,6 +188,8 @@ public sealed class FuturesBotWorker : BackgroundService
                 DailyRealizedPnl = state.DailyRealizedPnl,
                 TotalRealizedPnl = state.TotalRealizedPnl,
                 AccountEquityUsdt = accountRisk.AccountEquityUsdt,
+                CurrentDrawdownUsdt = state.CurrentDrawdownUsdt,
+                CurrentDrawdownPercent = state.CurrentDrawdownPercent,
                 OpenPositionCount = openPositionCount
             });
             await _repository.AddFuturesRiskDecisionAsync(new FuturesRiskDecisionRecord
@@ -227,7 +229,7 @@ public sealed class FuturesBotWorker : BackgroundService
             }, cancellationToken);
 
             position = result.Position;
-            FuturesReconciliationService.ApplyPositionToState(state, position);
+            FuturesReconciliationService.ApplyPositionToState(state, position, _appOptions.TradingMode == TradingMode.Paper);
             await _repository.SaveBotStateAsync(state, cancellationToken);
             await _repository.UpsertFuturesPositionAsync(position, _appOptions.TradingMode, cancellationToken);
             _logger.LogInformation(
@@ -240,7 +242,7 @@ public sealed class FuturesBotWorker : BackgroundService
 
         if (decision.TradeIntents.Count == 0)
         {
-            FuturesReconciliationService.ApplyPositionToState(state, position);
+            FuturesReconciliationService.ApplyPositionToState(state, position, _appOptions.TradingMode == TradingMode.Paper);
             await _repository.SaveBotStateAsync(state, cancellationToken);
             await _repository.UpsertFuturesPositionAsync(position, _appOptions.TradingMode, cancellationToken);
         }
@@ -265,13 +267,15 @@ public sealed class FuturesBotWorker : BackgroundService
 
     private async Task<FuturesAccountRiskSnapshot> ResolveAccountRiskSnapshotAsync(
         FuturesBotSettings settings,
+        BotState state,
         FuturesPositionSnapshot position,
         CancellationToken cancellationToken)
     {
         var configuredAvailableMargin = decimal.Max(0m, settings.MaxMarginUsdt - position.MarginUsedUsdt);
         if (_appOptions.TradingMode == TradingMode.Paper)
         {
-            return new FuturesAccountRiskSnapshot(configuredAvailableMargin, settings.MaxMarginUsdt);
+            var currentEquity = state.QuoteAssetBalance + state.UnrealizedPnl;
+            return new FuturesAccountRiskSnapshot(configuredAvailableMargin, currentEquity > 0m ? currentEquity : _futuresOptions.PaperInitialEquityUsdt);
         }
 
         var wallet = await _bybitRestClient.GetWalletBalanceAsync(cancellationToken, "USDT");
@@ -311,6 +315,12 @@ public sealed class FuturesBotWorker : BackgroundService
             ResetDailyPnlIfNeeded(state);
             state.TradingMode = _appOptions.TradingMode;
             state.LastObservedPrice = currentPrice;
+            if (_appOptions.TradingMode == TradingMode.Paper && state.QuoteAssetBalance <= 0m)
+            {
+                state.QuoteAssetBalance = _futuresOptions.PaperInitialEquityUsdt + state.TotalRealizedPnl;
+                state.PeakEquityUsdt = decimal.Max(state.PeakEquityUsdt, state.QuoteAssetBalance + state.UnrealizedPnl);
+            }
+
             return state;
         }
 
@@ -322,6 +332,8 @@ public sealed class FuturesBotWorker : BackgroundService
             PositionSide = "None",
             Leverage = settings.Leverage,
             MarginMode = settings.MarginMode.ToString(),
+            QuoteAssetBalance = _appOptions.TradingMode == TradingMode.Paper ? _futuresOptions.PaperInitialEquityUsdt : 0m,
+            PeakEquityUsdt = _appOptions.TradingMode == TradingMode.Paper ? _futuresOptions.PaperInitialEquityUsdt : 0m,
             UpdatedAt = DateTimeOffset.UtcNow
         };
         await _repository.SaveBotStateAsync(state, cancellationToken);

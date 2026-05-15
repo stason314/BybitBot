@@ -32,7 +32,7 @@ public sealed class FuturesRiskManagerTests
         var decision = new FuturesRiskManager().Evaluate(Context(
             riskOptions: Options(maxDrawdownEquityPercent: 5m),
             accountEquityUsdt: 1000m,
-            totalRealizedPnl: -51m));
+            currentDrawdownPercent: 5.1m));
 
         Assert.False(decision.IsAllowed);
         Assert.Contains("FUTURES_MAX_DRAWDOWN_EQUITY_PERCENT", decision.Reason, StringComparison.Ordinal);
@@ -153,6 +153,8 @@ public sealed class FuturesRiskManagerTests
         decimal dailyRealizedPnl = 0m,
         decimal totalRealizedPnl = 0m,
         decimal accountEquityUsdt = 1000m,
+        decimal currentDrawdownUsdt = 0m,
+        decimal currentDrawdownPercent = 0m,
         int openPositionCount = 0) => new()
     {
         RiskOptions = riskOptions ?? Options(),
@@ -170,6 +172,8 @@ public sealed class FuturesRiskManagerTests
         DailyRealizedPnl = dailyRealizedPnl,
         TotalRealizedPnl = totalRealizedPnl,
         AccountEquityUsdt = accountEquityUsdt,
+        CurrentDrawdownUsdt = currentDrawdownUsdt,
+        CurrentDrawdownPercent = currentDrawdownPercent,
         OpenPositionCount = openPositionCount
     };
 

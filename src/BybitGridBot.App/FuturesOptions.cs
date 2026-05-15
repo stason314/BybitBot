@@ -32,6 +32,10 @@ public sealed class FuturesOptions
     [Range(0, 1000)]
     public int MinSizeOrderCount { get; init; } = 3;
 
+    [ConfigurationKeyName("FUTURES_PAPER_INITIAL_EQUITY_USDT")]
+    [Range(typeof(decimal), "0.00000001", "999999999")]
+    public decimal PaperInitialEquityUsdt { get; init; } = 1000m;
+
     [ConfigurationKeyName("MARGIN_MODE")]
     public string MarginMode { get; init; } = "isolated";
 
