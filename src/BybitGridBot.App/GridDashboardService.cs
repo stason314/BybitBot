@@ -1712,6 +1712,60 @@ public sealed class GridDashboardService : IGridDashboardService
         };
       }
     };
+    const expectedPerformanceStrategies = ['Grid', 'BTD', 'DCA', 'Signal', 'ReduceOnly', 'Hybrid'];
+    const inferSourceFromParent = (parentOrderLinkId, fallback) => {
+      switch (parentOrderLinkId) {
+        case 'dca-entry': return 'DCA';
+        case 'btd-entry': return 'BTD';
+        case 'signal-entry':
+        case 'signal-exit': return 'Signal';
+        case 'reduce-only-exit': return 'ReduceOnly';
+        default: return fallback || 'Grid';
+      }
+    };
+    const buildPerformanceSanitySnapshot = (data) => {
+      const orders = data.orders || [];
+      const sourceCounts = orders.reduce((result, order) => {
+        const source = order.source || 'Unknown';
+        result[source] = (result[source] || 0) + 1;
+        return result;
+      }, {});
+      const suspiciousOrders = orders
+        .filter(order => {
+          const inferred = inferSourceFromParent(order.parentOrderLinkId, order.source);
+          return !order.source || inferred !== order.source;
+        })
+        .map(order => ({
+          orderLinkId: order.orderLinkId,
+          parentOrderLinkId: order.parentOrderLinkId,
+          source: order.source,
+          inferredSource: inferSourceFromParent(order.parentOrderLinkId, order.source),
+          side: order.side,
+          status: order.status,
+          filledQuantity: order.filledQuantity,
+          realizedPnl: order.realizedPnl
+        }));
+      const presentStrategies = new Set((data.performanceByStrategy || []).map(item => item.strategy));
+      return {
+        expectedStrategies: expectedPerformanceStrategies,
+        sourceCounts,
+        missingPerformanceRows: expectedPerformanceStrategies.filter(strategy => !presentStrategies.has(strategy)),
+        suspiciousOrders,
+        hasSuspiciousOrders: suspiciousOrders.length > 0
+      };
+    };
+    const buildDailyPerformanceCsv = (rows) => [
+      ['Date', 'Strategy', 'Net PnL', 'Fees', 'Fills', 'Closed', 'Win Rate'],
+      ...(rows || []).map(item => [
+        item.performanceDate,
+        item.strategy,
+        item.netPnl,
+        item.feesPaid,
+        item.filledTradesCount,
+        item.closedTradesCount,
+        item.winRate
+      ])
+    ].map(row => row.map(csvEscape).join(',')).join('\n');
     const buildDiagnosticsSnapshot = (hours) => {
       if (!latestDashboardData) {
         return '';
@@ -1738,7 +1792,8 @@ public sealed class GridDashboardService : IGridDashboardService
           'auto-recommendation',
           'risk-limits',
           'active-orders',
-          'recent-order-history'
+          'recent-order-history',
+          'performance-source-sanity'
         ],
         formSettings,
         parsedFormStrategyConfig: parseStrategyConfigSnapshot(formSettings.strategyConfigJson),
@@ -1757,6 +1812,8 @@ public sealed class GridDashboardService : IGridDashboardService
         noTradeReasonHistory: latestDashboardData.noTradeReasonHistory,
         performanceByStrategy: latestDashboardData.performanceByStrategy,
         dailyPerformanceByStrategy: latestDashboardData.dailyPerformanceByStrategy,
+        performanceSanity: buildPerformanceSanitySnapshot(latestDashboardData),
+        dailyPerformanceCsv: buildDailyPerformanceCsv(latestDashboardData.dailyPerformanceByStrategy),
         recentOrdersWindowHours: hours,
         recentOrders,
         generatedAt: latestDashboardData.generatedAt
