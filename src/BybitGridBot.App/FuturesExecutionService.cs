@@ -184,6 +184,11 @@ public sealed class FuturesExecutionService
         {
             throw new InvalidOperationException("Futures MVP does not allow short actions.");
         }
+
+        if (settings.Leverage > maxLeverage || intent.Leverage > maxLeverage)
+        {
+            throw new InvalidOperationException("Futures leverage exceeds MVP cap.");
+        }
     }
 
     private static void ValidateInstrumentRules(FuturesTradeIntent intent, FuturesInstrumentRules instrument)
@@ -331,7 +336,3 @@ public sealed class FuturesExecutionResult
 
     public string Message { get; init; } = string.Empty;
 }
-        if (settings.Leverage > maxLeverage || intent.Leverage > maxLeverage)
-        {
-            throw new InvalidOperationException("Futures leverage exceeds MVP cap.");
-        }
