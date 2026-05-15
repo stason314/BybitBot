@@ -2063,6 +2063,12 @@ public sealed class GridDashboardService : IGridDashboardService
         : data.state.aggressiveModeDisabledUntil
           ? `off until ${formatDate(data.state.aggressiveModeDisabledUntil)}`
           : 'off';
+      const aggressiveCooldownText = data.state.aggressiveModeDisabledUntil
+        ? formatDate(data.state.aggressiveModeDisabledUntil)
+        : '—';
+      const aggressiveLastLossText = data.state.aggressiveModeLastLossAt
+        ? formatDate(data.state.aggressiveModeLastLossAt)
+        : '—';
       byId('stats').innerHTML = [
         ['Current Price', formatNumber(data.state.currentPrice)],
         ['Total Realized PnL', formatSigned(data.state.totalRealizedPnl)],
@@ -2075,7 +2081,10 @@ public sealed class GridDashboardService : IGridDashboardService
         ['Profit %', `${formatNumber(data.state.profitProtectionCurrentProfitPercent)}%`],
         ['Peak Profit %', `${formatNumber(data.state.profitProtectionPeakProfitPercent)}%`],
         ['Trailing Stop', formatNumber(data.state.profitProtectionTrailingStopPrice)],
-        ['Aggressive Mode', aggressiveModeText]
+        ['Aggressive Mode', aggressiveModeText],
+        ['Aggressive Cooldown', aggressiveCooldownText],
+        ['Aggressive Last Loss', aggressiveLastLossText],
+        ['Aggressive Reason', data.state.aggressiveModeDisabledReason || '—']
       ].map(([label, value]) => `<div class="stat"><div class="label">${label}</div><div class="value">${value}</div></div>`).join('');
 
       const noTradeReason = data.lastNoTradeReason;
