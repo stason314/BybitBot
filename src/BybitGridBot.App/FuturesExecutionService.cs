@@ -11,18 +11,21 @@ public sealed class FuturesExecutionService
     private readonly AppOptions _appOptions;
     private readonly IBybitRestClient _bybitRestClient;
     private readonly FuturesOptions _futuresOptions;
+    private readonly FuturesMainnetChecklistOptions _mainnetChecklistOptions;
     private readonly FuturesPaperSimulator _paperSimulator;
     private readonly IGridRepository _repository;
 
     public FuturesExecutionService(
         IOptions<AppOptions> appOptions,
         IOptions<FuturesOptions> futuresOptions,
+        IOptions<FuturesMainnetChecklistOptions> mainnetChecklistOptions,
         IBybitRestClient bybitRestClient,
         FuturesPaperSimulator paperSimulator,
         IGridRepository repository)
     {
         _appOptions = appOptions.Value;
         _futuresOptions = futuresOptions.Value;
+        _mainnetChecklistOptions = mainnetChecklistOptions.Value;
         _bybitRestClient = bybitRestClient;
         _paperSimulator = paperSimulator;
         _repository = repository;
@@ -107,11 +110,6 @@ public sealed class FuturesExecutionService
             };
         }
 
-        if (_appOptions.TradingMode == TradingMode.Mainnet)
-        {
-            throw new InvalidOperationException("Live futures mainnet execution is blocked. Use testnet first.");
-        }
-
         var ack = await _bybitRestClient.CreateOrderAsync(bybitRequest, cancellationToken);
         order.BybitOrderId = ack.OrderId;
         await _repository.UpsertOrderAsync(order, cancellationToken);
@@ -122,7 +120,9 @@ public sealed class FuturesExecutionService
             Order = order,
             Position = request.Position,
             IsPaper = false,
-            Message = "Futures testnet order submitted."
+            Message = _appOptions.TradingMode == TradingMode.Mainnet
+                ? "Futures mainnet order submitted."
+                : "Futures testnet order submitted."
         };
     }
 
@@ -230,6 +230,15 @@ public sealed class FuturesExecutionService
         if (_appOptions.TradingMode == TradingMode.Mainnet && !_futuresOptions.MainnetEnabled)
         {
             throw new InvalidOperationException("Futures mainnet is blocked. Set FUTURES_MAINNET_ENABLED=true only after the mainnet checklist is complete.");
+        }
+
+        if (_appOptions.TradingMode == TradingMode.Mainnet)
+        {
+            var missing = _mainnetChecklistOptions.MissingItems();
+            if (missing.Count > 0)
+            {
+                throw new InvalidOperationException($"Futures mainnet checklist is incomplete: {string.Join(", ", missing)}.");
+            }
         }
 
         if (_appOptions.TradingMode == TradingMode.Testnet && !_futuresOptions.TestnetEnabled)

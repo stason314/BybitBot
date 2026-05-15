@@ -853,6 +853,31 @@ public sealed class SqliteGridRepository : IGridRepository
         return await command.ExecuteScalarAsync(cancellationToken) is not null;
     }
 
+    public async Task<IReadOnlyList<FuturesFillRecord>> GetFuturesFillsAsync(string symbol, int limit, CancellationToken cancellationToken)
+    {
+        const string sql = """
+            SELECT fill_id, exec_id, order_link_id, symbol, action, side, exec_type, quantity, price, fee, realized_pnl, funding, created_at
+            FROM futures_fills
+            WHERE symbol = $symbol
+            ORDER BY created_at DESC
+            LIMIT $limit;
+            """;
+
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        command.Parameters.AddWithValue("$symbol", symbol);
+        command.Parameters.AddWithValue("$limit", Math.Max(1, limit));
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        var result = new List<FuturesFillRecord>();
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            result.Add(ReadFuturesFill(reader));
+        }
+
+        return result;
+    }
+
     public async Task<IReadOnlyList<FuturesRiskDecisionRecord>> GetFuturesRiskDecisionsAsync(string symbol, int limit, CancellationToken cancellationToken)
     {
         const string sql = """
@@ -1520,6 +1545,23 @@ public sealed class SqliteGridRepository : IGridRepository
         Severity = reader.GetString(7),
         SuggestedAction = reader.GetString(8),
         CreatedAt = DateTimeOffset.Parse(reader.GetString(9), CultureInfo.InvariantCulture)
+    };
+
+    private static FuturesFillRecord ReadFuturesFill(SqliteDataReader reader) => new()
+    {
+        FillId = reader.GetInt64(0),
+        ExecId = reader.IsDBNull(1) ? null : reader.GetString(1),
+        OrderLinkId = reader.GetString(2),
+        Symbol = reader.GetString(3),
+        Action = ParseEnum(reader.GetString(4), FuturesTradeAction.OpenLong),
+        Side = ParseEnum(reader.GetString(5), TradeSide.Buy),
+        ExecType = reader.GetString(6),
+        Quantity = ParseDecimal(reader.GetString(7)),
+        Price = ParseDecimal(reader.GetString(8)),
+        Fee = ParseDecimal(reader.GetString(9)),
+        RealizedPnl = ParseDecimal(reader.GetString(10)),
+        Funding = ParseDecimal(reader.GetString(11)),
+        CreatedAt = DateTimeOffset.Parse(reader.GetString(12), CultureInfo.InvariantCulture)
     };
 
     private static NoTradeReasonRecord ReadNoTradeReason(SqliteDataReader reader) => new()

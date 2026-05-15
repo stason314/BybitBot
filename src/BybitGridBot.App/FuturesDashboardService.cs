@@ -33,6 +33,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
     ];
 
     private readonly IBybitRestClient _bybitRestClient;
+    private readonly BybitUserStreamTelemetry _userStreamTelemetry;
     private readonly AppOptions _appOptions;
     private readonly FuturesExecutionService _executionService;
     private readonly FuturesOptions _futuresOptions;
@@ -43,6 +44,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
 
     public FuturesDashboardService(
         IBybitRestClient bybitRestClient,
+        BybitUserStreamTelemetry userStreamTelemetry,
         IOptions<AppOptions> appOptions,
         FuturesExecutionService executionService,
         IOptions<FuturesOptions> futuresOptions,
@@ -52,6 +54,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         IGridRepository repository)
     {
         _bybitRestClient = bybitRestClient;
+        _userStreamTelemetry = userStreamTelemetry;
         _appOptions = appOptions.Value;
         _executionService = executionService;
         _futuresOptions = futuresOptions.Value;
@@ -100,6 +103,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         var activeOrders = await _repository.GetActiveFuturesOrdersAsync(selectedSettings.Symbol, cancellationToken);
         var riskDecisions = await _repository.GetFuturesRiskDecisionsAsync(selectedSettings.Symbol, 20, cancellationToken);
         var lastPreflight = riskDecisions.FirstOrDefault(decision => string.Equals(decision.Source, "Preflight", StringComparison.OrdinalIgnoreCase));
+        var recentFills = await _repository.GetFuturesFillsAsync(selectedSettings.Symbol, 1000, cancellationToken);
 
         return new FuturesDashboardResponse
         {
@@ -130,7 +134,9 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             Settings = MapSettings(selectedSettings),
             Position = position,
             PaperAccount = BuildPaperAccount(state, position, _futuresOptions.PaperInitialEquityUsdt),
-            PnlStats = BuildPnlStats(recentOrders),
+            PnlStats = BuildPnlStats(recentFills),
+            TestnetSoak = BuildTestnetSoakStatus(position, activeOrders, recentOrders, recentFills, riskDecisions),
+            UserStreamStatus = BuildUserStreamStatus(),
             AutoRecommendation = MapAutoRecommendation(recommendation),
             StrategyActions = StrategyActions,
             ActiveOrders = activeOrders.Select(MapOrder).ToArray(),
@@ -846,6 +852,16 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
 
     <section class="panel" style="margin-bottom:18px;">
       <div class="actions" style="justify-content:space-between;">
+        <h2 style="margin:0;">Testnet Soak</h2>
+        <span class="subtle">Real-fill readiness and reconciliation signals</span>
+      </div>
+      <div class="stats" id="testnetSoakStats" style="margin-bottom:0;"></div>
+      <div class="subtle" id="testnetSoakRisk" style="margin-top:12px;"></div>
+      <div class="stats" id="userStreamStats" style="margin-bottom:0;margin-top:12px;"></div>
+    </section>
+
+    <section class="panel" style="margin-bottom:18px;">
+      <div class="actions" style="justify-content:space-between;">
         <h2 style="margin:0;">Auto Recommendation</h2>
         <div class="actions">
           <button type="button" id="refreshAutoRecommendation">Refresh</button>
@@ -1072,6 +1088,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         ['Gross Loss', formatPnl(stats.grossLoss)],
         ['Net PnL', formatPnl(stats.netPnl)],
         ['Fees', formatPnl(-Math.abs(Number(stats.feesPaid || 0)))],
+        ['Funding', formatPnl(stats.fundingPaid)],
         ['Fills', formatNumber(stats.filledTradesCount)],
         ['Win Rate %', formatNumber(stats.winRate)],
         ['Profit Factor', formatNumber(stats.profitFactor)],
@@ -1152,6 +1169,8 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
       settings: latest?.settings,
       paperAccount: latest?.paperAccount,
       pnlStats: latest?.pnlStats,
+      testnetSoak: latest?.testnetSoak,
+      userStreamStatus: latest?.userStreamStatus,
       position: latest?.position,
       activeOrders: latest?.activeOrders || [],
       recentOrders: recentOrdersForHours(hours),
@@ -1232,6 +1251,30 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             <td>${escapeHtml(decision.reason)}</td>
           </tr>`).join('');
     };
+    const renderTestnetSoak = (soak) => {
+      byId('testnetSoakStats').innerHTML = [
+        ['Mode', soak.isTestnetMode ? 'Testnet' : latest?.tradingMode],
+        ['Testnet Flag', soak.testnetEnabled ? 'enabled' : 'disabled'],
+        ['User Stream', soak.userStreamEnabled ? 'enabled' : 'disabled'],
+        ['Open Position', soak.hasOpenPosition ? 'yes' : 'no'],
+        ['Active Orders', formatNumber(soak.activeOrderCount)],
+        ['Recent Orders', formatNumber(soak.recentOrderCount)],
+        ['Fills', formatNumber(soak.fillCount)],
+        ['Risk Events', formatNumber(soak.riskDecisionCount)]
+      ].map(([label, value]) => `<div class="stat"><div class="label">${label}</div><div class="value">${escapeHtml(value)}</div></div>`).join('');
+      byId('testnetSoakRisk').textContent = `${soak.lastRiskSource || '-'}: ${soak.lastRiskReason || '-'}`;
+      const stream = latest?.userStreamStatus || {};
+      byId('userStreamStats').innerHTML = [
+        ['WS Enabled', stream.enabled ? 'yes' : 'no'],
+        ['WS Connected', stream.connected ? 'yes' : 'no'],
+        ['WS Stale', stream.stale ? 'yes' : 'no'],
+        ['Disconnects', formatNumber(stream.disconnectCount)],
+        ['Last Event', stream.lastEventAt ? formatDate(stream.lastEventAt) : '-'],
+        ['Event Type', stream.lastEventType || '-'],
+        ['Topic', stream.lastTopic || '-'],
+        ['Last Error', stream.lastError || '-']
+      ].map(([label, value]) => `<div class="stat"><div class="label">${label}</div><div class="value">${escapeHtml(value)}</div></div>`).join('');
+    };
     const renderAutoRecommendation = (recommendation) => {
       byId('autoRecommendationReason').textContent = recommendation.reason || '-';
       byId('autoRecommendationStats').innerHTML = [
@@ -1263,6 +1306,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
       renderOrders(data.activeOrders || []);
       renderRecentOrders(data.recentOrders || []);
       renderRiskDecisions(data.riskDecisions || []);
+      renderTestnetSoak(data.testnetSoak || {});
       renderAutoRecommendation(data.autoRecommendation);
       byId('strategyActions').innerHTML = data.strategyActions.map(action => `<span class="chip">${escapeHtml(action)}</span>`).join('');
       if (force || !dirty) {
@@ -1537,17 +1581,18 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         };
     }
 
-    private static FuturesPnlStatsView BuildPnlStats(IReadOnlyCollection<FuturesOrderRecord> orders)
+    private static FuturesPnlStatsView BuildPnlStats(IReadOnlyCollection<FuturesFillRecord> fills)
     {
-        var filled = orders
-            .Where(order => order.Status == OrderStatus.Filled || order.FilledQuantity > 0m)
+        var filled = fills
+            .Where(fill => fill.Quantity > 0m)
             .ToArray();
-        var realized = filled.Select(order => order.RealizedPnl).ToArray();
+        var realized = filled.Select(fill => fill.RealizedPnl).ToArray();
         var wins = realized.Where(pnl => pnl > 0m).ToArray();
         var losses = realized.Where(pnl => pnl < 0m).ToArray();
         var grossProfit = wins.Sum();
         var grossLoss = losses.Sum();
-        var fees = filled.Sum(order => order.FeePaid);
+        var fees = filled.Sum(fill => fill.Fee);
+        var funding = filled.Sum(fill => fill.Funding);
 
         return new FuturesPnlStatsView
         {
@@ -1555,6 +1600,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             GrossLoss = grossLoss,
             NetPnl = realized.Sum(),
             FeesPaid = fees,
+            FundingPaid = funding,
             FilledTradesCount = filled.Length,
             WinningTradesCount = wins.Length,
             LosingTradesCount = losses.Length,
@@ -1562,6 +1608,53 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             ProfitFactor = grossLoss == 0m ? (grossProfit > 0m ? grossProfit : 0m) : grossProfit / Math.Abs(grossLoss),
             AverageWin = wins.Length == 0 ? 0m : wins.Average(),
             AverageLoss = losses.Length == 0 ? 0m : losses.Average()
+        };
+    }
+
+    private FuturesSoakStatusView BuildTestnetSoakStatus(
+        FuturesPositionView position,
+        IReadOnlyCollection<FuturesOrderRecord> activeOrders,
+        IReadOnlyCollection<FuturesOrderRecord> recentOrders,
+        IReadOnlyCollection<FuturesFillRecord> fills,
+        IReadOnlyCollection<FuturesRiskDecisionRecord> riskDecisions)
+    {
+        var lastRisk = riskDecisions.OrderByDescending(decision => decision.CreatedAt).FirstOrDefault();
+        return new FuturesSoakStatusView
+        {
+            IsTestnetMode = _appOptions.TradingMode == TradingMode.Testnet,
+            TestnetEnabled = _futuresOptions.TestnetEnabled,
+            UserStreamEnabled = _futuresOptions.UserStreamEnabled,
+            HasOpenPosition = position.Size > 0m,
+            ActiveOrderCount = activeOrders.Count,
+            RecentOrderCount = recentOrders.Count,
+            FillCount = fills.Count,
+            RiskDecisionCount = riskDecisions.Count,
+            LastRiskSource = lastRisk?.Source ?? "-",
+            LastRiskReason = lastRisk?.Reason ?? "-"
+        };
+    }
+
+    private FuturesUserStreamStatusView BuildUserStreamStatus()
+    {
+        var snapshot = _userStreamTelemetry.GetSnapshot();
+        var enabled = _futuresOptions.Enabled &&
+            _futuresOptions.UserStreamEnabled &&
+            _appOptions.TradingMode != TradingMode.Paper;
+        var lastEventAge = snapshot.LastEventAt is null
+            ? (TimeSpan?)null
+            : DateTimeOffset.UtcNow - snapshot.LastEventAt.Value;
+        return new FuturesUserStreamStatusView
+        {
+            Enabled = enabled,
+            Connected = snapshot.IsConnected,
+            Stale = enabled && (snapshot.LastEventAt is null || lastEventAge > TimeSpan.FromMinutes(2)),
+            ConnectedAt = snapshot.ConnectedAt,
+            LastMessageAt = snapshot.LastMessageAt,
+            LastEventAt = snapshot.LastEventAt,
+            LastEventType = snapshot.LastEventType ?? "-",
+            LastTopic = snapshot.LastTopic ?? "-",
+            DisconnectCount = snapshot.DisconnectCount,
+            LastError = snapshot.LastError ?? "-"
         };
     }
 

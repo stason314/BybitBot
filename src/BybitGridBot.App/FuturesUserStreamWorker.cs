@@ -13,7 +13,9 @@ public sealed class FuturesUserStreamWorker : BackgroundService
 {
     private readonly AppOptions _appOptions;
     private readonly IBybitUserStreamClient _userStreamClient;
+    private readonly BybitUserStreamTelemetry _userStreamTelemetry;
     private readonly FuturesOptions _futuresOptions;
+    private readonly FuturesProtectionService _protectionService;
     private readonly FuturesRiskOptions _riskOptions;
     private readonly ILogger<FuturesUserStreamWorker> _logger;
     private readonly ITelegramNotifier _notifier;
@@ -23,7 +25,9 @@ public sealed class FuturesUserStreamWorker : BackgroundService
         IOptions<AppOptions> appOptions,
         IOptions<FuturesOptions> futuresOptions,
         IOptions<FuturesRiskOptions> riskOptions,
+        FuturesProtectionService protectionService,
         IBybitUserStreamClient userStreamClient,
+        BybitUserStreamTelemetry userStreamTelemetry,
         IGridRepository repository,
         ITelegramNotifier notifier,
         ILogger<FuturesUserStreamWorker> logger)
@@ -31,7 +35,9 @@ public sealed class FuturesUserStreamWorker : BackgroundService
         _appOptions = appOptions.Value;
         _futuresOptions = futuresOptions.Value;
         _riskOptions = riskOptions.Value;
+        _protectionService = protectionService;
         _userStreamClient = userStreamClient;
+        _userStreamTelemetry = userStreamTelemetry;
         _repository = repository;
         _notifier = notifier;
         _logger = logger;
@@ -57,6 +63,7 @@ public sealed class FuturesUserStreamWorker : BackgroundService
 
     private async Task HandleMessageAsync(BybitUserStreamMessage message, CancellationToken cancellationToken)
     {
+        _userStreamTelemetry.MarkHandled(message.Type, message.Topic);
         switch (message.Type)
         {
             case BybitUserStreamMessageType.Order:
@@ -168,6 +175,11 @@ public sealed class FuturesUserStreamWorker : BackgroundService
         {
             await RecordRiskPauseAsync(settings.Symbol, state, exception.Message, cancellationToken);
             return;
+        }
+
+        if (position.Size > 0m)
+        {
+            await _protectionService.EnsureProtectiveStopAsync(settings, position, cancellationToken);
         }
 
         if (!string.Equals(snapshot.PositionStatus, "Normal", StringComparison.OrdinalIgnoreCase))

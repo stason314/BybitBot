@@ -21,6 +21,7 @@ public sealed class FuturesBotWorker : BackgroundService
     private readonly FuturesReconciliationService _reconciliationService;
     private readonly FuturesRiskManager _riskManager;
     private readonly FuturesRiskOptions _riskOptions;
+    private readonly FuturesStrategyQualityOptions _strategyQualityOptions;
     private readonly FuturesStrategyRouter _strategyRouter;
     private readonly ILogger<FuturesBotWorker> _logger;
     private readonly ITelegramNotifier _notifier;
@@ -30,6 +31,7 @@ public sealed class FuturesBotWorker : BackgroundService
         IOptions<AppOptions> appOptions,
         IOptions<FuturesOptions> futuresOptions,
         IOptions<FuturesRiskOptions> riskOptions,
+        IOptions<FuturesStrategyQualityOptions> strategyQualityOptions,
         IBybitRestClient bybitRestClient,
         FuturesExecutionService executionService,
         FuturesPreflightService preflightService,
@@ -43,6 +45,7 @@ public sealed class FuturesBotWorker : BackgroundService
         _appOptions = appOptions.Value;
         _futuresOptions = futuresOptions.Value;
         _riskOptions = riskOptions.Value;
+        _strategyQualityOptions = strategyQualityOptions.Value;
         _bybitRestClient = bybitRestClient;
         _executionService = executionService;
         _preflightService = preflightService;
@@ -178,6 +181,18 @@ public sealed class FuturesBotWorker : BackgroundService
         });
         foreach (var intent in decision.TradeIntents)
         {
+            var strategyBlockReason = await GetStrategyEntryBlockReasonAsync(settings, position, intent, candles, cancellationToken);
+            if (strategyBlockReason is not null)
+            {
+                await RecordStrategyFilterDecisionAsync(settings.Symbol, intent, strategyBlockReason, cancellationToken);
+                _logger.LogInformation(
+                    "Futures strategy intent filtered for {Symbol}. Action: {Action}. Reason: {Reason}",
+                    settings.Symbol,
+                    intent.Action,
+                    strategyBlockReason);
+                continue;
+            }
+
             var riskDecision = _riskManager.Evaluate(new FuturesRiskEvaluationContext
             {
                 RiskOptions = _riskOptions,
@@ -247,6 +262,103 @@ public sealed class FuturesBotWorker : BackgroundService
             await _repository.UpsertFuturesPositionAsync(position, _appOptions.TradingMode, cancellationToken);
         }
     }
+
+    private async Task<string?> GetStrategyEntryBlockReasonAsync(
+        FuturesBotSettings settings,
+        FuturesPositionSnapshot position,
+        FuturesTradeIntent intent,
+        IReadOnlyList<Candle> candles,
+        CancellationToken cancellationToken)
+    {
+        if (!intent.IsPositionIncreasing || position.Size > 0m)
+        {
+            return null;
+        }
+
+        var atrPercent = CalculateAtrPercent(candles);
+        if (_strategyQualityOptions.MaxEntryAtrPercent > 0m &&
+            atrPercent > _strategyQualityOptions.MaxEntryAtrPercent)
+        {
+            return $"FUTURES_MAX_ENTRY_ATR_PERCENT filter blocked entry. ATR={atrPercent:F4}%.";
+        }
+
+        var cooldownReason = await GetStopLossCooldownReasonAsync(settings.Symbol, cancellationToken);
+        if (cooldownReason is not null)
+        {
+            return cooldownReason;
+        }
+
+        if (_strategyQualityOptions.BtcRiskOffEnabled &&
+            !string.Equals(settings.Symbol, "BTCUSDT", StringComparison.OrdinalIgnoreCase))
+        {
+            var btcRiskOffReason = await GetBtcRiskOffReasonAsync(settings.Category, cancellationToken);
+            if (btcRiskOffReason is not null)
+            {
+                return btcRiskOffReason;
+            }
+        }
+
+        return null;
+    }
+
+    private async Task<string?> GetStopLossCooldownReasonAsync(string symbol, CancellationToken cancellationToken)
+    {
+        if (_strategyQualityOptions.StopLossCooldownMinutes <= 0)
+        {
+            return null;
+        }
+
+        var cutoff = DateTimeOffset.UtcNow.AddMinutes(-_strategyQualityOptions.StopLossCooldownMinutes);
+        var recentFills = await _repository.GetFuturesFillsAsync(symbol, 50, cancellationToken);
+        var recentLossExit = recentFills
+            .Where(fill => fill.Action is FuturesTradeAction.CloseLong or FuturesTradeAction.ReduceOnlyClose)
+            .Where(fill => fill.RealizedPnl < 0m)
+            .OrderByDescending(fill => fill.CreatedAt)
+            .FirstOrDefault();
+        return recentLossExit is not null && recentLossExit.CreatedAt >= cutoff
+            ? $"FUTURES_STOP_LOSS_COOLDOWN_MINUTES active after losing exit at {recentLossExit.CreatedAt:O}."
+            : null;
+    }
+
+    private async Task<string?> GetBtcRiskOffReasonAsync(string category, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var btcCandles = await _bybitRestClient.GetKlinesAsync(
+                category,
+                "BTCUSDT",
+                AnalysisDefaults.AutoRecommendationCandleInterval,
+                AnalysisDefaults.AutoRecommendationLookbackCandles,
+                cancellationToken);
+            var movePercent = CalculateMovePercent(btcCandles);
+            return movePercent <= _strategyQualityOptions.BtcRiskOffMovePercent
+                ? $"FUTURES_BTC_RISK_OFF filter blocked entry. BTC move={movePercent:F4}%."
+                : null;
+        }
+        catch (Exception exception)
+        {
+            _logger.LogWarning(exception, "BTC risk-off filter unavailable; continuing futures strategy evaluation.");
+            return null;
+        }
+    }
+
+    private Task RecordStrategyFilterDecisionAsync(
+        string symbol,
+        FuturesTradeIntent intent,
+        string reason,
+        CancellationToken cancellationToken) =>
+        _repository.AddFuturesRiskDecisionAsync(new FuturesRiskDecisionRecord
+        {
+            Symbol = symbol,
+            Source = "StrategyFilter",
+            OrderLinkId = intent.OrderLinkId,
+            Action = intent.Action,
+            IsAllowed = false,
+            Reason = reason,
+            Severity = RiskSeverity.Warning.ToString(),
+            SuggestedAction = RiskSuggestedAction.BlockNewOrders.ToString(),
+            CreatedAt = DateTimeOffset.UtcNow
+        }, cancellationToken);
 
     private async Task<int> CountOpenFuturesPositionsAsync(
         IReadOnlyCollection<FuturesBotSettings> profiles,
@@ -400,6 +512,43 @@ public sealed class FuturesBotWorker : BackgroundService
         MinOrderQty = instrument.MinOrderQty,
         MinOrderAmount = instrument.MinOrderAmount
     };
+
+    private static decimal CalculateAtrPercent(IReadOnlyList<Candle> candles)
+    {
+        var ordered = candles.OrderBy(candle => candle.OpenTime).ToArray();
+        if (ordered.Length < 2 || ordered[^1].Close <= 0m)
+        {
+            return 0m;
+        }
+
+        var lookback = ordered.TakeLast(Math.Min(60, ordered.Length)).ToArray();
+        var total = 0m;
+        for (var index = 1; index < lookback.Length; index++)
+        {
+            var current = lookback[index];
+            var previous = lookback[index - 1];
+            total += decimal.Max(
+                current.High - current.Low,
+                decimal.Max(Math.Abs(current.High - previous.Close), Math.Abs(current.Low - previous.Close)));
+        }
+
+        var atr = total / Math.Max(1, lookback.Length - 1);
+        return atr / ordered[^1].Close * 100m;
+    }
+
+    private static decimal CalculateMovePercent(IReadOnlyList<Candle> candles)
+    {
+        var ordered = candles.OrderBy(candle => candle.OpenTime).ToArray();
+        if (ordered.Length == 0)
+        {
+            return 0m;
+        }
+
+        var lookback = ordered.TakeLast(Math.Min(60, ordered.Length)).ToArray();
+        var first = lookback[0].Open > 0m ? lookback[0].Open : lookback[0].Close;
+        var last = lookback[^1].Close;
+        return first > 0m ? (last - first) / first * 100m : 0m;
+    }
 
     private sealed record FuturesAccountRiskSnapshot(decimal AvailableMarginUsdt, decimal AccountEquityUsdt);
 }
