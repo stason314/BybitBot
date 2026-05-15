@@ -382,6 +382,7 @@ public sealed class SqliteGridRepository : IGridRepository
         await EnsureColumnAsync(connection, "runtime_settings", "strategy_type", "TEXT NOT NULL DEFAULT 'Grid'", cancellationToken);
         await EnsureColumnAsync(connection, "runtime_settings", "strategy_config_json", "TEXT NOT NULL DEFAULT '{}'", cancellationToken);
         await EnsureColumnAsync(connection, "grid_orders", "strategy_source", "TEXT NOT NULL DEFAULT 'Grid'", cancellationToken);
+        await BackfillGridOrderStrategySourcesAsync(connection, cancellationToken);
         await EnsureFuturesOrderColumnsAsync(connection, "grid_orders", cancellationToken);
         await EnsureFuturesOrderColumnsAsync(connection, "orders", cancellationToken);
         await EnsureFuturesStateColumnsAsync(connection, "bot_state", cancellationToken);
@@ -1584,6 +1585,67 @@ public sealed class SqliteGridRepository : IGridRepository
         await EnsureColumnAsync(connection, tableName, "mark_price", "TEXT NOT NULL DEFAULT '0'", cancellationToken);
         await EnsureColumnAsync(connection, tableName, "liquidation_price", "TEXT NOT NULL DEFAULT '0'", cancellationToken);
         await EnsureColumnAsync(connection, tableName, "unrealized_pnl", "TEXT NOT NULL DEFAULT '0'", cancellationToken);
+    }
+
+    private static async Task BackfillGridOrderStrategySourcesAsync(
+        SqliteConnection connection,
+        CancellationToken cancellationToken)
+    {
+        await using (var markerCommand = connection.CreateCommand())
+        {
+            markerCommand.CommandText = """
+                UPDATE grid_orders
+                SET strategy_source = CASE parent_order_link_id
+                    WHEN 'dca-entry' THEN 'DCA'
+                    WHEN 'btd-entry' THEN 'BTD'
+                    WHEN 'signal-entry' THEN 'Signal'
+                    WHEN 'signal-exit' THEN 'Signal'
+                    WHEN 'trend-entry' THEN 'Trend'
+                    WHEN 'trend-exit' THEN 'Trend'
+                    WHEN 'reduce-only-exit' THEN 'ReduceOnly'
+                    ELSE strategy_source
+                END
+                WHERE parent_order_link_id IS NOT NULL
+                  AND parent_order_link_id IN (
+                      'dca-entry',
+                      'btd-entry',
+                      'signal-entry',
+                      'signal-exit',
+                      'trend-entry',
+                      'trend-exit',
+                      'reduce-only-exit'
+                  )
+                  AND (strategy_source IS NULL OR strategy_source = '' OR strategy_source = 'Grid' OR strategy_source = 'Managed');
+                """;
+            await markerCommand.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await using var parentCommand = connection.CreateCommand();
+        parentCommand.CommandText = """
+            UPDATE grid_orders
+            SET strategy_source = (
+                SELECT parent.strategy_source
+                FROM grid_orders parent
+                WHERE parent.order_link_id = grid_orders.parent_order_link_id
+                  AND parent.strategy_source IS NOT NULL
+                  AND parent.strategy_source <> ''
+                  AND parent.strategy_source <> 'Managed'
+                  AND parent.strategy_source <> 'Grid'
+                LIMIT 1
+            )
+            WHERE parent_order_link_id IS NOT NULL
+              AND (strategy_source IS NULL OR strategy_source = '' OR strategy_source = 'Grid' OR strategy_source = 'Managed')
+              AND EXISTS (
+                  SELECT 1
+                  FROM grid_orders parent
+                  WHERE parent.order_link_id = grid_orders.parent_order_link_id
+                    AND parent.strategy_source IS NOT NULL
+                    AND parent.strategy_source <> ''
+                    AND parent.strategy_source <> 'Managed'
+                    AND parent.strategy_source <> 'Grid'
+              );
+            """;
+        await parentCommand.ExecuteNonQueryAsync(cancellationToken);
     }
 
     private static async Task EnsureFuturesStateColumnsAsync(
