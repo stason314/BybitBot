@@ -146,6 +146,7 @@ public sealed class GridDashboardService : IGridDashboardService
                     IsSelected = string.Equals(profile.Symbol, runtimeSettings.Symbol, StringComparison.OrdinalIgnoreCase)
                 })
                 .ToArray(),
+            ConfigSummaries = await BuildConfigSummariesAsync(profiles, runtimeSettings.Symbol, cancellationToken),
             Settings = new DashboardSettings
             {
                 Symbol = gridOptions.Symbol,
@@ -188,6 +189,38 @@ public sealed class GridDashboardService : IGridDashboardService
             GridLevels = levels.Select(level => level.Price).ToArray(),
             GeneratedAt = generatedAt
         };
+    }
+
+    private async Task<IReadOnlyList<DashboardConfigSummaryItem>> BuildConfigSummariesAsync(
+        IReadOnlyList<GridBotSettings> profiles,
+        string selectedSymbol,
+        CancellationToken cancellationToken)
+    {
+        var summaries = new List<DashboardConfigSummaryItem>(profiles.Count);
+
+        foreach (var profile in profiles)
+        {
+            var state = await _repository.GetBotStateAsync(profile.Symbol, cancellationToken);
+            var isPaused = state?.IsPaused == true || profile.StrategyType is TradingStrategyType.Pause or TradingStrategyType.NoTrade;
+            summaries.Add(new DashboardConfigSummaryItem
+            {
+                Symbol = profile.Symbol,
+                Category = profile.Category,
+                StrategyName = profile.StrategyType.ToString(),
+                StrategyMode = profile.StrategySelectionMode.ToString().ToLowerInvariant(),
+                Status = isPaused ? "paused" : "in_progress",
+                DailyRealizedPnl = state?.DailyRealizedPnl ?? 0m,
+                TotalRealizedPnl = state?.TotalRealizedPnl ?? 0m,
+                IsSelected = string.Equals(profile.Symbol, selectedSymbol, StringComparison.OrdinalIgnoreCase),
+                UpdatedAt = state?.UpdatedAt ?? profile.UpdatedAt
+            });
+        }
+
+        return summaries
+            .OrderByDescending(summary => summary.TotalRealizedPnl)
+            .ThenByDescending(summary => summary.DailyRealizedPnl)
+            .ThenBy(summary => summary.Symbol, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
     }
 
     private async Task<IReadOnlyList<Candle>> GetAnalysisCandlesAsync(GridOptions gridOptions, CancellationToken cancellationToken)
@@ -997,6 +1030,42 @@ public sealed class GridDashboardService : IGridDashboardService
       color: var(--muted);
     }
     .token { font-family: "IBM Plex Mono", monospace; font-size: 12px; }
+    .table-wrap { overflow: auto; }
+    .config-summary-panel { margin-bottom: 20px; }
+    .config-table tbody tr {
+      cursor: pointer;
+      transition: background .18s ease;
+    }
+    .config-table tbody tr:hover,
+    .config-table tbody tr.selected {
+      background: rgba(198,103,47,0.08);
+    }
+    .config-symbol {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+    .config-symbol span {
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      padding: 7px 10px;
+      border-radius: 999px;
+      background: rgba(23,102,78,0.12);
+      color: var(--accent-2);
+      font-size: 12px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+    .status-pill.paused {
+      background: rgba(177,54,34,0.14);
+      color: var(--danger);
+    }
+    .pnl.positive { color: var(--accent-2); font-weight: 700; }
+    .pnl.negative { color: var(--danger); font-weight: 700; }
     .pill {
       display: inline-block;
       padding: 7px 10px;
@@ -1054,6 +1123,7 @@ public sealed class GridDashboardService : IGridDashboardService
       .hero, .layout { grid-template-columns: 1fr; }
       .stats { grid-template-columns: repeat(2, minmax(0,1fr)); }
       form { grid-template-columns: 1fr; }
+      th, td { white-space: nowrap; }
     }
   </style>
 </head>
@@ -1106,6 +1176,22 @@ public sealed class GridDashboardService : IGridDashboardService
       </section>
     </div>
 
+    <section class="panel section config-summary-panel">
+      <div class="section-head">
+        <h2>Configs</h2>
+      </div>
+      <div class="table-wrap">
+        <table class="config-table">
+          <thead>
+            <tr>
+              <th>Symbol</th><th>Strategy</th><th>Type</th><th>Status</th><th>Daily Profit</th><th>Total Profit ↓</th><th>Updated</th>
+            </tr>
+          </thead>
+          <tbody id="configSummaryRows"></tbody>
+        </table>
+      </div>
+    </section>
+
     <section class="stats" id="stats"></section>
 
     <section class="panel section regime-card">
@@ -1152,7 +1238,7 @@ public sealed class GridDashboardService : IGridDashboardService
           <h2>Active Orders</h2>
           <button type="button" class="danger-button compact-button" id="cancelActiveOrders">Cancel Active</button>
         </div>
-        <div style="overflow:auto;">
+        <div class="table-wrap">
           <table>
             <thead>
               <tr><th>Source</th><th>Side</th><th>Price</th><th>Qty</th><th>Filled</th><th>Status</th><th>Link</th></tr>
@@ -1173,7 +1259,7 @@ public sealed class GridDashboardService : IGridDashboardService
           <button type="button" class="secondary-button compact-button" id="copyDiagnostics">Copy Diagnostics</button>
         </div>
       </div>
-      <div style="overflow:auto;">
+      <div class="table-wrap">
         <table>
           <thead>
             <tr>
@@ -1264,6 +1350,26 @@ public sealed class GridDashboardService : IGridDashboardService
         `<button type="button" class="profile-tab new ${isCreatingNewProfile ? 'active' : ''}" data-action="new-profile">+ New Config</button>`
       ].join('');
     };
+    const formatStatus = (status) => status === 'paused' ? 'Paused' : 'In progress';
+    const renderConfigSummaries = (configs) => {
+      byId('configSummaryRows').innerHTML = configs.length === 0
+        ? `<tr><td colspan="7">No configs yet.</td></tr>`
+        : configs.map(config => `
+            <tr class="${config.isSelected && !isCreatingNewProfile ? 'selected' : ''}" data-symbol="${escapeHtml(config.symbol)}">
+              <td>
+                <div class="config-symbol">
+                  <strong>${escapeHtml(config.symbol)}</strong>
+                  <span>${escapeHtml(config.category)}</span>
+                </div>
+              </td>
+              <td>${escapeHtml(config.strategyName)}</td>
+              <td>${escapeHtml(config.strategyMode)}</td>
+              <td><span class="status-pill ${config.status === 'paused' ? 'paused' : ''}">${formatStatus(config.status)}</span></td>
+              <td>${formatPnl(config.dailyRealizedPnl)}</td>
+              <td>${formatPnl(config.totalRealizedPnl)}</td>
+              <td>${formatDate(config.updatedAt)}</td>
+            </tr>`).join('');
+    };
     const parseSettingsPreset = (text) => {
       const parsed = {};
       const errors = [];
@@ -1326,6 +1432,11 @@ public sealed class GridDashboardService : IGridDashboardService
       const number = Number(value ?? 0);
       const cls = number > 0 ? "positive" : number < 0 ? "negative" : "";
       return `<span class="value ${cls}">${number.toLocaleString(undefined, { maximumFractionDigits: 8 })}</span>`;
+    };
+    const formatPnl = (value) => {
+      const number = Number(value ?? 0);
+      const cls = number > 0 ? "positive" : number < 0 ? "negative" : "";
+      return `<span class="pnl ${cls}">${number.toLocaleString(undefined, { maximumFractionDigits: 8 })}</span>`;
     };
     const formatDate = (value) => value ? new Date(value).toLocaleString() : "—";
     const csvEscape = (value) => {
@@ -1427,6 +1538,7 @@ public sealed class GridDashboardService : IGridDashboardService
         parsedSavedStrategyConfig: parseStrategyConfigSnapshot(latestDashboardData.settings?.strategyConfigJson),
         runtime: latestDashboardData.runtime,
         state: latestDashboardData.state,
+        configSummaries: latestDashboardData.configSummaries,
         marketRegime: latestDashboardData.marketRegime,
         signalAnalysis: latestDashboardData.signalAnalysis,
         autoRecommendation: latestDashboardData.autoRecommendation,
@@ -1567,6 +1679,7 @@ public sealed class GridDashboardService : IGridDashboardService
         updateSelectedSymbolUrl();
       }
       renderProfileTabs(data.profiles);
+      renderConfigSummaries(data.configSummaries || []);
 
       byId('modePill').textContent = `${data.state.tradingMode} mode`;
       byId('modePill').className = data.state.isPaused ? 'pill paused' : 'pill';
@@ -1748,6 +1861,18 @@ public sealed class GridDashboardService : IGridDashboardService
         byId('formStatus').className = 'status';
         byId('formStatus').textContent = 'Fill the new config and press Apply Settings to create a profile.';
       }
+    });
+    byId('configSummaryRows').addEventListener('click', async (event) => {
+      const row = event.target.closest('tr[data-symbol]');
+      if (!row) {
+        return;
+      }
+
+      selectedSymbol = row.dataset.symbol.toUpperCase();
+      isCreatingNewProfile = false;
+      setSettingsFormDirty(false);
+      updateSelectedSymbolUrl();
+      await loadDashboard({ forceSettingsRefresh: true });
     });
     byId('resumeTrading').addEventListener('click', async () => {
       const resumeUrl = selectedSymbol ? `/api/resume?symbol=${encodeURIComponent(selectedSymbol)}` : '/api/resume';

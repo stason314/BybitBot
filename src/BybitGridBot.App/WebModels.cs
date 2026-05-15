@@ -6,6 +6,8 @@ public sealed class DashboardResponse
 {
     public required IReadOnlyList<DashboardProfileItem> Profiles { get; init; }
 
+    public required IReadOnlyList<DashboardConfigSummaryItem> ConfigSummaries { get; init; }
+
     public required DashboardSettings Settings { get; init; }
 
     public required DashboardRuntime Runtime { get; init; }
@@ -41,6 +43,27 @@ public sealed class DashboardProfileItem
     public required string Category { get; init; }
 
     public bool IsSelected { get; init; }
+}
+
+public sealed class DashboardConfigSummaryItem
+{
+    public required string Symbol { get; init; }
+
+    public required string Category { get; init; }
+
+    public required string StrategyName { get; init; }
+
+    public required string StrategyMode { get; init; }
+
+    public required string Status { get; init; }
+
+    public decimal DailyRealizedPnl { get; init; }
+
+    public decimal TotalRealizedPnl { get; init; }
+
+    public bool IsSelected { get; init; }
+
+    public DateTimeOffset UpdatedAt { get; init; }
 }
 
 public sealed class DashboardSettings
