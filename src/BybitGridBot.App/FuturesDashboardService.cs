@@ -745,6 +745,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
     .stat { background: rgba(255,255,255,0.78); border: 1px solid var(--line); border-radius: 8px; padding: 14px; min-height: 86px; }
     .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .08em; margin-bottom: 8px; }
     .value { font-size: 22px; font-weight: 800; overflow-wrap: anywhere; }
+    .price-value { transition: color .18s ease; }
     .positive { color: var(--accent); }
     .negative { color: var(--danger); }
     form { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 12px; }
@@ -951,6 +952,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
     let latest = null;
     let controlStatusSymbol = null;
     let controlStatusKind = null;
+    const lastPrices = new Map();
 
     const escapeHtml = (value) => String(value)
       .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
@@ -961,6 +963,15 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
       const number = Number(value || 0);
       const cls = number > 0 ? 'positive' : number < 0 ? 'negative' : '';
       return `<span class="${cls}">${formatNumber(number)}</span>`;
+    };
+    const formatCurrentPrice = (symbol, price) => {
+      const number = Number(price || 0);
+      const previous = lastPrices.get(symbol);
+      const cls = previous === undefined || number === previous ? '' : number > previous ? 'positive' : 'negative';
+      if (number > 0) {
+        lastPrices.set(symbol, number);
+      }
+      return `<span class="price-value ${cls}">${formatNumber(number)}</span>`;
     };
     const setUrl = () => {
       const url = new URL(window.location.href);
@@ -1036,8 +1047,11 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
     };
     const renderPosition = (data) => {
       const p = data.position;
+      const symbol = p.symbol || data.settings?.symbol || selectedSymbol || '';
+      const currentPrice = Number(p.markPrice || data.autoRecommendation?.lastPrice || 0);
       const error = data.positionError ? `<div class="notice">Position sync unavailable: ${escapeHtml(data.positionError)}</div>` : '';
       byId('positionStats').innerHTML = [
+        ['Current Price', formatCurrentPrice(symbol, currentPrice)],
         ['Side', escapeHtml(p.side)],
         ['Size', formatNumber(p.size)],
         ['Entry', formatNumber(p.entryPrice)],
