@@ -48,6 +48,7 @@ Current scope:
 - MVP strategy action model: `OpenLong`, `CloseLong`, `ReduceOnlyClose`
 - Bybit futures client methods are present for `/v5/position/set-leverage`, `/v5/position/switch-isolated`, `/v5/position/switch-mode`, and `/v5/position/trading-stop`
 - futures accounting is separated from spot accounting through `FuturesAccounting` and `FuturesPositionSnapshot`
+- futures risk checks are separated through `FuturesRiskManager`: max notional, max margin, max leverage, liquidation buffer, stop-loss requirement, daily loss block for increasing positions, and funding cost
 
 Live futures order placement is not enabled in this first step.
 
@@ -61,6 +62,8 @@ MARGIN_MODE=isolated
 POSITION_MODE=oneway
 MAX_NOTIONAL_USDT=100
 MAX_MARGIN_USDT=50
+FUTURES_MAX_LEVERAGE=2
+FUTURES_MAX_FUNDING_COST_USDT=1
 MIN_LIQUIDATION_BUFFER_PERCENT=15
 STOP_LOSS_REQUIRED=true
 ```

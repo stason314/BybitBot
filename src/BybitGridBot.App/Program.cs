@@ -43,6 +43,7 @@ builder.Services.AddSingleton<DcaStrategy>();
 builder.Services.AddSingleton<BtdStrategy>();
 builder.Services.AddSingleton<ITradingStrategy>(serviceProvider => serviceProvider.GetRequiredService<IGridTradingStrategy>());
 builder.Services.AddSingleton<RiskManager>();
+builder.Services.AddSingleton<FuturesRiskManager>();
 builder.Services.AddSingleton<MarketRegimeFilter>();
 builder.Services.AddSingleton<MarketRegimeAnalyzer>();
 builder.Services.AddSingleton<MarketRegimeDetector>();
