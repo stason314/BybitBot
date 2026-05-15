@@ -17,6 +17,7 @@ public sealed class GridBotWorker : BackgroundService
     private const string DcaEntryMarker = "dca-entry";
     private const string SignalEntryMarker = "signal-entry";
     private const string SignalExitMarker = "signal-exit";
+    private const decimal SignalMarketLikeLimitBufferPercent = 0.05m;
     private static readonly TimeSpan TimedAutoRecommendationApplyInterval = TimeSpan.FromMinutes(30);
     private static readonly JsonSerializerOptions StrategyJsonOptions = new(JsonSerializerDefaults.Web);
 
@@ -351,8 +352,8 @@ public sealed class GridBotWorker : BackgroundService
         var candles = await _bybitRestClient.GetKlinesAsync(
             gridOptions.Category,
             gridOptions.Symbol,
-            "1",
-            120,
+            AnalysisDefaults.AutoRecommendationCandleInterval,
+            AnalysisDefaults.AutoRecommendationLookbackCandles,
             cancellationToken);
         if (candles.Count == 0)
         {
@@ -1640,6 +1641,12 @@ public sealed class GridBotWorker : BackgroundService
                 OrderIntents = [new OrderIntent(TradeSide.Buy, limitPrice, quantity, SignalEntryMarker)]
             },
             cancellationToken);
+
+        _logger.LogInformation(
+            "Signal buy order created for {Symbol}. Price: {Price}, Quantity: {Quantity}",
+            _gridOptions.Symbol,
+            limitPrice,
+            quantity);
     }
 
     private async Task EnsureSignalSellOrderAsync(
@@ -2232,13 +2239,13 @@ public sealed class GridBotWorker : BackgroundService
 
     private static decimal CalculateSignalBuyPrice(decimal currentPrice, SignalStrategyConfig config)
     {
-        var offset = Math.Max(0m, config.LimitOffsetPercent) / 100m;
-        return currentPrice * (1m - offset);
+        var offset = Math.Max(SignalMarketLikeLimitBufferPercent, config.LimitOffsetPercent) / 100m;
+        return currentPrice * (1m + offset);
     }
 
     private static decimal CalculateSignalSellPrice(decimal currentPrice, SignalStrategyConfig config)
     {
-        var offset = Math.Max(0m, config.LimitOffsetPercent) / 100m;
+        var offset = Math.Max(SignalMarketLikeLimitBufferPercent, config.LimitOffsetPercent) / 100m;
         return currentPrice * (1m - offset);
     }
 

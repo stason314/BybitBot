@@ -191,8 +191,8 @@ public sealed class GridDashboardService : IGridDashboardService
             return await _bybitRestClient.GetKlinesAsync(
                 gridOptions.Category,
                 gridOptions.Symbol,
-                "1",
-                120,
+                AnalysisDefaults.AutoRecommendationCandleInterval,
+                AnalysisDefaults.AutoRecommendationLookbackCandles,
                 cancellationToken);
         }
         catch
@@ -1407,6 +1407,7 @@ public sealed class GridDashboardService : IGridDashboardService
         ['Step', formatNumber(data.autoRecommendation.step)],
         ['Order', `${formatNumber(data.autoRecommendation.orderSizeUsdt)} USDT`],
         ['Stop', `${formatNumber(data.autoRecommendation.stopLowerPrice)} - ${formatNumber(data.autoRecommendation.stopUpperPrice)}`],
+        ['Window', `${data.autoRecommendation.analysisLookbackCandles || 0} x ${data.autoRecommendation.analysisCandleInterval || '1'}m`],
         ['ATR', `${formatNumber(data.autoRecommendation.atrPercent)}%`],
         ['Drawdown', `${formatNumber(data.autoRecommendation.drawdownPercent)}%`]
       ].map(([label, value]) => `<span class="regime-chip">${label}: ${value}</span>`).join('');
@@ -1916,6 +1917,8 @@ public sealed class GridDashboardService : IGridDashboardService
             StopLowerPrice = recommendation.StopLowerPrice,
             StopUpperPrice = recommendation.StopUpperPrice,
             StrategyConfigJson = recommendation.StrategyConfigJson,
+            AnalysisCandleInterval = AnalysisDefaults.AutoRecommendationCandleInterval,
+            AnalysisLookbackCandles = AnalysisDefaults.AutoRecommendationLookbackCandles,
             AtrPercent = recommendation.Metrics.AtrPercent,
             DrawdownPercent = recommendation.Metrics.DrawdownPercent,
             Support = recommendation.Metrics.Support,

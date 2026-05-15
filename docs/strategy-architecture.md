@@ -105,7 +105,7 @@ Next steps:
 3. Add adaptive grid and volume-breakout strategies as separate implementations.
 
 Auto recommendation flow:
-- `AutoStrategySelector` analyzes candles plus `MarketRegimeAnalysis`;
+- `AutoStrategySelector` analyzes 360 one-minute candles, about 6 hours, plus `MarketRegimeAnalysis`;
 - confirmed `Buy`/`Sell` signals can recommend `Signal` in breakout markets, and confirmed `Buy` signals can recommend `Signal` in trend markets;
 - dashboard shows the strategy and runtime settings it would choose;
 - operator can apply the recommendation manually from the UI;

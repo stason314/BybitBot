@@ -157,6 +157,10 @@ public sealed class DashboardAutoRecommendation
 
     public required string StrategyConfigJson { get; init; }
 
+    public required string AnalysisCandleInterval { get; init; }
+
+    public int AnalysisLookbackCandles { get; init; }
+
     public decimal AtrPercent { get; init; }
 
     public decimal DrawdownPercent { get; init; }
