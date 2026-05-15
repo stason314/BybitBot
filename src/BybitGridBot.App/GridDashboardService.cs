@@ -17,6 +17,7 @@ public interface IGridDashboardService
     Task<UpdateSettingsResponse> DeleteSettingsAsync(string symbol, CancellationToken cancellationToken);
     Task<UpdateSettingsResponse> ResumeTradingAsync(string? symbol, CancellationToken cancellationToken);
     Task<UpdateSettingsResponse> CancelActiveOrdersAsync(string? symbol, CancellationToken cancellationToken);
+    Task<UpdateSettingsResponse> ResetSpotStatisticsAsync(CancellationToken cancellationToken);
     string RenderDashboardPage();
 }
 
@@ -85,6 +86,8 @@ public sealed class GridDashboardService : IGridDashboardService
             {
                 Symbol = gridOptions.Symbol,
                 TradingMode = _appOptions.TradingMode,
+                QuoteAssetBalance = gridOptions.PaperInitialUsdt,
+                BaseAssetQuantity = gridOptions.PaperInitialBaseAssetQuantity,
                 UpdatedAt = DateTimeOffset.UtcNow
             };
         var levels = await _repository.GetGridLevelsAsync(gridOptions.Symbol, cancellationToken);
@@ -788,6 +791,16 @@ public sealed class GridDashboardService : IGridDashboardService
         };
     }
 
+    public async Task<UpdateSettingsResponse> ResetSpotStatisticsAsync(CancellationToken cancellationToken)
+    {
+        var deletedRows = await _repository.ResetSpotStatisticsAsync(cancellationToken);
+        return new UpdateSettingsResponse
+        {
+            Success = true,
+            Message = $"Spot statistics reset. Deleted rows: {deletedRows}."
+        };
+    }
+
     public string RenderDashboardPage() => """
 <!DOCTYPE html>
 <html lang="en">
@@ -1285,6 +1298,7 @@ public sealed class GridDashboardService : IGridDashboardService
         <div class="config-profit-totals">
           <div class="config-profit-total"><span>All Daily</span><strong id="allConfigsDailyProfit">-</strong></div>
           <div class="config-profit-total"><span>All Total</span><strong id="allConfigsTotalProfit">-</strong></div>
+          <button type="button" class="danger-button compact-button" id="resetSpotStats">Reset Spot Stats</button>
         </div>
       </div>
       <div class="table-wrap">
@@ -1844,6 +1858,22 @@ public sealed class GridDashboardService : IGridDashboardService
         await loadDashboard({ forceSettingsRefresh: true });
       }
     };
+    const resetSpotStats = async () => {
+      const status = byId('formStatus');
+      if (!confirm('Reset all spot statistics, orders, no-trade reasons, and paper balances? Runtime configs will stay.')) {
+        return;
+      }
+
+      status.className = 'status';
+      status.textContent = 'Resetting spot statistics...';
+      const response = await fetch('/api/spot/statistics/reset', { method: 'POST' });
+      const result = await response.json();
+      status.className = `status ${response.ok ? 'ok' : 'error'}`;
+      status.textContent = response.ok ? result.message : (result.errors?.join(' | ') || result.message || 'Failed to reset spot statistics.');
+      if (response.ok) {
+        await loadDashboard({ forceSettingsRefresh: true });
+      }
+    };
     const applySelectedStrategyRecommendation = async (message) => {
       const status = byId('formStatus');
       status.className = 'status';
@@ -2052,6 +2082,12 @@ public sealed class GridDashboardService : IGridDashboardService
     });
     byId('cancelActiveOrders').addEventListener('click', () => {
       cancelActiveOrders().catch((error) => {
+        byId('formStatus').className = 'status error';
+        byId('formStatus').textContent = error.message;
+      });
+    });
+    byId('resetSpotStats').addEventListener('click', () => {
+      resetSpotStats().catch((error) => {
         byId('formStatus').className = 'status error';
         byId('formStatus').textContent = error.message;
       });

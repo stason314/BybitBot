@@ -31,6 +31,7 @@ public interface IGridRepository
     Task<GridOrder?> GetOrderByLinkIdAsync(string orderLinkId, CancellationToken cancellationToken);
     Task<GridOrder?> GetActiveOrderAtLevelAsync(string symbol, TradeSide side, decimal price, CancellationToken cancellationToken);
     Task UpsertOrderAsync(GridOrder order, CancellationToken cancellationToken);
+    Task<int> ResetSpotStatisticsAsync(CancellationToken cancellationToken);
     Task<NoTradeReasonRecord?> GetLatestNoTradeReasonAsync(string symbol, CancellationToken cancellationToken);
     Task<IReadOnlyList<NoTradeReasonRecord>> GetNoTradeReasonsAsync(string symbol, int limit, CancellationToken cancellationToken);
     Task AddNoTradeReasonAsync(NoTradeReasonRecord reason, CancellationToken cancellationToken);

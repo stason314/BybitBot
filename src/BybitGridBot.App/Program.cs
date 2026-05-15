@@ -197,6 +197,12 @@ app.MapPost("/api/orders/cancel-active", async (string? symbol, IGridDashboardSe
     return response.Success ? Results.Ok(response) : Results.BadRequest(response);
 });
 
+app.MapPost("/api/spot/statistics/reset", async (IGridDashboardService dashboardService, CancellationToken cancellationToken) =>
+{
+    var response = await dashboardService.ResetSpotStatisticsAsync(cancellationToken);
+    return response.Success ? Results.Ok(response) : Results.BadRequest(response);
+});
+
 app.MapGet("/health", () => Results.Ok(new { ok = true, time = DateTimeOffset.UtcNow }));
 
 await app.RunAsync();

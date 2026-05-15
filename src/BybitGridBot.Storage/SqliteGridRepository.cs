@@ -1128,6 +1128,46 @@ public sealed class SqliteGridRepository : IGridRepository
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
+    public async Task<int> ResetSpotStatisticsAsync(CancellationToken cancellationToken)
+    {
+        var statements = new[]
+        {
+            "DELETE FROM grid_orders;",
+            "DELETE FROM grid_levels;",
+            "DELETE FROM bot_state WHERE symbol NOT LIKE 'futures:%';",
+            "DELETE FROM no_trade_reasons;",
+            "DELETE FROM strategy_performance;",
+            "DELETE FROM strategy_daily_performance;",
+            "DELETE FROM strategy_decisions;",
+            "DELETE FROM market_regimes;",
+            "DELETE FROM market_phases;",
+            "DELETE FROM strategy_switches;",
+            "DELETE FROM signals;",
+            "DELETE FROM capital_allocations;",
+            "DELETE FROM trade_intents;",
+            "DELETE FROM risk_decisions;",
+            "DELETE FROM orders;",
+            "DELETE FROM positions;",
+            "DELETE FROM daily_pnl;"
+        };
+
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken);
+
+        var deletedRows = 0;
+        foreach (var statement in statements)
+        {
+            await using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = statement;
+            deletedRows += await command.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await transaction.CommitAsync(cancellationToken);
+        _logger.LogWarning("Reset spot statistics. Deleted rows: {DeletedRows}", deletedRows);
+        return deletedRows;
+    }
+
     public async Task<NoTradeReasonRecord?> GetLatestNoTradeReasonAsync(string symbol, CancellationToken cancellationToken)
     {
         var reasons = await GetNoTradeReasonsAsync(symbol, 1, cancellationToken);
