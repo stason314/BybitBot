@@ -277,7 +277,7 @@ public sealed class GridBotWorker : BackgroundService
             return;
         }
 
-        await RunCycleAsync(state, levels, instrument, null, cancellationToken);
+        await RunCycleAsync(state, levels, instrument, profile, cancellationToken);
     }
 
     private async Task ReconcileActiveOrdersForRuntimeSettingsChangeAsync(
@@ -481,7 +481,7 @@ public sealed class GridBotWorker : BackgroundService
         if (_appOptions.TradingMode == TradingMode.Paper)
         {
             var activeOrders = await _repository.GetActiveOrdersAsync(_gridOptions.Symbol, cancellationToken);
-            if (await HandleStopConditionsAsync(state, currentPrice, activeOrders, cancellationToken))
+            if (await HandleStopConditionsAsync(profile, state, currentPrice, activeOrders, cancellationToken))
             {
                 await _repository.SaveBotStateAsync(state, cancellationToken);
                 return state;
@@ -494,7 +494,7 @@ public sealed class GridBotWorker : BackgroundService
         {
             await SynchronizeLiveOrdersAsync(state, [], profile, cancellationToken);
             var activeOrders = await _repository.GetActiveOrdersAsync(_gridOptions.Symbol, cancellationToken);
-            if (await HandleStopConditionsAsync(state, currentPrice, activeOrders, cancellationToken))
+            if (await HandleStopConditionsAsync(profile, state, currentPrice, activeOrders, cancellationToken))
             {
                 await _repository.SaveBotStateAsync(state, cancellationToken);
                 return state;
@@ -564,7 +564,7 @@ public sealed class GridBotWorker : BackgroundService
         if (_appOptions.TradingMode == TradingMode.Paper)
         {
             var activeOrders = await _repository.GetActiveOrdersAsync(_gridOptions.Symbol, cancellationToken);
-            if (await HandleStopConditionsAsync(state, currentPrice, activeOrders, cancellationToken))
+            if (await HandleStopConditionsAsync(profile, state, currentPrice, activeOrders, cancellationToken))
             {
                 await _repository.SaveBotStateAsync(state, cancellationToken);
                 return state;
@@ -577,7 +577,7 @@ public sealed class GridBotWorker : BackgroundService
         {
             await SynchronizeLiveOrdersAsync(state, [], profile, cancellationToken);
             var activeOrders = await _repository.GetActiveOrdersAsync(_gridOptions.Symbol, cancellationToken);
-            if (await HandleStopConditionsAsync(state, currentPrice, activeOrders, cancellationToken))
+            if (await HandleStopConditionsAsync(profile, state, currentPrice, activeOrders, cancellationToken))
             {
                 await _repository.SaveBotStateAsync(state, cancellationToken);
                 return state;
@@ -634,7 +634,7 @@ public sealed class GridBotWorker : BackgroundService
         if (_appOptions.TradingMode == TradingMode.Paper)
         {
             var activeOrders = await _repository.GetActiveOrdersAsync(_gridOptions.Symbol, cancellationToken);
-            if (await HandleStopConditionsAsync(state, currentPrice, activeOrders, cancellationToken))
+            if (await HandleStopConditionsAsync(profile, state, currentPrice, activeOrders, cancellationToken))
             {
                 await _repository.SaveBotStateAsync(state, cancellationToken);
                 return state;
@@ -647,7 +647,7 @@ public sealed class GridBotWorker : BackgroundService
         {
             await SynchronizeLiveOrdersAsync(state, [], profile, cancellationToken);
             var activeOrders = await _repository.GetActiveOrdersAsync(_gridOptions.Symbol, cancellationToken);
-            if (await HandleStopConditionsAsync(state, currentPrice, activeOrders, cancellationToken))
+            if (await HandleStopConditionsAsync(profile, state, currentPrice, activeOrders, cancellationToken))
             {
                 await _repository.SaveBotStateAsync(state, cancellationToken);
                 return state;
@@ -941,7 +941,7 @@ public sealed class GridBotWorker : BackgroundService
             await BootstrapPaperInventoryIfNeededAsync(state, levels, instrument, currentPrice, cancellationToken);
 
             var activeOrders = await _repository.GetActiveOrdersAsync(_gridOptions.Symbol, cancellationToken);
-            if (await HandleStopConditionsAsync(state, currentPrice, activeOrders, cancellationToken))
+            if (await HandleStopConditionsAsync(profile, state, currentPrice, activeOrders, cancellationToken))
             {
                 await _repository.SaveBotStateAsync(state, cancellationToken);
                 return state;
@@ -954,7 +954,7 @@ public sealed class GridBotWorker : BackgroundService
         {
             await SynchronizeLiveOrdersAsync(state, levels, profile, cancellationToken);
             var activeOrders = await _repository.GetActiveOrdersAsync(_gridOptions.Symbol, cancellationToken);
-            if (await HandleStopConditionsAsync(state, currentPrice, activeOrders, cancellationToken))
+            if (await HandleStopConditionsAsync(profile, state, currentPrice, activeOrders, cancellationToken))
             {
                 await _repository.SaveBotStateAsync(state, cancellationToken);
                 return state;
@@ -1373,6 +1373,7 @@ public sealed class GridBotWorker : BackgroundService
     }
 
     private async Task<bool> HandleStopConditionsAsync(
+        GridBotSettings profile,
         BotState state,
         decimal currentPrice,
         IReadOnlyCollection<GridOrder> activeOrders,
@@ -1380,6 +1381,11 @@ public sealed class GridBotWorker : BackgroundService
     {
         if (_strategy.IsBelowStop(_gridOptions, currentPrice))
         {
+            if (await TryForceRefreshCurrentStrategyAfterStopAsync(profile, state, currentPrice, cancellationToken))
+            {
+                return true;
+            }
+
             await PauseTradingAsync(
                 state,
                 "Price moved below STOP_LOWER_PRICE.",
@@ -1392,6 +1398,11 @@ public sealed class GridBotWorker : BackgroundService
 
         if (_strategy.IsAboveStop(_gridOptions, currentPrice))
         {
+            if (await TryForceRefreshCurrentStrategyAfterStopAsync(profile, state, currentPrice, cancellationToken))
+            {
+                return true;
+            }
+
             await PauseTradingAsync(
                 state,
                 "Price moved above STOP_UPPER_PRICE.",
@@ -1403,6 +1414,71 @@ public sealed class GridBotWorker : BackgroundService
         }
 
         return false;
+    }
+
+    private async Task<bool> TryForceRefreshCurrentStrategyAfterStopAsync(
+        GridBotSettings profile,
+        BotState state,
+        decimal currentPrice,
+        CancellationToken cancellationToken)
+    {
+        var gridOptions = RuntimeGridOptionsFactory.ToGridOptions(profile, _defaultGridOptions);
+        var candles = await _bybitRestClient.GetKlinesAsync(
+            gridOptions.Category,
+            gridOptions.Symbol,
+            AnalysisDefaults.AutoRecommendationCandleInterval,
+            AnalysisDefaults.AutoRecommendationLookbackCandles,
+            cancellationToken);
+        if (candles.Count == 0)
+        {
+            return false;
+        }
+
+        var regime = _marketRegimeAnalyzer.Analyze(candles);
+        var recommendation = _autoStrategySelector.RecommendForStrategy(gridOptions, regime, candles, profile.StrategyType);
+        if (currentPrice < recommendation.StopLowerPrice || currentPrice > recommendation.StopUpperPrice)
+        {
+            return false;
+        }
+
+        var refreshedSettings = new GridBotSettings
+        {
+            Symbol = profile.Symbol,
+            Category = profile.Category,
+            StrategySelectionMode = profile.StrategySelectionMode,
+            StrategyType = profile.StrategyType,
+            StrategyConfigJson = recommendation.StrategyConfigJson,
+            LowerPrice = recommendation.LowerPrice,
+            UpperPrice = recommendation.UpperPrice,
+            Step = recommendation.Step,
+            OrderSizeUsdt = recommendation.OrderSizeUsdt,
+            StopLowerPrice = recommendation.StopLowerPrice,
+            StopUpperPrice = recommendation.StopUpperPrice,
+            UpdatedAt = DateTimeOffset.UtcNow
+        };
+
+        await _repository.SaveRuntimeSettingsAsync(refreshedSettings, cancellationToken);
+
+        if (state.IsPaused)
+        {
+            state.IsPaused = false;
+            state.PauseReason = null;
+        }
+
+        state.UpdatedAt = DateTimeOffset.UtcNow;
+        await _repository.SaveBotStateAsync(state, cancellationToken);
+
+        _logger.LogInformation(
+            "Forced same-strategy recommendation refresh kept {Symbol} running after stop boundary breach. Strategy: {Strategy}, Stop: {StopLower}-{StopUpper}",
+            refreshedSettings.Symbol,
+            refreshedSettings.StrategyType,
+            refreshedSettings.StopLowerPrice,
+            refreshedSettings.StopUpperPrice);
+        await _notifier.NotifyAsync(
+            $"Stop boundary auto-refresh applied.\nSymbol: `{refreshedSettings.Symbol}`\nStrategy kept: `{refreshedSettings.StrategyType}`\nStop: `{refreshedSettings.StopLowerPrice}`-`{refreshedSettings.StopUpperPrice}`",
+            cancellationToken);
+
+        return true;
     }
 
     private async Task PauseTradingAsync(

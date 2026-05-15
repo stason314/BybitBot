@@ -71,6 +71,45 @@ public sealed class AutoStrategySelectorTests
     }
 
     [Fact]
+    public void RecommendForStrategy_KeepsRequestedStrategy()
+    {
+        var selector = new AutoStrategySelector();
+        var options = new GridOptions
+        {
+            LowerPrice = 0.22m,
+            UpperPrice = 0.24m,
+            Step = 0.001m,
+            OrderSizeUsdt = 15m,
+            MinOrderSizeUsdt = 15m,
+            StopLowerPrice = 0.20m,
+            StopUpperPrice = 0.26m
+        };
+        var candles = BuildCandles(0.23m, 0.235m, 0.221m, 30);
+
+        var recommendation = selector.RecommendForStrategy(
+            options,
+            new MarketRegimeAnalysis
+            {
+                Regime = MarketRegimeType.Danger,
+                MovePercent = 5m,
+                RangePercent = 10m,
+                Recommendation = "Danger",
+                Support = 0.221m,
+                Resistance = 0.235m
+            },
+            candles,
+            TradingStrategyType.Hybrid);
+
+        using var config = JsonDocument.Parse(recommendation.StrategyConfigJson);
+
+        Assert.Equal(TradingStrategyType.Hybrid, recommendation.StrategyType);
+        Assert.Equal(15m, config.RootElement.GetProperty("orderSizeUsdt").GetDecimal());
+        Assert.Equal(15m, config.RootElement.GetProperty("signalOrderSizeUsdt").GetDecimal());
+        Assert.True(recommendation.StopLowerPrice < recommendation.LowerPrice);
+        Assert.True(recommendation.StopUpperPrice > recommendation.UpperPrice);
+    }
+
+    [Fact]
     public void Recommend_ReturnsBtd_ForDowntrend()
     {
         var selector = new AutoStrategySelector();

@@ -187,6 +187,35 @@ public sealed class AutoStrategySelector
         };
     }
 
+    public AutoConfigRecommendation RecommendForStrategy(
+        GridOptions currentOptions,
+        MarketRegimeAnalysis regime,
+        IReadOnlyList<Candle> candles,
+        TradingStrategyType strategyType)
+    {
+        var marketRecommendation = Recommend(currentOptions, regime, candles);
+        var strategyConfigJson = BuildStrategyConfig(
+            strategyType,
+            marketRecommendation.OrderSizeUsdt,
+            currentOptions.MinOrderSizeUsdt,
+            marketRecommendation.LowerPrice,
+            marketRecommendation.StopLowerPrice,
+            marketRecommendation.StopUpperPrice,
+            marketRecommendation.Metrics);
+
+        return Build(
+            strategyType,
+            $"Updated recommended config for current {strategyType} strategy. Market recommendation was {marketRecommendation.StrategyType}: {marketRecommendation.Reason}",
+            marketRecommendation.LowerPrice,
+            marketRecommendation.UpperPrice,
+            marketRecommendation.Step,
+            marketRecommendation.OrderSizeUsdt,
+            marketRecommendation.StopLowerPrice,
+            marketRecommendation.StopUpperPrice,
+            strategyConfigJson,
+            marketRecommendation.Metrics);
+    }
+
     private static AutoConfigRecommendation FromCurrent(
         GridOptions options,
         TradingStrategyType strategyType,
@@ -297,6 +326,84 @@ public sealed class AutoStrategySelector
             candleInterval = "1",
             maxPositionUsdt = 500m,
             dcaBelowPrice = decimal.Round(dcaBelowPrice, 8, MidpointRounding.ToZero)
+        };
+
+        return JsonSerializer.Serialize(config, JsonOptions);
+    }
+
+    private static string BuildStrategyConfig(
+        TradingStrategyType strategyType,
+        decimal orderSize,
+        decimal minOrderSize,
+        decimal lower,
+        decimal stopLower,
+        decimal stopUpper,
+        AutoConfigMetrics metrics)
+    {
+        return strategyType switch
+        {
+            TradingStrategyType.Dca => BuildDcaConfig(orderSize, minOrderSize),
+            TradingStrategyType.Combo => BuildComboConfig(orderSize, minOrderSize, lower),
+            TradingStrategyType.Btd => BuildBtdConfig(orderSize, minOrderSize, metrics.DrawdownPercent, metrics.LastPrice, stopLower, stopUpper),
+            TradingStrategyType.Signal => BuildSignalConfig(orderSize, minOrderSize, stopLower, stopUpper),
+            TradingStrategyType.Hybrid => BuildHybridConfig(orderSize, minOrderSize, lower, metrics.DrawdownPercent, metrics.LastPrice, stopLower, stopUpper),
+            _ => "{}"
+        };
+    }
+
+    private static string BuildDcaConfig(decimal orderSize, decimal minOrderSize)
+    {
+        var config = new
+        {
+            orderSizeUsdt = decimal.Round(decimal.Max(minOrderSize, orderSize), 2, MidpointRounding.AwayFromZero),
+            buyIntervalMinutes = 30,
+            maxActiveBuyOrders = 1,
+            takeProfitPercent = 1m,
+            limitOffsetPercent = 0.1m,
+            dipPercent = 0.7m,
+            dipLookbackCandles = 30,
+            candleInterval = "1",
+            maxPositionUsdt = 400m
+        };
+
+        return JsonSerializer.Serialize(config, JsonOptions);
+    }
+
+    private static string BuildHybridConfig(
+        decimal orderSize,
+        decimal minOrderSize,
+        decimal dcaBelowPrice,
+        decimal drawdownPercent,
+        decimal lastPrice,
+        decimal stopLower,
+        decimal stopUpper)
+    {
+        var roundedOrderSize = decimal.Round(decimal.Max(minOrderSize, orderSize), 2, MidpointRounding.AwayFromZero);
+        var config = new
+        {
+            orderSizeUsdt = roundedOrderSize,
+            buyIntervalMinutes = 30,
+            maxActiveBuyOrders = 1,
+            takeProfitPercent = 1m,
+            limitOffsetPercent = 0.1m,
+            dipPercent = decimal.Round(decimal.Max(0.7m, decimal.Min(3m, drawdownPercent <= 0m ? 1.2m : drawdownPercent)), 2, MidpointRounding.AwayFromZero),
+            dipLookbackCandles = 30,
+            candleInterval = "1",
+            maxBuys = 3,
+            minMinutesBetweenBuys = 10,
+            maxPositionUsdt = 400m,
+            dcaBelowPrice = decimal.Round(dcaBelowPrice, 8, MidpointRounding.ToZero),
+            referencePrice = decimal.Round(lastPrice, 8, MidpointRounding.AwayFromZero),
+            signalOrderSizeUsdt = roundedOrderSize,
+            signalMaxPositionUsdt = 200m,
+            signalTakeProfitPercent = 2m,
+            signalStopLossPercent = 2m,
+            signalLimitOffsetPercent = 0m,
+            cooldownMinutes = 30,
+            minConfidence = 0.65m,
+            lookbackCandles = 120,
+            stopLowerPrice = stopLower,
+            stopUpperPrice = stopUpper
         };
 
         return JsonSerializer.Serialize(config, JsonOptions);

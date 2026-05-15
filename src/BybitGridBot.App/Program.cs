@@ -89,6 +89,12 @@ app.MapPost("/api/settings/apply-auto", async (string? symbol, IGridDashboardSer
     return response.Success ? Results.Ok(response) : Results.BadRequest(response);
 });
 
+app.MapPost("/api/settings/apply-selected-recommendation", async (UpdateSettingsRequest request, IGridDashboardService dashboardService, CancellationToken cancellationToken) =>
+{
+    var response = await dashboardService.ApplyRecommendationForSelectedStrategyAsync(request, cancellationToken);
+    return response.Success ? Results.Ok(response) : Results.BadRequest(response);
+});
+
 app.MapDelete("/api/settings/{symbol}", async (string symbol, IGridDashboardService dashboardService, CancellationToken cancellationToken) =>
 {
     var response = await dashboardService.DeleteSettingsAsync(symbol, cancellationToken);

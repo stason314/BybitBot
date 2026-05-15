@@ -12,6 +12,7 @@ public interface IGridDashboardService
 {
     Task<DashboardResponse> GetDashboardAsync(string? symbol, CancellationToken cancellationToken);
     Task<UpdateSettingsResponse> ApplyAutoRecommendationAsync(string? symbol, CancellationToken cancellationToken);
+    Task<UpdateSettingsResponse> ApplyRecommendationForSelectedStrategyAsync(UpdateSettingsRequest request, CancellationToken cancellationToken);
     Task<UpdateSettingsResponse> UpdateSettingsAsync(UpdateSettingsRequest request, CancellationToken cancellationToken);
     Task<UpdateSettingsResponse> DeleteSettingsAsync(string symbol, CancellationToken cancellationToken);
     Task<UpdateSettingsResponse> ResumeTradingAsync(string? symbol, CancellationToken cancellationToken);
@@ -296,6 +297,116 @@ public sealed class GridDashboardService : IGridDashboardService
             Success = true,
             Symbol = runtimeSettings.Symbol,
             Message = $"Auto recommendation applied: {recommendation.StrategyType}. {recommendation.Reason}{resumeMessage}"
+        };
+    }
+
+    public async Task<UpdateSettingsResponse> ApplyRecommendationForSelectedStrategyAsync(
+        UpdateSettingsRequest request,
+        CancellationToken cancellationToken)
+    {
+        var symbol = request.Symbol.Trim().ToUpperInvariant();
+        var category = string.IsNullOrWhiteSpace(request.Category) ? "spot" : request.Category.Trim().ToLowerInvariant();
+        var strategyMode = ParseStrategySelectionMode(request.StrategyMode);
+        var strategyType = ParseTradingStrategyType(request.StrategyType);
+        var strategyConfigJson = NormalizeStrategyConfigJson(request.StrategyConfigJson);
+        var errors = ValidateRequest(symbol, category, request);
+        if (strategyMode is null)
+        {
+            errors.Add("Strategy mode must be manual or auto.");
+        }
+
+        if (strategyType is null)
+        {
+            errors.Add("Strategy type must be grid, dca, combo, btd, signal, hybrid, or notrade.");
+        }
+
+        if (strategyConfigJson is null)
+        {
+            errors.Add("Strategy config JSON is invalid.");
+        }
+
+        if (errors.Count > 0)
+        {
+            return new UpdateSettingsResponse
+            {
+                Success = false,
+                Symbol = symbol,
+                Message = "Validation failed.",
+                Errors = errors
+            };
+        }
+
+        var currentSettings = new GridBotSettings
+        {
+            Symbol = symbol,
+            Category = category,
+            StrategySelectionMode = strategyMode!.Value,
+            StrategyType = strategyType!.Value,
+            StrategyConfigJson = strategyConfigJson!,
+            LowerPrice = request.LowerPrice,
+            UpperPrice = request.UpperPrice,
+            Step = request.Step,
+            OrderSizeUsdt = request.OrderSizeUsdt,
+            StopLowerPrice = request.StopLowerPrice,
+            StopUpperPrice = request.StopUpperPrice,
+            UpdatedAt = DateTimeOffset.UtcNow
+        };
+
+        var gridOptions = RuntimeGridOptionsFactory.ToGridOptions(currentSettings, _defaultGridOptions);
+        var candles = await GetAnalysisCandlesAsync(gridOptions, cancellationToken);
+        if (candles.Count == 0)
+        {
+            return new UpdateSettingsResponse
+            {
+                Success = false,
+                Symbol = symbol,
+                Message = "Cannot apply recommendation for selected strategy.",
+                Errors = ["Market data is unavailable."]
+            };
+        }
+
+        var recommendation = _autoStrategySelector.RecommendForStrategy(
+            gridOptions,
+            AnalyzeMarketRegime(candles),
+            candles,
+            strategyType!.Value);
+        var recommendedSettings = BuildRecommendedSettings(currentSettings, recommendation, strategyMode!.Value, DateTimeOffset.UtcNow);
+        var state = await _repository.GetBotStateAsync(symbol, cancellationToken);
+        var activeOrders = await _repository.GetActiveOrdersAsync(symbol, cancellationToken);
+        var safetyErrors = AutoRecommendationApplySafety.Validate(
+            currentSettings,
+            state,
+            activeOrders,
+            recommendation,
+            recommendedSettings,
+            _riskOptions,
+            _strategy);
+        safetyErrors = safetyErrors
+            .Where(error => !error.StartsWith("Recommended settings are too close", StringComparison.Ordinal))
+            .ToArray();
+        var forceResumeAfterStopPause = state?.IsPaused == true && IsStopBoundaryPause(state.PauseReason);
+        if (safetyErrors.Count > 0 && !forceResumeAfterStopPause)
+        {
+            return new UpdateSettingsResponse
+            {
+                Success = false,
+                Symbol = symbol,
+                Message = "Selected strategy recommendation was not applied by safety checks.",
+                Errors = safetyErrors
+            };
+        }
+
+        await _repository.SaveRuntimeSettingsAsync(recommendedSettings, cancellationToken);
+        var resumeMessage = await TryClearPauseForSettingsAsync(recommendedSettings, cancellationToken);
+        var forceMessage = forceResumeAfterStopPause && safetyErrors.Count > 0
+            ? $" Safety checks were bypassed because trading was paused by stop boundaries: {string.Join(" | ", safetyErrors)}."
+            : string.Empty;
+
+        return new UpdateSettingsResponse
+        {
+            Success = true,
+            Symbol = symbol,
+            Message = $"Recommendation applied to selected {strategyType.Value} strategy without changing symbol or strategy.{resumeMessage}{forceMessage}"
         };
     }
 
@@ -906,6 +1017,7 @@ public sealed class GridDashboardService : IGridDashboardService
         <div class="pause-box" id="pauseBox" hidden>
           <strong>Trading paused</strong>
           <p id="pauseReason">-</p>
+          <button type="button" class="secondary-button" id="autoUpdateResume">Auto Update Config & Resume</button>
           <button type="button" class="secondary-button" id="resumeTrading">Resume Trading</button>
         </div>
       </section>
@@ -970,6 +1082,7 @@ public sealed class GridDashboardService : IGridDashboardService
       <div class="auto-actions">
         <button type="button" class="secondary-button compact-button" id="refreshAutoRecommendation">Refresh Recommendation</button>
         <button type="button" class="secondary-button compact-button" id="applyAutoRecommendation">Apply Recommendation</button>
+        <button type="button" class="secondary-button compact-button" id="applySelectedStrategyRecommendation">Apply To Selected Strategy</button>
       </div>
     </section>
 
@@ -1204,6 +1317,11 @@ public sealed class GridDashboardService : IGridDashboardService
       stopUpperPrice: Number(byId('stopUpperPrice').value),
       isDirty: isSettingsFormDirty()
     });
+    const buildSettingsPayload = () => {
+      const snapshot = readSettingsFormSnapshot();
+      delete snapshot.isDirty;
+      return snapshot;
+    };
     const parseStrategyConfigSnapshot = (strategyConfigJson) => {
       try {
         return {
@@ -1358,6 +1476,26 @@ public sealed class GridDashboardService : IGridDashboardService
         await loadDashboard({ forceSettingsRefresh: true });
       }
     };
+    const applySelectedStrategyRecommendation = async (message) => {
+      const status = byId('formStatus');
+      status.className = 'status';
+      status.textContent = message || 'Applying recommendation to the selected strategy...';
+      const response = await fetch('/api/settings/apply-selected-recommendation', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(buildSettingsPayload())
+      });
+      const result = await response.json();
+      status.className = `status ${response.ok ? 'ok' : 'error'}`;
+      status.textContent = response.ok ? result.message : (result.errors?.join(' | ') || result.message || 'Failed to apply selected strategy recommendation.');
+      if (response.ok) {
+        selectedSymbol = (result.symbol || byId('symbol').value).toUpperCase();
+        isCreatingNewProfile = false;
+        updateSelectedSymbolUrl();
+        setSettingsFormDirty(false);
+        await loadDashboard({ forceSettingsRefresh: true });
+      }
+    };
 
     async function loadDashboard(options = {}) {
       const forceSettingsRefresh = Boolean(options.forceSettingsRefresh);
@@ -1504,6 +1642,9 @@ public sealed class GridDashboardService : IGridDashboardService
         await loadDashboard({ forceSettingsRefresh: true });
       }
     });
+    byId('applySelectedStrategyRecommendation').addEventListener('click', async () => {
+      await applySelectedStrategyRecommendation('Refreshing market data and applying it to the selected strategy...');
+    });
     byId('profileTabs').addEventListener('click', async (event) => {
       const actionTarget = event.target.closest('[data-action]');
       if (!actionTarget) {
@@ -1562,22 +1703,13 @@ public sealed class GridDashboardService : IGridDashboardService
         await loadDashboard({ forceSettingsRefresh: true });
       }
     });
+    byId('autoUpdateResume').addEventListener('click', async () => {
+      await applySelectedStrategyRecommendation('Updating stop/range/config for the selected strategy and resuming if possible...');
+    });
 
     document.getElementById('settingsForm').addEventListener('submit', async (event) => {
       event.preventDefault();
-      const payload = {
-        symbol: byId('symbol').value,
-        category: byId('category').value,
-        strategyMode: byId('strategyMode').value,
-        strategyType: byId('strategyType').value,
-        strategyConfigJson: byId('strategyConfigJson').value,
-        lowerPrice: Number(byId('lowerPrice').value),
-        upperPrice: Number(byId('upperPrice').value),
-        step: Number(byId('step').value),
-        orderSizeUsdt: Number(byId('orderSizeUsdt').value),
-        stopLowerPrice: Number(byId('stopLowerPrice').value),
-        stopUpperPrice: Number(byId('stopUpperPrice').value)
-      };
+      const payload = buildSettingsPayload();
 
       const response = await fetch('/api/settings', {
         method: 'POST',
@@ -1713,6 +1845,13 @@ public sealed class GridDashboardService : IGridDashboardService
         await _repository.SaveBotStateAsync(state, cancellationToken);
 
         return $" Pause cleared for {settings.Symbol}.";
+    }
+
+    private static bool IsStopBoundaryPause(string? pauseReason)
+    {
+        return pauseReason is not null &&
+            (pauseReason.Contains("STOP_LOWER_PRICE", StringComparison.OrdinalIgnoreCase) ||
+             pauseReason.Contains("STOP_UPPER_PRICE", StringComparison.OrdinalIgnoreCase));
     }
 
     private async Task<decimal?> GetCurrentOrLastPriceAsync(string category, string symbol, decimal? fallbackPrice, CancellationToken cancellationToken)
