@@ -1,6 +1,7 @@
 using System.Text.Json;
 using BybitGridBot.Bybit;
 using BybitGridBot.Domain;
+using BybitGridBot.Risk;
 using BybitGridBot.Storage;
 using BybitGridBot.Strategy;
 using Microsoft.Extensions.Options;
@@ -15,6 +16,7 @@ public interface IFuturesDashboardService
     Task<UpdateSettingsResponse> DeleteSettingsAsync(string symbol, CancellationToken cancellationToken);
     Task<UpdateSettingsResponse> SetProfileEnabledAsync(string symbol, bool enabled, CancellationToken cancellationToken);
     Task<UpdateSettingsResponse> ClosePositionAsync(string symbol, CancellationToken cancellationToken);
+    Task<UpdateSettingsResponse> OpenPaperTestPositionAsync(string symbol, CancellationToken cancellationToken);
     Task<UpdateSettingsResponse> CancelActiveOrdersAsync(string symbol, CancellationToken cancellationToken);
     string RenderDashboardPage();
 }
@@ -33,6 +35,8 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
     private readonly AppOptions _appOptions;
     private readonly FuturesExecutionService _executionService;
     private readonly FuturesOptions _futuresOptions;
+    private readonly FuturesRiskManager _riskManager;
+    private readonly FuturesRiskOptions _riskOptions;
     private readonly FuturesAutoConfigRecommender _recommender;
     private readonly IGridRepository _repository;
 
@@ -41,6 +45,8 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         IOptions<AppOptions> appOptions,
         FuturesExecutionService executionService,
         IOptions<FuturesOptions> futuresOptions,
+        IOptions<FuturesRiskOptions> riskOptions,
+        FuturesRiskManager riskManager,
         FuturesAutoConfigRecommender recommender,
         IGridRepository repository)
     {
@@ -48,6 +54,8 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         _appOptions = appOptions.Value;
         _executionService = executionService;
         _futuresOptions = futuresOptions.Value;
+        _riskOptions = riskOptions.Value;
+        _riskManager = riskManager;
         _recommender = recommender;
         _repository = repository;
     }
@@ -379,11 +387,186 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             Instrument = MapInstrumentRules(instrument)
         }, cancellationToken);
 
+        if (result.IsPaper)
+        {
+            var state = await EnsurePaperStateAsync(settings, price, cancellationToken);
+            FuturesReconciliationService.ApplyPositionToState(state, result.Position, updatePaperEquity: true);
+            await _repository.SaveBotStateAsync(state, cancellationToken);
+        }
+
         return new UpdateSettingsResponse
         {
             Success = true,
             Symbol = normalizedSymbol,
             Message = result.IsPaper ? "Paper futures position closed reduce-only." : "Futures reduce-only close submitted."
+        };
+    }
+
+    public async Task<UpdateSettingsResponse> OpenPaperTestPositionAsync(string symbol, CancellationToken cancellationToken)
+    {
+        var normalizedSymbol = NormalizeSymbol(symbol);
+        if (_appOptions.TradingMode != TradingMode.Paper)
+        {
+            return new UpdateSettingsResponse
+            {
+                Success = false,
+                Symbol = normalizedSymbol,
+                Message = "Paper test entry is disabled outside paper mode.",
+                Errors = ["Paper Test Entry is available only when TRADING_MODE=Paper."]
+            };
+        }
+
+        var settings = await _repository.GetFuturesSettingsAsync(normalizedSymbol, cancellationToken);
+        if (settings is null)
+        {
+            return new UpdateSettingsResponse
+            {
+                Success = false,
+                Symbol = normalizedSymbol,
+                Message = "Futures profile not found.",
+                Errors = [$"Futures profile {normalizedSymbol} does not exist."]
+            };
+        }
+
+        if (!settings.Enabled)
+        {
+            return new UpdateSettingsResponse
+            {
+                Success = false,
+                Symbol = normalizedSymbol,
+                Message = "Futures profile is disabled.",
+                Errors = ["Enable the futures profile before opening a paper test entry."]
+            };
+        }
+
+        var ticker = await _bybitRestClient.GetTickerAsync(settings.Category, settings.Symbol, cancellationToken);
+        var instrument = await _bybitRestClient.GetInstrumentInfoAsync(settings.Category, settings.Symbol, cancellationToken);
+        var price = instrument.RoundPrice(ticker.LastPrice);
+        if (price <= 0m)
+        {
+            return new UpdateSettingsResponse
+            {
+                Success = false,
+                Symbol = normalizedSymbol,
+                Message = "Cannot open paper test entry.",
+                Errors = ["Current futures ticker price is unavailable."]
+            };
+        }
+
+        var position = await ResolvePositionSnapshotAsync(settings, cancellationToken);
+        if (position.Size > 0m)
+        {
+            return new UpdateSettingsResponse
+            {
+                Success = false,
+                Symbol = normalizedSymbol,
+                Message = "Paper test entry skipped.",
+                Errors = ["A futures position is already open."]
+            };
+        }
+
+        var quantity = CalculateMinimumOrderQuantity(price, MapInstrumentRules(instrument));
+        if (quantity <= 0m)
+        {
+            quantity = instrument.RoundQuantity(settings.MaxNotionalUsdt * 0.25m / price);
+        }
+
+        var notional = quantity * price;
+        if (quantity <= 0m || notional <= 0m)
+        {
+            return new UpdateSettingsResponse
+            {
+                Success = false,
+                Symbol = normalizedSymbol,
+                Message = "Cannot open paper test entry.",
+                Errors = ["Instrument minimum quantity could not be resolved."]
+            };
+        }
+
+        if (notional > settings.MaxNotionalUsdt)
+        {
+            return new UpdateSettingsResponse
+            {
+                Success = false,
+                Symbol = normalizedSymbol,
+                Message = "Cannot open paper test entry.",
+                Errors = [$"Minimum order notional {notional:F4} exceeds profile max notional {settings.MaxNotionalUsdt:F4}."]
+            };
+        }
+
+        var intent = new FuturesTradeIntent
+        {
+            Symbol = settings.Symbol,
+            Category = settings.Category,
+            Action = FuturesTradeAction.OpenLong,
+            Price = price,
+            Quantity = quantity,
+            Leverage = settings.Leverage,
+            StopLossPrice = instrument.RoundPrice(price * (1m - settings.StopLossPercent / 100m)),
+            TakeProfitPrice = instrument.RoundPrice(price * (1m + settings.TakeProfitPercent / 100m)),
+            LiquidationPrice = EstimateLongLiquidationPrice(price, settings.Leverage),
+            PositionIdx = 0,
+            OrderLinkId = FuturesOrderLinkIds.Create(FuturesTradeAction.OpenLong),
+            Reason = "dashboard-paper-test-entry"
+        };
+
+        var state = await EnsurePaperStateAsync(settings, price, cancellationToken);
+        var openPositionCount = await CountOpenFuturesPositionsAsync(cancellationToken);
+        var riskDecision = _riskManager.Evaluate(new FuturesRiskEvaluationContext
+        {
+            RiskOptions = _riskOptions,
+            Intent = intent,
+            Position = position,
+            MarkPrice = price,
+            AvailableMarginUsdt = decimal.Max(0m, settings.MaxMarginUsdt - position.MarginUsedUsdt),
+            DailyRealizedPnl = state.DailyRealizedPnl,
+            TotalRealizedPnl = state.TotalRealizedPnl,
+            AccountEquityUsdt = state.QuoteAssetBalance + state.UnrealizedPnl,
+            CurrentDrawdownUsdt = state.CurrentDrawdownUsdt,
+            CurrentDrawdownPercent = state.CurrentDrawdownPercent,
+            OpenPositionCount = openPositionCount
+        });
+        await _repository.AddFuturesRiskDecisionAsync(new FuturesRiskDecisionRecord
+        {
+            Symbol = settings.Symbol,
+            Source = "PaperTestEntry",
+            OrderLinkId = intent.OrderLinkId,
+            Action = intent.Action,
+            IsAllowed = riskDecision.IsAllowed,
+            Reason = riskDecision.Reason,
+            Severity = riskDecision.Severity.ToString(),
+            SuggestedAction = riskDecision.SuggestedAction.ToString(),
+            CreatedAt = DateTimeOffset.UtcNow
+        }, cancellationToken);
+
+        if (!riskDecision.IsAllowed)
+        {
+            return new UpdateSettingsResponse
+            {
+                Success = false,
+                Symbol = normalizedSymbol,
+                Message = "Paper test entry blocked by futures risk manager.",
+                Errors = [riskDecision.Reason]
+            };
+        }
+
+        var result = await _executionService.ExecuteAsync(new FuturesExecutionRequest
+        {
+            Settings = settings,
+            Intent = intent,
+            Position = position,
+            MarkPrice = price,
+            Instrument = MapInstrumentRules(instrument)
+        }, cancellationToken);
+
+        FuturesReconciliationService.ApplyPositionToState(state, result.Position, updatePaperEquity: true);
+        await _repository.SaveBotStateAsync(state, cancellationToken);
+
+        return new UpdateSettingsResponse
+        {
+            Success = true,
+            Symbol = normalizedSymbol,
+            Message = $"Paper test long opened. Notional: {intent.NotionalUsdt:F4} USDT, qty: {intent.Quantity:F8}."
         };
     }
 
@@ -555,6 +738,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         <div id="runtimeStatus" class="actions"></div>
         <div class="actions">
           <button type="button" id="toggleProfile">Toggle</button>
+          <button type="button" class="primary" id="paperTestEntry">Paper Test Entry</button>
           <button type="button" class="danger" id="closePosition">Close Position</button>
           <button type="button" class="danger" id="cancelFuturesOrders">Cancel Orders</button>
         </div>
@@ -789,6 +973,12 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
     };
     const renderRuntime = (data) => {
       const preflight = data.lastPreflightResult;
+      const paperTestEntry = byId('paperTestEntry');
+      const paperTestEnabled = data.tradingMode === 'Paper' && data.settings.enabled;
+      paperTestEntry.disabled = !paperTestEnabled;
+      paperTestEntry.title = data.tradingMode === 'Paper'
+        ? (data.settings.enabled ? 'Open a minimal paper long through futures execution.' : 'Enable the futures profile first.')
+        : 'Paper Test Entry is available only when TRADING_MODE=Paper.';
       byId('runtimeStatus').innerHTML = [
         `<span class="chip">${escapeHtml(data.tradingMode)}</span>`,
         `<span class="chip">${data.futuresEnabled ? 'Futures enabled' : 'Futures disabled'}</span>`,
@@ -1059,6 +1249,16 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
       const symbol = selectedSymbol || latest?.settings?.symbol;
       if (!symbol) return;
       const response = await fetch(`/api/futures/position/${encodeURIComponent(symbol)}/close`, { method: 'POST' });
+      const result = await response.json();
+      byId('controlStatus').className = `status ${response.ok ? 'ok' : 'error'}`;
+      byId('controlStatus').textContent = response.ok ? result.message : (result.errors?.join(' | ') || result.message);
+      await load(true);
+    });
+    byId('paperTestEntry').addEventListener('click', async () => {
+      const symbol = selectedSymbol || latest?.settings?.symbol;
+      if (latest?.tradingMode !== 'Paper') return;
+      if (!symbol) return;
+      const response = await fetch(`/api/futures/position/${encodeURIComponent(symbol)}/paper-test-entry`, { method: 'POST' });
       const result = await response.json();
       byId('controlStatus').className = `status ${response.ok ? 'ok' : 'error'}`;
       byId('controlStatus').textContent = response.ok ? result.message : (result.errors?.join(' | ') || result.message);
@@ -1347,7 +1547,63 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
                 RealizedPnl = bybitPosition.RealizedPnl,
                 PositionIdx = bybitPosition.PositionIdx,
                 UpdatedAt = bybitPosition.UpdatedAt
-            };
+        };
+    }
+
+    private async Task<BotState> EnsurePaperStateAsync(
+        FuturesBotSettings settings,
+        decimal markPrice,
+        CancellationToken cancellationToken)
+    {
+        var stateKey = FuturesStateKeys.ForSymbol(settings.Symbol);
+        var state = await _repository.GetBotStateAsync(stateKey, cancellationToken);
+        if (state is not null)
+        {
+            state.TradingMode = _appOptions.TradingMode;
+            state.LastObservedPrice = markPrice;
+            if (state.QuoteAssetBalance <= 0m)
+            {
+                state.QuoteAssetBalance = _futuresOptions.PaperInitialEquityUsdt + state.TotalRealizedPnl;
+            }
+
+            if (state.PeakEquityUsdt <= 0m)
+            {
+                state.PeakEquityUsdt = decimal.Max(_futuresOptions.PaperInitialEquityUsdt, state.QuoteAssetBalance + state.UnrealizedPnl);
+            }
+
+            return state;
+        }
+
+        state = new BotState
+        {
+            Symbol = stateKey,
+            TradingMode = _appOptions.TradingMode,
+            LastObservedPrice = markPrice,
+            PositionSide = "None",
+            Leverage = settings.Leverage,
+            MarginMode = settings.MarginMode.ToString(),
+            QuoteAssetBalance = _futuresOptions.PaperInitialEquityUsdt,
+            PeakEquityUsdt = _futuresOptions.PaperInitialEquityUsdt,
+            UpdatedAt = DateTimeOffset.UtcNow
+        };
+        await _repository.SaveBotStateAsync(state, cancellationToken);
+        return state;
+    }
+
+    private async Task<int> CountOpenFuturesPositionsAsync(CancellationToken cancellationToken)
+    {
+        var profiles = await _repository.GetFuturesSettingsProfilesAsync(cancellationToken);
+        var count = 0;
+        foreach (var profile in profiles.Where(static profile => profile.Enabled))
+        {
+            var position = await _repository.GetFuturesPositionAsync(profile.Symbol, cancellationToken);
+            if (position?.Size > 0m)
+            {
+                count++;
+            }
+        }
+
+        return count;
     }
 
     private static FuturesPositionSnapshot MapStateToSnapshot(FuturesBotSettings settings, BotState? state)
@@ -1387,6 +1643,21 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         MinOrderQty = instrument.MinOrderQty,
         MinOrderAmount = instrument.MinOrderAmount
     };
+
+    private static decimal CalculateMinimumOrderQuantity(decimal price, FuturesInstrumentRules instrument)
+    {
+        var minQuantity = instrument.MinOrderQty;
+        if (price > 0m && instrument.MinOrderAmount > 0m)
+        {
+            minQuantity = decimal.Max(minQuantity, instrument.MinOrderAmount / price);
+        }
+
+        var step = instrument.QtyStep > 0m ? instrument.QtyStep : instrument.BasePrecision;
+        return step > 0m ? Math.Ceiling(minQuantity / step) * step : minQuantity;
+    }
+
+    private static decimal EstimateLongLiquidationPrice(decimal entryPrice, decimal leverage) =>
+        leverage > 0m ? decimal.Max(0m, entryPrice * (1m - (1m / leverage))) : 0m;
 
     private async Task<IReadOnlyList<Candle>> GetAnalysisCandlesAsync(
         FuturesBotSettings settings,

@@ -173,6 +173,12 @@ app.MapPost("/api/futures/position/{symbol}/close", async (string symbol, IFutur
     return response.Success ? Results.Ok(response) : Results.BadRequest(response);
 });
 
+app.MapPost("/api/futures/position/{symbol}/paper-test-entry", async (string symbol, IFuturesDashboardService dashboardService, CancellationToken cancellationToken) =>
+{
+    var response = await dashboardService.OpenPaperTestPositionAsync(symbol, cancellationToken);
+    return response.Success ? Results.Ok(response) : Results.BadRequest(response);
+});
+
 app.MapPost("/api/futures/orders/{symbol}/cancel-active", async (string symbol, IFuturesDashboardService dashboardService, CancellationToken cancellationToken) =>
 {
     var response = await dashboardService.CancelActiveOrdersAsync(symbol, cancellationToken);
