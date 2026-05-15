@@ -119,6 +119,7 @@ internal static class AutoRecommendationApplySafety
             recommendedSettings.StrategyType is TradingStrategyType.Btd
                 or TradingStrategyType.NoTrade
                 or TradingStrategyType.Pause
+                or TradingStrategyType.ReduceOnly
                 or TradingStrategyType.Signal
                 or TradingStrategyType.TrendFollow
                 or TradingStrategyType.TrendFollowing

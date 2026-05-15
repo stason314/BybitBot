@@ -125,6 +125,8 @@ public sealed class GridDashboardService : IGridDashboardService
         var signalAnalysis = AnalyzeSignal(analysisCandles);
         var autoRecommendation = _autoStrategySelector.Recommend(gridOptions, marketRegime, analysisCandles);
         var recommendedSettings = BuildRecommendedSettings(runtimeSettings, autoRecommendation, StrategySelectionMode.Auto, generatedAt);
+        recommendedSettings = UseReduceOnlyWhenNoTradeWouldLeavePosition(recommendedSettings, state);
+        autoRecommendation = UseReduceOnlyRecommendationWhenNoTradeWouldLeavePosition(autoRecommendation, recommendedSettings);
         var autoRecommendationSafetyErrors = AutoRecommendationApplySafety.Validate(
             runtimeSettings,
             state,
@@ -270,6 +272,7 @@ public sealed class GridDashboardService : IGridDashboardService
         var state = await _repository.GetBotStateAsync(runtimeSettings.Symbol, cancellationToken);
         var activeOrders = await _repository.GetActiveOrdersAsync(runtimeSettings.Symbol, cancellationToken);
         var recommendedSettings = BuildRecommendedSettings(runtimeSettings, recommendation, StrategySelectionMode.Auto, DateTimeOffset.UtcNow);
+        recommendedSettings = UseReduceOnlyWhenNoTradeWouldLeavePosition(recommendedSettings, state);
         var safetyErrors = AutoRecommendationApplySafety.Validate(
             runtimeSettings,
             state,
@@ -296,7 +299,60 @@ public sealed class GridDashboardService : IGridDashboardService
         {
             Success = true,
             Symbol = runtimeSettings.Symbol,
-            Message = $"Auto recommendation applied: {recommendation.StrategyType}. {recommendation.Reason}{resumeMessage}"
+            Message = $"Auto recommendation applied: {recommendedSettings.StrategyType}. {recommendation.Reason}{resumeMessage}"
+        };
+    }
+
+    private static GridBotSettings UseReduceOnlyWhenNoTradeWouldLeavePosition(
+        GridBotSettings settings,
+        BotState? state)
+    {
+        if (settings.StrategyType != TradingStrategyType.NoTrade ||
+            state is null ||
+            state.BaseAssetQuantity <= 0m)
+        {
+            return settings;
+        }
+
+        return new GridBotSettings
+        {
+            Symbol = settings.Symbol,
+            Category = settings.Category,
+            StrategySelectionMode = settings.StrategySelectionMode,
+            StrategyType = TradingStrategyType.ReduceOnly,
+            StrategyConfigJson = settings.StrategyConfigJson,
+            LowerPrice = settings.LowerPrice,
+            UpperPrice = settings.UpperPrice,
+            Step = settings.Step,
+            OrderSizeUsdt = settings.OrderSizeUsdt,
+            StopLowerPrice = settings.StopLowerPrice,
+            StopUpperPrice = settings.StopUpperPrice,
+            UpdatedAt = settings.UpdatedAt
+        };
+    }
+
+    private static AutoConfigRecommendation UseReduceOnlyRecommendationWhenNoTradeWouldLeavePosition(
+        AutoConfigRecommendation recommendation,
+        GridBotSettings recommendedSettings)
+    {
+        if (recommendation.StrategyType != TradingStrategyType.NoTrade ||
+            recommendedSettings.StrategyType != TradingStrategyType.ReduceOnly)
+        {
+            return recommendation;
+        }
+
+        return new AutoConfigRecommendation
+        {
+            StrategyType = TradingStrategyType.ReduceOnly,
+            Reason = $"Position is open; using ReduceOnly instead of NoTrade. {recommendation.Reason}",
+            LowerPrice = recommendation.LowerPrice,
+            UpperPrice = recommendation.UpperPrice,
+            Step = recommendation.Step,
+            OrderSizeUsdt = recommendation.OrderSizeUsdt,
+            StopLowerPrice = recommendation.StopLowerPrice,
+            StopUpperPrice = recommendation.StopUpperPrice,
+            StrategyConfigJson = recommendation.StrategyConfigJson,
+            Metrics = recommendation.Metrics
         };
     }
 
@@ -317,7 +373,7 @@ public sealed class GridDashboardService : IGridDashboardService
 
         if (strategyType is null)
         {
-            errors.Add("Strategy type must be grid, dca, combo, btd, signal, trendfollow, hybrid, or notrade.");
+            errors.Add("Strategy type must be grid, dca, combo, btd, signal, trendfollow, hybrid, reduceonly, or notrade.");
         }
 
         if (strategyConfigJson is null)
@@ -425,7 +481,7 @@ public sealed class GridDashboardService : IGridDashboardService
 
         if (strategyType is null)
         {
-            errors.Add("Strategy type must be grid, dca, combo, btd, signal, trendfollow, hybrid, or notrade.");
+            errors.Add("Strategy type must be grid, dca, combo, btd, signal, trendfollow, hybrid, reduceonly, or notrade.");
         }
 
         if (strategyConfigJson is null)
@@ -1036,7 +1092,7 @@ public sealed class GridDashboardService : IGridDashboardService
           <div><label for="symbol">Symbol</label><input id="symbol" name="symbol" placeholder="BILLUSDT" required /></div>
           <div><label for="category">Category</label><input id="category" name="category" value="spot" required /></div>
           <div><label for="strategyMode">Strategy Mode</label><select id="strategyMode" name="strategyMode"><option value="manual">manual</option><option value="auto">auto</option></select></div>
-          <div><label for="strategyType">Strategy Type</label><select id="strategyType" name="strategyType"><option value="grid">Grid</option><option value="dca">DCA</option><option value="combo">Combo Grid + DCA</option><option value="btd">BTD Buy The Dip</option><option value="signal">Signal Bot</option><option value="trendfollow">TrendFollow</option><option value="hybrid">Hybrid</option><option value="notrade">NoTrade</option></select></div>
+          <div><label for="strategyType">Strategy Type</label><select id="strategyType" name="strategyType"><option value="grid">Grid</option><option value="dca">DCA</option><option value="combo">Combo Grid + DCA</option><option value="btd">BTD Buy The Dip</option><option value="signal">Signal Bot</option><option value="trendfollow">TrendFollow</option><option value="hybrid">Hybrid</option><option value="reduceonly">ReduceOnly / SellOnly</option><option value="notrade">NoTrade</option></select></div>
           <div><label for="lowerPrice">Grid Lower</label><input id="lowerPrice" name="lowerPrice" type="number" step="0.00000001" required /></div>
           <div><label for="upperPrice">Grid Upper</label><input id="upperPrice" name="upperPrice" type="number" step="0.00000001" required /></div>
           <div><label for="step">Grid Step</label><input id="step" name="step" type="number" step="0.00000001" required /></div>
@@ -1803,7 +1859,9 @@ public sealed class GridDashboardService : IGridDashboardService
             "trend" or "trend_follow" or "trendfollow" or "trend following" => TradingStrategyType.TrendFollowing,
             "breakout" or "breakout_trend" => TradingStrategyType.Breakout,
             "hybrid" or "multi" or "all" or "combo_signal" or "combo signal" or "hybrid_signal" or "grid_dca_btd_signal" => TradingStrategyType.Hybrid,
-            "pause" or "notrade" or "no_trade" or "no trade" => TradingStrategyType.Pause,
+            "reduceonly" or "reduce_only" or "reduce only" or "sellonly" or "sell_only" or "sell only" => TradingStrategyType.ReduceOnly,
+            "notrade" or "no_trade" or "no trade" => TradingStrategyType.NoTrade,
+            "pause" => TradingStrategyType.Pause,
             _ => null
         };
     }
@@ -1931,7 +1989,7 @@ public sealed class GridDashboardService : IGridDashboardService
             TradingStrategyType.Hybrid => new OrderSourceContext("Hybrid-Grid", "Hybrid-DCA", "Hybrid-BTD"),
             TradingStrategyType.Signal => new OrderSourceContext("Managed", "DCA", "BTD"),
             TradingStrategyType.TrendFollow or TradingStrategyType.TrendFollowing or TradingStrategyType.Breakout => new OrderSourceContext("Managed", "DCA", "BTD"),
-            TradingStrategyType.NoTrade or TradingStrategyType.Pause => new OrderSourceContext("Managed", "DCA", "BTD"),
+            TradingStrategyType.ReduceOnly or TradingStrategyType.NoTrade or TradingStrategyType.Pause => new OrderSourceContext("Managed", "DCA", "BTD"),
             _ => new OrderSourceContext("Grid", "DCA", "BTD")
         };
     }

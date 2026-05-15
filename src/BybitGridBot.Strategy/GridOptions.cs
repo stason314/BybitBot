@@ -245,4 +245,22 @@ public sealed class GridOptions
     [ConfigurationKeyName("AUTO_RECENTER_MIN_SHIFT_STEPS")]
     [Range(1, 1000)]
     public int AutoRecenterMinShiftSteps { get; init; } = 2;
+
+    [ConfigurationKeyName("TRAILING_PROTECTION_ENABLED")]
+    public bool TrailingProtectionEnabled { get; init; } = true;
+
+    [ConfigurationKeyName("TRAILING_PROTECTION_CANDLE_INTERVAL")]
+    public string TrailingProtectionCandleInterval { get; init; } = "1";
+
+    [ConfigurationKeyName("TRAILING_PROTECTION_LOOKBACK_CANDLES")]
+    [Range(5, 1000)]
+    public int TrailingProtectionLookbackCandles { get; init; } = 120;
+
+    [ConfigurationKeyName("TRAILING_PROTECTION_PUMP_PERCENT")]
+    [Range(typeof(decimal), "0", "1000")]
+    public decimal TrailingProtectionPumpPercent { get; init; } = 3m;
+
+    [ConfigurationKeyName("TRAILING_PROTECTION_PULLBACK_PERCENT")]
+    [Range(typeof(decimal), "0", "1000")]
+    public decimal TrailingProtectionPullbackPercent { get; init; } = 1.2m;
 }

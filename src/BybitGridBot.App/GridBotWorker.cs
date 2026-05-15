@@ -21,6 +21,8 @@ public sealed class GridBotWorker : BackgroundService
     private const string TrendEntryMarker = "trend-entry";
     private const string TrendExitMarker = "trend-exit";
     private const decimal SignalMarketLikeLimitBufferPercent = 0.05m;
+    private const string ReduceOnlyReasonDanger = "danger-regime";
+    private const string ReduceOnlyReasonTrailing = "trailing-protection";
     private static readonly TimeSpan TimedAutoRecommendationApplyInterval = TimeSpan.FromMinutes(30);
     private static readonly JsonSerializerOptions StrategyJsonOptions = new(JsonSerializerDefaults.Web);
 
@@ -254,6 +256,12 @@ public sealed class GridBotWorker : BackgroundService
 
         var instrument = await _bybitRestClient.GetInstrumentInfoAsync(_gridOptions.Category, _gridOptions.Symbol, cancellationToken);
         var state = await EnsureBotStateAsync(cancellationToken);
+        if (profile.StrategyType == TradingStrategyType.ReduceOnly)
+        {
+            await RunReduceOnlyCycleAsync(profile, state, instrument, cancellationToken);
+            return;
+        }
+
         if (profile.StrategyType is TradingStrategyType.NoTrade or TradingStrategyType.Pause)
         {
             await _repository.SaveGridLevelsAsync(_gridOptions.Symbol, [], cancellationToken);
@@ -341,18 +349,11 @@ public sealed class GridBotWorker : BackgroundService
 
     private static bool ShouldPreserveProfitableSellOrdersOnAutoSwitch(GridBotSettings newProfile)
     {
-        return newProfile.StrategySelectionMode == StrategySelectionMode.Auto &&
-            newProfile.StrategyType is TradingStrategyType.Btd
-                or TradingStrategyType.NoTrade
-                or TradingStrategyType.Pause
-                or TradingStrategyType.Signal
-                or TradingStrategyType.TrendFollow
-                or TradingStrategyType.TrendFollowing
-                or TradingStrategyType.Breakout;
+        return newProfile.StrategySelectionMode == StrategySelectionMode.Auto;
     }
 
     private async Task<bool> ShouldPreserveProfitableSellOrderAsync(
-        GridBotSettings profile,
+        GridBotSettings? profile,
         BotState state,
         GridOrder order,
         CancellationToken cancellationToken)
@@ -404,6 +405,7 @@ public sealed class GridBotWorker : BackgroundService
             profile.Symbol,
             FormatStrategyScoresForLog(regime));
         var recommendation = _autoStrategySelector.Recommend(gridOptions, regime, candles);
+        var state = await _repository.GetBotStateAsync(profile.Symbol, cancellationToken);
         var recommendedSettings = new GridBotSettings
         {
             Symbol = profile.Symbol,
@@ -419,8 +421,8 @@ public sealed class GridBotWorker : BackgroundService
             StopUpperPrice = recommendation.StopUpperPrice,
             UpdatedAt = DateTimeOffset.UtcNow
         };
+        recommendedSettings = UseReduceOnlyWhenNoTradeWouldLeavePosition(recommendedSettings, state);
 
-        var state = await _repository.GetBotStateAsync(profile.Symbol, cancellationToken);
         var activeOrders = await _repository.GetActiveOrdersAsync(profile.Symbol, cancellationToken);
         var safetyErrors = AutoRecommendationApplySafety.Validate(
             profile,
@@ -453,6 +455,34 @@ public sealed class GridBotWorker : BackgroundService
             cancellationToken);
 
         return recommendedSettings;
+    }
+
+    private static GridBotSettings UseReduceOnlyWhenNoTradeWouldLeavePosition(
+        GridBotSettings settings,
+        BotState? state)
+    {
+        if (settings.StrategyType != TradingStrategyType.NoTrade ||
+            state is null ||
+            state.BaseAssetQuantity <= 0m)
+        {
+            return settings;
+        }
+
+        return new GridBotSettings
+        {
+            Symbol = settings.Symbol,
+            Category = settings.Category,
+            StrategySelectionMode = settings.StrategySelectionMode,
+            StrategyType = TradingStrategyType.ReduceOnly,
+            StrategyConfigJson = settings.StrategyConfigJson,
+            LowerPrice = settings.LowerPrice,
+            UpperPrice = settings.UpperPrice,
+            Step = settings.Step,
+            OrderSizeUsdt = settings.OrderSizeUsdt,
+            StopLowerPrice = settings.StopLowerPrice,
+            StopUpperPrice = settings.StopUpperPrice,
+            UpdatedAt = settings.UpdatedAt
+        };
     }
 
     private bool ShouldRunTimedAutoApplyCheck(GridBotSettings profile, DateTimeOffset now)
@@ -506,6 +536,80 @@ public sealed class GridBotWorker : BackgroundService
         return state;
     }
 
+    private async Task<BotState> RunReduceOnlyCycleAsync(
+        GridBotSettings profile,
+        BotState state,
+        BybitInstrumentInfo instrument,
+        CancellationToken cancellationToken)
+    {
+        ResetDailyPnlIfNeeded(state);
+
+        var ticker = await _bybitRestClient.GetTickerAsync(_gridOptions.Category, _gridOptions.Symbol, cancellationToken);
+        var currentPrice = ticker.LastPrice;
+        state.LastObservedPrice = currentPrice;
+        state.UpdatedAt = DateTimeOffset.UtcNow;
+
+        var levels = await EnsureGridLevelsAsync(cancellationToken);
+        _logger.LogInformation("ReduceOnly mode active for {Symbol}. Current price: {Price}. Buy orders are blocked.", _gridOptions.Symbol, currentPrice);
+
+        if (_appOptions.TradingMode == TradingMode.Paper)
+        {
+            var activeOrders = await _repository.GetActiveOrdersAsync(_gridOptions.Symbol, cancellationToken);
+            await ApplyReduceOnlyProtectionAsync(profile, state, levels, instrument, activeOrders, currentPrice, "manual-reduce-only", cancellationToken);
+            await SimulatePaperFillsAsync(state, levels, profile, currentPrice, cancellationToken);
+        }
+        else
+        {
+            await SynchronizeLiveOrdersAsync(state, levels, profile, cancellationToken);
+            var activeOrders = await _repository.GetActiveOrdersAsync(_gridOptions.Symbol, cancellationToken);
+            await ApplyReduceOnlyProtectionAsync(profile, state, levels, instrument, activeOrders, currentPrice, "manual-reduce-only", cancellationToken);
+        }
+
+        state.IsInitialized = true;
+        state.UpdatedAt = DateTimeOffset.UtcNow;
+        await _repository.SaveBotStateAsync(state, cancellationToken);
+        return state;
+    }
+
+    private async Task<BotState> FinishProtectiveReduceOnlyCycleAsync(
+        GridBotSettings? profile,
+        BotState state,
+        IReadOnlyList<GridLevel> levels,
+        decimal currentPrice,
+        CancellationToken cancellationToken)
+    {
+        var reduceOnlyProfile = BuildTransientReduceOnlyProfile(profile);
+        if (_appOptions.TradingMode == TradingMode.Paper)
+        {
+            await SimulatePaperFillsAsync(state, levels, reduceOnlyProfile, currentPrice, cancellationToken);
+        }
+        else
+        {
+            await SynchronizeLiveOrdersAsync(state, levels, reduceOnlyProfile, cancellationToken);
+        }
+
+        state.IsInitialized = true;
+        state.UpdatedAt = DateTimeOffset.UtcNow;
+        await _repository.SaveBotStateAsync(state, cancellationToken);
+        return state;
+    }
+
+    private GridBotSettings BuildTransientReduceOnlyProfile(GridBotSettings? profile) => new()
+    {
+        Symbol = profile?.Symbol ?? _gridOptions.Symbol,
+        Category = profile?.Category ?? _gridOptions.Category,
+        StrategySelectionMode = profile?.StrategySelectionMode ?? StrategySelectionMode.Manual,
+        StrategyType = TradingStrategyType.ReduceOnly,
+        StrategyConfigJson = profile?.StrategyConfigJson ?? "{}",
+        LowerPrice = _gridOptions.LowerPrice,
+        UpperPrice = _gridOptions.UpperPrice,
+        Step = _gridOptions.Step,
+        OrderSizeUsdt = _gridOptions.OrderSizeUsdt,
+        StopLowerPrice = _gridOptions.StopLowerPrice,
+        StopUpperPrice = _gridOptions.StopUpperPrice,
+        UpdatedAt = DateTimeOffset.UtcNow
+    };
+
     private async Task<BotState> RunDcaCycleAsync(
         GridBotSettings profile,
         BotState state,
@@ -521,6 +625,17 @@ public sealed class GridBotWorker : BackgroundService
         state.UpdatedAt = DateTimeOffset.UtcNow;
 
         _logger.LogInformation("Current price for {Symbol}: {Price}", _gridOptions.Symbol, currentPrice);
+
+        if (await TryApplyProtectiveReduceOnlyFromFreshMarketAsync(
+                profile,
+                state,
+                [],
+                instrument,
+                currentPrice,
+                cancellationToken))
+        {
+            return await FinishProtectiveReduceOnlyCycleAsync(profile, state, [], currentPrice, cancellationToken);
+        }
 
         if (_appOptions.TradingMode == TradingMode.Paper)
         {
@@ -605,6 +720,11 @@ public sealed class GridBotWorker : BackgroundService
 
         _logger.LogInformation("Current price for {Symbol}: {Price}", _gridOptions.Symbol, currentPrice);
 
+        if (await TryApplyProtectiveReduceOnlyFromFreshMarketAsync(profile, state, [], instrument, currentPrice, cancellationToken))
+        {
+            return await FinishProtectiveReduceOnlyCycleAsync(profile, state, [], currentPrice, cancellationToken);
+        }
+
         if (_appOptions.TradingMode == TradingMode.Paper)
         {
             var activeOrders = await _repository.GetActiveOrdersAsync(_gridOptions.Symbol, cancellationToken);
@@ -674,6 +794,11 @@ public sealed class GridBotWorker : BackgroundService
         state.UpdatedAt = DateTimeOffset.UtcNow;
 
         _logger.LogInformation("Current price for {Symbol}: {Price}", _gridOptions.Symbol, currentPrice);
+
+        if (await TryApplyProtectiveReduceOnlyFromFreshMarketAsync(profile, state, [], instrument, currentPrice, cancellationToken))
+        {
+            return await FinishProtectiveReduceOnlyCycleAsync(profile, state, [], currentPrice, cancellationToken);
+        }
 
         if (_appOptions.TradingMode == TradingMode.Paper)
         {
@@ -765,6 +890,11 @@ public sealed class GridBotWorker : BackgroundService
 
         _logger.LogInformation("Current price for {Symbol}: {Price}", _gridOptions.Symbol, currentPrice);
 
+        if (await TryApplyProtectiveReduceOnlyFromFreshMarketAsync(profile, state, [], instrument, currentPrice, cancellationToken))
+        {
+            return await FinishProtectiveReduceOnlyCycleAsync(profile, state, [], currentPrice, cancellationToken);
+        }
+
         if (_appOptions.TradingMode == TradingMode.Paper)
         {
             var activeOrders = await _repository.GetActiveOrdersAsync(_gridOptions.Symbol, cancellationToken);
@@ -836,6 +966,17 @@ public sealed class GridBotWorker : BackgroundService
         if (currentPrice is null)
         {
             return result;
+        }
+
+        if (await TryApplyProtectiveReduceOnlyFromFreshMarketAsync(
+                profile,
+                result,
+                levels,
+                instrument,
+                currentPrice.Value,
+                cancellationToken))
+        {
+            return await FinishProtectiveReduceOnlyCycleAsync(profile, result, levels, currentPrice.Value, cancellationToken);
         }
 
         var config = ParseComboStrategyConfig(profile);
@@ -1143,6 +1284,11 @@ public sealed class GridBotWorker : BackgroundService
 
         _logger.LogInformation("Current price for {Symbol}: {Price}", _gridOptions.Symbol, currentPrice);
 
+        if (await TryApplyProtectiveReduceOnlyFromFreshMarketAsync(profile, state, levels, instrument, currentPrice, cancellationToken))
+        {
+            return await FinishProtectiveReduceOnlyCycleAsync(profile, state, levels, currentPrice, cancellationToken);
+        }
+
         if (_appOptions.TradingMode == TradingMode.Paper)
         {
             await BootstrapPaperInventoryIfNeededAsync(state, levels, instrument, currentPrice, cancellationToken);
@@ -1220,6 +1366,21 @@ public sealed class GridBotWorker : BackgroundService
             marketRegime.VolumeRatio,
             marketRegime.Recommendation);
 
+        var activeGridOrders = await _repository.GetActiveOrdersAsync(_gridOptions.Symbol, cancellationToken);
+        if (await TryApplyProtectiveReduceOnlyAsync(
+                profile,
+                state,
+                levels,
+                instrument,
+                activeGridOrders,
+                symbolCandles,
+                currentPrice,
+                marketRegime,
+                cancellationToken))
+        {
+            return await FinishProtectiveReduceOnlyCycleAsync(profile, state, levels, currentPrice, cancellationToken);
+        }
+
         var btcCandles = _gridOptions.BtcFilterEnabled
             ? await _bybitRestClient.GetKlinesAsync("spot", "BTCUSDT", _gridOptions.CandleInterval, 20, cancellationToken)
             : [];
@@ -1231,7 +1392,6 @@ public sealed class GridBotWorker : BackgroundService
             return state;
         }
 
-        var activeGridOrders = await _repository.GetActiveOrdersAsync(_gridOptions.Symbol, cancellationToken);
         activeGridOrders = await CleanRiskyActiveOrdersAsync(profile, state, activeGridOrders, cancellationToken);
         var wallet = _appOptions.TradingMode == TradingMode.Paper
             ? null
@@ -1455,6 +1615,16 @@ public sealed class GridBotWorker : BackgroundService
         var activeOrders = await _repository.GetActiveOrdersAsync(_gridOptions.Symbol, cancellationToken);
         foreach (var order in activeOrders)
         {
+            if (await ShouldPreserveProfitableSellOrderAsync(null, state, order, cancellationToken))
+            {
+                _logger.LogInformation(
+                    "Preserved profitable sell order {OrderLinkId} during auto-recenter. Price: {Price}, average entry: {AverageEntryPrice}",
+                    order.OrderLinkId,
+                    order.Price,
+                    state.AverageEntryPrice);
+                continue;
+            }
+
             await CancelManagedOrderAsync(order, cancellationToken);
         }
 
@@ -1724,6 +1894,236 @@ public sealed class GridBotWorker : BackgroundService
 
         _logger.LogWarning(reason);
         await _notifier.NotifyAsync(notificationMessage, cancellationToken);
+    }
+
+    private async Task<bool> TryApplyProtectiveReduceOnlyFromFreshMarketAsync(
+        GridBotSettings? profile,
+        BotState state,
+        IReadOnlyList<GridLevel> levels,
+        BybitInstrumentInfo instrument,
+        decimal currentPrice,
+        CancellationToken cancellationToken)
+    {
+        var candles = await _bybitRestClient.GetKlinesAsync(
+            _gridOptions.Category,
+            _gridOptions.Symbol,
+            _gridOptions.TrailingProtectionEnabled
+                ? _gridOptions.TrailingProtectionCandleInterval
+                : AnalysisDefaults.AutoRecommendationCandleInterval,
+            _gridOptions.TrailingProtectionEnabled
+                ? Math.Max(10, _gridOptions.TrailingProtectionLookbackCandles)
+                : AnalysisDefaults.AutoRecommendationLookbackCandles,
+            cancellationToken);
+        if (candles.Count == 0)
+        {
+            return false;
+        }
+
+        var activeOrders = await _repository.GetActiveOrdersAsync(_gridOptions.Symbol, cancellationToken);
+        return await TryApplyProtectiveReduceOnlyAsync(
+            profile,
+            state,
+            levels,
+            instrument,
+            activeOrders,
+            candles,
+            currentPrice,
+            _marketRegimeAnalyzer.Analyze(candles),
+            cancellationToken);
+    }
+
+    private async Task<bool> TryApplyProtectiveReduceOnlyAsync(
+        GridBotSettings? profile,
+        BotState state,
+        IReadOnlyList<GridLevel> levels,
+        BybitInstrumentInfo instrument,
+        IReadOnlyCollection<GridOrder> activeOrders,
+        IReadOnlyList<Candle> candles,
+        decimal currentPrice,
+        MarketRegimeAnalysis marketRegime,
+        CancellationToken cancellationToken)
+    {
+        if (profile?.StrategyType == TradingStrategyType.ReduceOnly || state.BaseAssetQuantity <= 0m)
+        {
+            return false;
+        }
+
+        var reason = marketRegime.Regime == MarketRegimeType.Danger
+            ? ReduceOnlyReasonDanger
+            : ShouldApplyTrailingProtection(candles, currentPrice, out var pumpPercent, out var pullbackPercent)
+                ? $"{ReduceOnlyReasonTrailing}: pump={pumpPercent:0.####}%, pullback={pullbackPercent:0.####}%"
+                : null;
+        if (reason is null)
+        {
+            return false;
+        }
+
+        await ApplyReduceOnlyProtectionAsync(
+            profile,
+            state,
+            levels,
+            instrument,
+            activeOrders,
+            currentPrice,
+            reason,
+            cancellationToken);
+
+        return true;
+    }
+
+    private bool ShouldApplyTrailingProtection(
+        IReadOnlyList<Candle> candles,
+        decimal currentPrice,
+        out decimal pumpPercent,
+        out decimal pullbackPercent)
+    {
+        pumpPercent = 0m;
+        pullbackPercent = 0m;
+        if (!_gridOptions.TrailingProtectionEnabled || candles.Count < 5 || currentPrice <= 0m)
+        {
+            return false;
+        }
+
+        var ordered = candles.OrderBy(candle => candle.OpenTime).ToArray();
+        var firstOpen = ordered[0].Open;
+        var recentHigh = ordered.Max(candle => candle.High);
+        if (firstOpen <= 0m || recentHigh <= 0m)
+        {
+            return false;
+        }
+
+        pumpPercent = (recentHigh - firstOpen) / firstOpen * 100m;
+        pullbackPercent = (recentHigh - currentPrice) / recentHigh * 100m;
+
+        return pumpPercent >= _gridOptions.TrailingProtectionPumpPercent &&
+            pullbackPercent >= _gridOptions.TrailingProtectionPullbackPercent;
+    }
+
+    private async Task<IReadOnlyList<GridOrder>> ApplyReduceOnlyProtectionAsync(
+        GridBotSettings? profile,
+        BotState state,
+        IReadOnlyList<GridLevel> levels,
+        BybitInstrumentInfo instrument,
+        IReadOnlyCollection<GridOrder> activeOrders,
+        decimal currentPrice,
+        string reason,
+        CancellationToken cancellationToken)
+    {
+        _logger.LogWarning(
+            "ReduceOnly protection active for {Symbol}. Reason: {Reason}. Buy orders will be cancelled, profitable sells will be preserved.",
+            _gridOptions.Symbol,
+            reason);
+
+        var cancelledBuyCount = 0;
+        foreach (var order in activeOrders.Where(order => order.IsActive && order.Side == TradeSide.Buy).ToArray())
+        {
+            await CancelManagedOrderAsync(order, cancellationToken);
+            cancelledBuyCount++;
+        }
+
+        var remainingOrders = activeOrders.Where(order => order.IsActive).ToArray();
+        remainingOrders = (await CancelUnprofitableSellOrdersAsync(profile, state, remainingOrders, cancellationToken)).ToArray();
+
+        var wallet = _appOptions.TradingMode == TradingMode.Paper
+            ? null
+            : await _bybitRestClient.GetWalletBalanceAsync(cancellationToken, _quoteAsset, _baseAsset);
+        var createdSellCount = await EnsureReduceOnlySellOrdersAsync(profile, state, levels, instrument, remainingOrders, wallet, currentPrice, cancellationToken);
+        if (cancelledBuyCount > 0 || createdSellCount > 0)
+        {
+            await _notifier.NotifyAsync(
+                $"ReduceOnly protection active for `{_gridOptions.Symbol}`.\nReason: `{reason}`\nBuy orders cancelled: `{cancelledBuyCount}`\nSell orders created: `{createdSellCount}`",
+                cancellationToken);
+        }
+
+        return (await _repository.GetActiveOrdersAsync(_gridOptions.Symbol, cancellationToken)).ToArray();
+    }
+
+    private async Task<int> EnsureReduceOnlySellOrdersAsync(
+        GridBotSettings? profile,
+        BotState state,
+        IReadOnlyList<GridLevel> levels,
+        BybitInstrumentInfo instrument,
+        IReadOnlyCollection<GridOrder> activeOrders,
+        BybitWalletBalance? wallet,
+        decimal currentPrice,
+        CancellationToken cancellationToken)
+    {
+        if (state.BaseAssetQuantity <= 0m)
+        {
+            return 0;
+        }
+
+        var availableBase = GetAvailableBaseBalance(state, activeOrders, wallet);
+        if (availableBase <= 0m)
+        {
+            return 0;
+        }
+
+        var createdSellCount = 0;
+        var sellLevels = BuildReduceOnlySellLevels(levels, currentPrice, state.AverageEntryPrice).ToArray();
+        foreach (var price in sellLevels)
+        {
+            if (availableBase <= 0m ||
+                HasActiveOrderAtLevel(activeOrders, price) ||
+                await _repository.GetActiveOrderAtLevelAsync(_gridOptions.Symbol, TradeSide.Sell, price, cancellationToken) is not null)
+            {
+                continue;
+            }
+
+            var targetQuantity = instrument.RoundQuantity(_gridOptions.OrderSizeUsdt / price);
+            var quantity = instrument.RoundQuantity(decimal.Min(availableBase, targetQuantity));
+            if (quantity <= 0m ||
+                quantity < instrument.MinOrderQty ||
+                quantity * price < instrument.MinOrderAmount)
+            {
+                continue;
+            }
+
+            if (!await HasMinimumNetProfitAsync(TradeSide.Sell, state.AverageEntryPrice, price, quantity, 0m, cancellationToken))
+            {
+                continue;
+            }
+
+            var createdOrders = await ExecuteStrategyDecisionAsync(
+                new StrategyExecutionDecision
+                {
+                    OrderIntents = [new OrderIntent(TradeSide.Sell, price, quantity)]
+                },
+                cancellationToken);
+            var createdOrder = createdOrders[0];
+            activeOrders = activeOrders.Append(createdOrder).ToArray();
+            availableBase -= quantity;
+            createdSellCount++;
+        }
+
+        return createdSellCount;
+    }
+
+    private IReadOnlyList<decimal> BuildReduceOnlySellLevels(
+        IReadOnlyList<GridLevel> levels,
+        decimal currentPrice,
+        decimal averageEntryPrice)
+    {
+        var minSellPrice = decimal.Max(currentPrice, averageEntryPrice);
+        var candidateLevels = levels.Count > 0
+            ? levels.Select(level => level.Price)
+            : _strategy.BuildGrid(_gridOptions).Select(level => level.Price);
+
+        var sellLevels = candidateLevels
+            .Where(price => price > minSellPrice)
+            .OrderBy(price => price)
+            .Distinct()
+            .ToArray();
+        if (sellLevels.Length > 0)
+        {
+            return sellLevels;
+        }
+
+        var firstFallback = CeilingToStep(minSellPrice + _gridOptions.Step, _gridOptions.Step);
+        return Enumerable.Range(0, Math.Min(5, _riskOptions.MaxOpenOrders))
+            .Select(index => decimal.Round(firstFallback + _gridOptions.Step * index, 8, MidpointRounding.AwayFromZero))
+            .Where(price => price > minSellPrice)
+            .ToArray();
     }
 
     private async Task EnsureGridOrdersAsync(
@@ -3180,6 +3580,13 @@ public sealed class GridBotWorker : BackgroundService
 
     private static bool ShouldSkipGridFollowUp(GridBotSettings? profile, GridOrder order)
     {
+        if (profile?.StrategyType is TradingStrategyType.ReduceOnly
+                or TradingStrategyType.NoTrade
+                or TradingStrategyType.Pause)
+        {
+            return true;
+        }
+
         return profile?.StrategyType is (TradingStrategyType.Signal
                 or TradingStrategyType.TrendFollow
                 or TradingStrategyType.TrendFollowing
@@ -3205,11 +3612,21 @@ public sealed class GridBotWorker : BackgroundService
             !string.IsNullOrWhiteSpace(order.ParentOrderLinkId))
         {
             var parentOrder = await _repository.GetOrderByLinkIdAsync(order.ParentOrderLinkId, cancellationToken);
-            if (parentOrder is not null)
+            if (parentOrder is null ||
+                parentOrder.Side != TradeSide.Buy ||
+                parentOrder.FilledQuantity <= 0m)
             {
-                entryPrice = parentOrder.AverageFillPrice > 0m ? parentOrder.AverageFillPrice : parentOrder.Price;
-                entryFee = parentOrder.FeePaid;
+                _logger.LogInformation(
+                    "Sell order {OrderLinkId} skipped because parent buy {ParentOrderLinkId} is missing or not filled.",
+                    order.OrderLinkId,
+                    order.ParentOrderLinkId);
+                return false;
             }
+
+            entryPrice = parentOrder.AverageFillPrice > 0m ? parentOrder.AverageFillPrice : parentOrder.Price;
+            entryFee = parentOrder.FeePaid > 0m
+                ? parentOrder.FeePaid * decimal.Min(1m, remainingQuantity / parentOrder.FilledQuantity)
+                : 0m;
         }
 
         return await HasMinimumNetProfitAsync(
@@ -3349,6 +3766,14 @@ public sealed class GridBotWorker : BackgroundService
              _gridOptions.AutoRecenterPaddingSteps < 0))
         {
             throw new InvalidOperationException("Auto-recenter settings are invalid.");
+        }
+
+        if (_gridOptions.TrailingProtectionEnabled &&
+            (_gridOptions.TrailingProtectionLookbackCandles < 5 ||
+             _gridOptions.TrailingProtectionPumpPercent < 0m ||
+             _gridOptions.TrailingProtectionPullbackPercent < 0m))
+        {
+            throw new InvalidOperationException("Trailing protection settings are invalid.");
         }
 
         if (_appOptions.TradingMode is TradingMode.Testnet or TradingMode.Mainnet &&

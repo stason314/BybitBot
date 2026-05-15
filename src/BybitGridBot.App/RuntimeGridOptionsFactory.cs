@@ -91,6 +91,11 @@ internal static class RuntimeGridOptionsFactory
             AutoRecenterLookbackCandles = defaults.AutoRecenterLookbackCandles,
             AutoRecenterPaddingSteps = defaults.AutoRecenterPaddingSteps,
             AutoRecenterMinShiftSteps = defaults.AutoRecenterMinShiftSteps,
+            TrailingProtectionEnabled = defaults.TrailingProtectionEnabled,
+            TrailingProtectionCandleInterval = defaults.TrailingProtectionCandleInterval,
+            TrailingProtectionLookbackCandles = defaults.TrailingProtectionLookbackCandles,
+            TrailingProtectionPumpPercent = defaults.TrailingProtectionPumpPercent,
+            TrailingProtectionPullbackPercent = defaults.TrailingProtectionPullbackPercent,
             CandleInterval = defaults.CandleInterval
         };
     }
