@@ -251,6 +251,24 @@ public sealed class SqliteGridRepository : IGridRepository
                 created_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS spot_executions (
+                execution_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                exec_id TEXT NOT NULL UNIQUE,
+                order_link_id TEXT NOT NULL,
+                bybit_order_id TEXT NULL,
+                symbol TEXT NOT NULL,
+                category TEXT NOT NULL,
+                side TEXT NOT NULL,
+                exec_type TEXT NOT NULL,
+                quantity TEXT NOT NULL,
+                price TEXT NOT NULL,
+                fee TEXT NOT NULL,
+                realized_pnl TEXT NOT NULL,
+                is_applied INTEGER NOT NULL,
+                executed_at TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS strategy_performance (
                 performance_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 symbol TEXT NOT NULL,
@@ -392,6 +410,7 @@ public sealed class SqliteGridRepository : IGridRepository
         await EnsureColumnAsync(connection, "futures_fills", "exec_id", "TEXT NULL", cancellationToken);
         await EnsureColumnAsync(connection, "futures_fills", "exec_type", "TEXT NOT NULL DEFAULT 'Trade'", cancellationToken);
         await EnsureColumnAsync(connection, "futures_positions", "funding", "TEXT NOT NULL DEFAULT '0'", cancellationToken);
+        await EnsureUniqueSpotExecutionExecIndexAsync(connection, cancellationToken);
         await EnsureUniqueFuturesFillExecIndexAsync(connection, cancellationToken);
         _logger.LogInformation("SQLite repository initialized.");
     }
@@ -1172,6 +1191,56 @@ public sealed class SqliteGridRepository : IGridRepository
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
+    public async Task<bool> SpotExecutionExistsAsync(string execId, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(execId))
+        {
+            return false;
+        }
+
+        const string sql = "SELECT 1 FROM spot_executions WHERE exec_id = $exec_id LIMIT 1;";
+
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        command.Parameters.AddWithValue("$exec_id", execId);
+
+        return await command.ExecuteScalarAsync(cancellationToken) is not null;
+    }
+
+    public async Task<bool> AddSpotExecutionAsync(SpotExecutionRecord execution, CancellationToken cancellationToken)
+    {
+        const string sql = """
+            INSERT OR IGNORE INTO spot_executions (
+                exec_id, order_link_id, bybit_order_id, symbol, category, side, exec_type,
+                quantity, price, fee, realized_pnl, is_applied, executed_at, created_at
+            )
+            VALUES (
+                $exec_id, $order_link_id, $bybit_order_id, $symbol, $category, $side, $exec_type,
+                $quantity, $price, $fee, $realized_pnl, $is_applied, $executed_at, $created_at
+            );
+            """;
+
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        command.Parameters.AddWithValue("$exec_id", execution.ExecId);
+        command.Parameters.AddWithValue("$order_link_id", execution.OrderLinkId);
+        command.Parameters.AddWithValue("$bybit_order_id", (object?)execution.BybitOrderId ?? DBNull.Value);
+        command.Parameters.AddWithValue("$symbol", execution.Symbol);
+        command.Parameters.AddWithValue("$category", execution.Category);
+        command.Parameters.AddWithValue("$side", execution.Side.ToString());
+        command.Parameters.AddWithValue("$exec_type", execution.ExecType);
+        command.Parameters.AddWithValue("$quantity", FormatDecimal(execution.Quantity));
+        command.Parameters.AddWithValue("$price", FormatDecimal(execution.Price));
+        command.Parameters.AddWithValue("$fee", FormatDecimal(execution.Fee));
+        command.Parameters.AddWithValue("$realized_pnl", FormatDecimal(execution.RealizedPnl));
+        command.Parameters.AddWithValue("$is_applied", execution.IsApplied);
+        command.Parameters.AddWithValue("$executed_at", execution.ExecutedAt.ToString("O", CultureInfo.InvariantCulture));
+        command.Parameters.AddWithValue("$created_at", execution.CreatedAt.ToString("O", CultureInfo.InvariantCulture));
+        return await command.ExecuteNonQueryAsync(cancellationToken) > 0;
+    }
+
     public async Task<int> ResetSpotStatisticsAsync(CancellationToken cancellationToken)
     {
         var statements = new[]
@@ -1180,6 +1249,7 @@ public sealed class SqliteGridRepository : IGridRepository
             "DELETE FROM grid_levels;",
             "DELETE FROM bot_state WHERE symbol NOT LIKE 'futures:%';",
             "DELETE FROM no_trade_reasons;",
+            "DELETE FROM spot_executions;",
             "DELETE FROM strategy_performance;",
             "DELETE FROM strategy_daily_performance;",
             "DELETE FROM strategy_decisions;",
@@ -1790,6 +1860,19 @@ public sealed class SqliteGridRepository : IGridRepository
             CREATE UNIQUE INDEX IF NOT EXISTS idx_futures_fills_exec_id
             ON futures_fills(exec_id)
             WHERE exec_id IS NOT NULL AND exec_id <> '';
+            """;
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    private static async Task EnsureUniqueSpotExecutionExecIndexAsync(
+        SqliteConnection connection,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_spot_executions_exec_id
+            ON spot_executions(exec_id)
+            WHERE exec_id <> '';
             """;
         await command.ExecuteNonQueryAsync(cancellationToken);
     }

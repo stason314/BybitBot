@@ -59,6 +59,7 @@ public sealed class GridBotWorker : BackgroundService
     private readonly RiskManager _riskManager;
     private readonly RiskOptions _riskOptions;
     private readonly SignalAnalyzer _signalAnalyzer;
+    private readonly SpotExecutionSyncService _spotExecutionSyncService;
     private readonly IGridTradingStrategy _strategy;
     private readonly Dictionary<string, CachedFeeRate> _feeRates = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, DateTimeOffset> _lastTimedAutoApplyChecks = new(StringComparer.OrdinalIgnoreCase);
@@ -98,6 +99,7 @@ public sealed class GridBotWorker : BackgroundService
         BigRedCandleGuard bigRedCandleGuard,
         ProfitProtectionManager profitProtectionManager,
         SignalAnalyzer signalAnalyzer,
+        SpotExecutionSyncService spotExecutionSyncService,
         IGridRepository repository,
         ITelegramNotifier notifier,
         ILogger<GridBotWorker> logger)
@@ -121,6 +123,7 @@ public sealed class GridBotWorker : BackgroundService
         _bigRedCandleGuard = bigRedCandleGuard;
         _profitProtectionManager = profitProtectionManager;
         _signalAnalyzer = signalAnalyzer;
+        _spotExecutionSyncService = spotExecutionSyncService;
         _repository = repository;
         _notifier = notifier;
         _logger = logger;
@@ -1871,6 +1874,24 @@ public sealed class GridBotWorker : BackgroundService
         var localOrders = (await _repository.GetOrdersAsync(_gridOptions.Symbol, cancellationToken)).ToDictionary(order => order.OrderLinkId);
         var remoteOpenOrders = await _bybitRestClient.GetOpenOrdersAsync(_gridOptions.Category, _gridOptions.Symbol, cancellationToken);
         var remoteHistory = await _bybitRestClient.GetOrderHistoryAsync(_gridOptions.Category, _gridOptions.Symbol, null, cancellationToken);
+        var remoteExecutions = await _bybitRestClient.GetExecutionsAsync(_gridOptions.Category, _gridOptions.Symbol, null, "Trade", cancellationToken);
+        var appliedFilledOrders = new List<GridOrder>();
+        foreach (var execution in remoteExecutions
+            .Where(execution => IsManagedOrder(execution.OrderLinkId))
+            .OrderBy(execution => execution.ExecTime))
+        {
+            var result = await _spotExecutionSyncService.ApplyExecutionAsync(state, _gridOptions.Category, execution, cancellationToken);
+            if (result.Order is not null)
+            {
+                localOrders[result.Order.OrderLinkId] = result.Order;
+            }
+
+            if (result.IsApplied && result.BecameFilled && result.Order is not null)
+            {
+                appliedFilledOrders.Add(result.Order);
+            }
+        }
+
         var snapshots = remoteOpenOrders
             .Concat(remoteHistory)
             .Where(snapshot => IsManagedOrder(snapshot.OrderLinkId))
@@ -1899,34 +1920,16 @@ public sealed class GridBotWorker : BackgroundService
                 };
             }
 
-            var previousFilledQuantity = order.FilledQuantity;
-            var previousFee = order.FeePaid;
             var previousStatus = order.Status;
 
             order.BybitOrderId = snapshot.OrderId;
             order.Price = snapshot.Price == 0m ? order.Price : snapshot.Price;
-            order.FilledQuantity = snapshot.CumExecQty;
+            order.FilledQuantity = decimal.Max(order.FilledQuantity, snapshot.CumExecQty);
             order.AverageFillPrice = snapshot.AveragePrice == 0m ? order.AverageFillPrice : snapshot.AveragePrice;
-            order.FeePaid = snapshot.FeePaid;
+            order.FeePaid = decimal.Max(order.FeePaid, snapshot.FeePaid);
             order.Status = MapStatus(snapshot.OrderStatus);
             order.UpdatedAt = snapshot.UpdatedAt;
             order.FilledAt = order.Status == OrderStatus.Filled ? snapshot.UpdatedAt : order.FilledAt;
-
-            var fillDelta = snapshot.CumExecQty - previousFilledQuantity;
-            if (fillDelta > 0m)
-            {
-                var feeDelta = Math.Max(0m, snapshot.FeePaid - previousFee);
-                var fillPrice = snapshot.AveragePrice > 0m ? snapshot.AveragePrice : order.Price;
-                var pnlDelta = ApplyFillDelta(state, order.Side, fillDelta, fillPrice, feeDelta);
-                order.RealizedPnl += pnlDelta;
-
-                _logger.LogInformation(
-                    "Exchange execution synced. Side: {Side}, FillDelta: {FillDelta}, Price: {Price}, PnL delta: {PnlDelta}",
-                    order.Side,
-                    fillDelta,
-                    fillPrice,
-                    pnlDelta);
-            }
 
             await _repository.UpsertOrderAsync(order, cancellationToken);
 
@@ -1954,6 +1957,23 @@ public sealed class GridBotWorker : BackgroundService
                 {
                     await EnsureOppositeGridOrderAsync(state, levels, order, cancellationToken);
                 }
+            }
+        }
+
+        foreach (var order in appliedFilledOrders.Where(order =>
+            !snapshots.Any(snapshot => string.Equals(snapshot.OrderLinkId, order.OrderLinkId, StringComparison.OrdinalIgnoreCase))))
+        {
+            if (ShouldUseDcaFollowUp(profile, order))
+            {
+                await EnsureDcaTakeProfitOrderAsync(state, ParseDcaStrategyConfig(profile!), order, cancellationToken);
+            }
+            else if (ShouldUseBtdFollowUp(profile, order))
+            {
+                await EnsureDcaTakeProfitOrderAsync(state, ParseBtdStrategyConfig(profile!), order, cancellationToken);
+            }
+            else if (!ShouldSkipGridFollowUp(profile, order))
+            {
+                await EnsureOppositeGridOrderAsync(state, levels, order, cancellationToken);
             }
         }
 
@@ -4440,7 +4460,7 @@ public sealed class GridBotWorker : BackgroundService
     }
 
     private static bool IsManagedOrder(string orderLinkId) =>
-        orderLinkId.StartsWith("gb", StringComparison.OrdinalIgnoreCase);
+        OrderLinkIdFactory.IsManaged(orderLinkId);
 
     private static decimal FloorToStep(decimal value, decimal step)
     {

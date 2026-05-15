@@ -56,6 +56,7 @@ builder.Services.AddSingleton<PriceActionPhaseDetector>();
 builder.Services.AddSingleton<BigRedCandleGuard>();
 builder.Services.AddSingleton<ExpectedProfitFilter>();
 builder.Services.AddSingleton<ProfitProtectionManager>();
+builder.Services.AddSingleton<SpotExecutionSyncService>();
 builder.Services.AddSingleton<SignalAnalyzer>();
 builder.Services.AddSingleton<SignalEngine>();
 builder.Services.AddSingleton<AutoStrategySelector>();
