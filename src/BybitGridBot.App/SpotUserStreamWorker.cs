@@ -146,6 +146,7 @@ public sealed class SpotUserStreamWorker : BackgroundService
         {
             Symbol = settings.Symbol,
             TradingMode = _appOptions.TradingMode,
+            AggressiveModeEnabled = _defaultGridOptions.AggressiveModeEnabled,
             UpdatedAt = DateTimeOffset.UtcNow
         };
         await _repository.SaveBotStateAsync(state, cancellationToken);

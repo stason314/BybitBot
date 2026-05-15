@@ -133,6 +133,14 @@ public sealed class DashboardState
 
     public decimal ProfitProtectionTrailingStopPrice { get; init; }
 
+    public bool AggressiveModeEnabled { get; init; }
+
+    public DateTimeOffset? AggressiveModeDisabledUntil { get; init; }
+
+    public string? AggressiveModeDisabledReason { get; init; }
+
+    public DateTimeOffset? AggressiveModeLastLossAt { get; init; }
+
     public DateTimeOffset UpdatedAt { get; init; }
 }
 

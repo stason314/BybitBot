@@ -88,6 +88,7 @@ public sealed class GridDashboardService : IGridDashboardService
                 TradingMode = _appOptions.TradingMode,
                 QuoteAssetBalance = gridOptions.PaperInitialUsdt,
                 BaseAssetQuantity = gridOptions.PaperInitialBaseAssetQuantity,
+                AggressiveModeEnabled = gridOptions.AggressiveModeEnabled,
                 UpdatedAt = DateTimeOffset.UtcNow
             };
         var levels = await _repository.GetGridLevelsAsync(gridOptions.Symbol, cancellationToken);
@@ -204,6 +205,10 @@ public sealed class GridDashboardService : IGridDashboardService
                 ProfitProtectionPeakProfitPercent = peakProfitPercent,
                 ProfitProtectionPeakPrice = state.ProfitProtectionPeakPrice,
                 ProfitProtectionTrailingStopPrice = state.ProfitProtectionTrailingStopPrice,
+                AggressiveModeEnabled = state.AggressiveModeEnabled,
+                AggressiveModeDisabledUntil = state.AggressiveModeDisabledUntil,
+                AggressiveModeDisabledReason = state.AggressiveModeDisabledReason,
+                AggressiveModeLastLossAt = state.AggressiveModeLastLossAt,
                 UpdatedAt = state.UpdatedAt
             },
             MarketRegime = MapMarketRegime(marketRegime),
