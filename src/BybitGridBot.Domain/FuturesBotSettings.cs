@@ -34,5 +34,15 @@ public sealed class FuturesBotSettings
 
     public bool AggressiveModeEnabled { get; init; }
 
+    public FuturesAggressiveModeKind AggressiveModeKind { get; init; } = FuturesAggressiveModeKind.Normal;
+
+    public decimal AggressiveEntryMultiplier { get; init; } = 1.5m;
+
+    public int AggressiveMaxOrdersPerHour { get; init; } = 6;
+
+    public int AggressiveMinSecondsBetweenEntries { get; init; } = 60;
+
+    public int AggressiveMaxConsecutiveLosses { get; init; } = 2;
+
     public DateTimeOffset UpdatedAt { get; init; } = DateTimeOffset.UtcNow;
 }

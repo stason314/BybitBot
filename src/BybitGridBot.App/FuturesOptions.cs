@@ -39,6 +39,13 @@ public sealed class FuturesOptions
     [ConfigurationKeyName("FUTURES_AGGRESSIVE_MODE_ENABLED")]
     public bool AggressiveModeEnabled { get; init; } = false;
 
+    [ConfigurationKeyName("FUTURES_AGGRESSIVE_MODE_KIND")]
+    public string AggressiveModeKind { get; init; } = "normal";
+
+    [ConfigurationKeyName("FUTURES_AGGRESSIVE_ENTRY_MULTIPLIER")]
+    [Range(typeof(decimal), "0.00000001", "1000")]
+    public decimal AggressiveEntryMultiplier { get; init; } = 1.5m;
+
     [ConfigurationKeyName("MARGIN_MODE")]
     public string MarginMode { get; init; } = "isolated";
 

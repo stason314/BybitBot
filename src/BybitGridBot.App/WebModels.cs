@@ -473,6 +473,16 @@ public sealed class FuturesSettingsView
 
     public bool AggressiveModeEnabled { get; init; }
 
+    public required string AggressiveModeKind { get; init; }
+
+    public decimal AggressiveEntryMultiplier { get; init; }
+
+    public int AggressiveMaxOrdersPerHour { get; init; }
+
+    public int AggressiveMinSecondsBetweenEntries { get; init; }
+
+    public int AggressiveMaxConsecutiveLosses { get; init; }
+
     public bool Enabled { get; init; }
 }
 
@@ -482,7 +492,11 @@ public sealed class FuturesAggressiveModeView
 
     public bool Effective { get; init; }
 
+    public required string ModeKind { get; init; }
+
     public bool PaperOnly { get; init; }
+
+    public decimal EntryMultiplier { get; init; }
 
     public int EntriesLastHour { get; init; }
 
@@ -497,6 +511,8 @@ public sealed class FuturesAggressiveModeView
     public required string GuardStatus { get; init; }
 
     public required string LastBlockReason { get; init; }
+
+    public required string LastNoTradeReason { get; init; }
 }
 
 public sealed class FuturesOrderView
@@ -756,4 +772,14 @@ public sealed class UpdateFuturesSettingsRequest
     public bool ReduceOnlyEnabled { get; init; } = true;
 
     public bool AggressiveModeEnabled { get; init; }
+
+    public string AggressiveModeKind { get; init; } = "normal";
+
+    public decimal AggressiveEntryMultiplier { get; init; } = 1.5m;
+
+    public int AggressiveMaxOrdersPerHour { get; init; } = 6;
+
+    public int AggressiveMinSecondsBetweenEntries { get; init; } = 60;
+
+    public int AggressiveMaxConsecutiveLosses { get; init; } = 2;
 }

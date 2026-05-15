@@ -55,7 +55,9 @@ internal static class FuturesStrategyIntentFactory
 
     private static decimal ResolveEntryNotional(FuturesBotSettings settings)
     {
-        var fallbackMultiplier = settings.AggressiveModeEnabled ? 0.375m : 0.25m;
+        var fallbackMultiplier = settings.AggressiveModeEnabled
+            ? 0.25m * decimal.Max(0.01m, settings.AggressiveEntryMultiplier)
+            : 0.25m;
         var fallback = settings.MaxNotionalUsdt * fallbackMultiplier;
         if (string.IsNullOrWhiteSpace(settings.StrategyConfigJson))
         {
@@ -70,7 +72,10 @@ internal static class FuturesStrategyIntentFactory
                 property.TryGetDecimal(out var configured) &&
                 configured > 0m)
             {
-                return decimal.Min(settings.MaxNotionalUsdt, configured);
+                var multiplier = settings.AggressiveModeEnabled
+                    ? decimal.Max(0.01m, settings.AggressiveEntryMultiplier)
+                    : 1m;
+                return decimal.Min(settings.MaxNotionalUsdt, configured * multiplier);
             }
         }
         catch (JsonException)

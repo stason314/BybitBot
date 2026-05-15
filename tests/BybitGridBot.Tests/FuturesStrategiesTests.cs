@@ -73,11 +73,26 @@ public sealed class FuturesStrategiesTests
         Assert.Equal(FuturesTradeAction.OpenLong, intent.Action);
     }
 
+    [Fact]
+    public void FuturesGridLongOnly_TestModeOpensAwayFromSupport()
+    {
+        var decision = new FuturesGridLongOnly().Decide(Context(
+            currentPrice: 50600m,
+            positionSize: 0.001m,
+            entryPrice: 50500m,
+            aggressiveModeEnabled: true,
+            aggressiveModeKind: FuturesAggressiveModeKind.Test));
+
+        var intent = Assert.Single(decision.TradeIntents);
+        Assert.Equal(FuturesTradeAction.OpenLong, intent.Action);
+    }
+
     private static FuturesStrategyContext Context(
         decimal currentPrice = 51000m,
         decimal positionSize = 0m,
         decimal entryPrice = 0m,
-        bool aggressiveModeEnabled = false) => new()
+        bool aggressiveModeEnabled = false,
+        FuturesAggressiveModeKind aggressiveModeKind = FuturesAggressiveModeKind.Normal) => new()
     {
         Settings = new FuturesBotSettings
         {
@@ -92,7 +107,8 @@ public sealed class FuturesStrategiesTests
             MaxMarginUsdt = 50m,
             StopLossPercent = 1m,
             TakeProfitPercent = 2m,
-            AggressiveModeEnabled = aggressiveModeEnabled
+            AggressiveModeEnabled = aggressiveModeEnabled,
+            AggressiveModeKind = aggressiveModeKind
         },
         Candles = Candles(),
         CurrentPrice = currentPrice,
