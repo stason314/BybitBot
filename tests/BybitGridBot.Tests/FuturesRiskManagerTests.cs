@@ -15,6 +15,51 @@ public sealed class FuturesRiskManagerTests
     }
 
     [Fact]
+    public void Evaluate_BlocksDailyLossByEquityPercent()
+    {
+        var decision = new FuturesRiskManager().Evaluate(Context(
+            riskOptions: Options(maxDailyLossUsdt: 0m, maxDailyLossEquityPercent: 1m),
+            accountEquityUsdt: 1000m,
+            dailyRealizedPnl: -11m));
+
+        Assert.False(decision.IsAllowed);
+        Assert.Contains("MAX_DAILY_LOSS_USDT", decision.Reason, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Evaluate_BlocksMaxDrawdownByEquityPercent()
+    {
+        var decision = new FuturesRiskManager().Evaluate(Context(
+            riskOptions: Options(maxDrawdownEquityPercent: 5m),
+            accountEquityUsdt: 1000m,
+            totalRealizedPnl: -51m));
+
+        Assert.False(decision.IsAllowed);
+        Assert.Contains("FUTURES_MAX_DRAWDOWN_EQUITY_PERCENT", decision.Reason, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Evaluate_BlocksEmergencyPauseForIncreasingPosition()
+    {
+        var decision = new FuturesRiskManager().Evaluate(Context(
+            riskOptions: Options(emergencyPause: true)));
+
+        Assert.False(decision.IsAllowed);
+        Assert.Equal(RiskSuggestedAction.PauseBot, decision.SuggestedAction);
+    }
+
+    [Fact]
+    public void Evaluate_BlocksNewPositionWhenMaxOpenPositionsReached()
+    {
+        var decision = new FuturesRiskManager().Evaluate(Context(
+            riskOptions: Options(maxOpenPositions: 1),
+            openPositionCount: 1));
+
+        Assert.False(decision.IsAllowed);
+        Assert.Contains("FUTURES_MAX_OPEN_POSITIONS", decision.Reason, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Evaluate_BlocksNotionalAboveLimit()
     {
         var decision = new FuturesRiskManager().Evaluate(Context(
@@ -105,7 +150,10 @@ public sealed class FuturesRiskManagerTests
         FuturesRiskOptions? riskOptions = null,
         FuturesTradeIntent? intent = null,
         FuturesPositionSnapshot? position = null,
-        decimal dailyRealizedPnl = 0m) => new()
+        decimal dailyRealizedPnl = 0m,
+        decimal totalRealizedPnl = 0m,
+        decimal accountEquityUsdt = 1000m,
+        int openPositionCount = 0) => new()
     {
         RiskOptions = riskOptions ?? Options(),
         Intent = intent ?? Intent(),
@@ -120,7 +168,9 @@ public sealed class FuturesRiskManagerTests
         MarkPrice = 50000m,
         AvailableMarginUsdt = 1000m,
         DailyRealizedPnl = dailyRealizedPnl,
-        MaxDailyLossUsdt = 20m
+        TotalRealizedPnl = totalRealizedPnl,
+        AccountEquityUsdt = accountEquityUsdt,
+        OpenPositionCount = openPositionCount
     };
 
     private static FuturesTradeIntent Intent(
@@ -148,13 +198,23 @@ public sealed class FuturesRiskManagerTests
         decimal maxMarginUsdt = 500m,
         decimal maxLeverage = 2m,
         decimal minLiquidationBufferPercent = 15m,
-        decimal maxFundingCostUsdt = 1m) => new()
+        decimal maxFundingCostUsdt = 1m,
+        decimal maxDailyLossUsdt = 20m,
+        decimal maxDailyLossEquityPercent = 0m,
+        decimal maxDrawdownEquityPercent = 0m,
+        int maxOpenPositions = 1,
+        bool emergencyPause = false) => new()
     {
         MaxNotionalUsdt = maxNotionalUsdt,
         MaxMarginUsdt = maxMarginUsdt,
         MaxLeverage = maxLeverage,
         MinLiquidationBufferPercent = minLiquidationBufferPercent,
         MaxFundingCostUsdt = maxFundingCostUsdt,
+        MaxDailyLossUsdt = maxDailyLossUsdt,
+        MaxDailyLossEquityPercent = maxDailyLossEquityPercent,
+        MaxDrawdownEquityPercent = maxDrawdownEquityPercent,
+        MaxOpenPositions = maxOpenPositions,
+        EmergencyPause = emergencyPause,
         StopLossRequired = true
     };
 }

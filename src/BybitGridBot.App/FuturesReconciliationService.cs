@@ -270,7 +270,7 @@ public sealed class FuturesReconciliationService
             Quantity = execution.ExecQty,
             Price = execution.ExecPrice,
             Fee = execution.ExecFee,
-            RealizedPnl = 0m,
+            RealizedPnl = execution.ExecPnl,
             Funding = 0m,
             CreatedAt = execution.ExecTime == DateTimeOffset.UnixEpoch ? DateTimeOffset.UtcNow : execution.ExecTime
         };

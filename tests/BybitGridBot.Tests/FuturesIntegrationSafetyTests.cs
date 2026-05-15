@@ -187,8 +187,7 @@ public sealed class FuturesIntegrationSafetyTests
         },
         MarkPrice = 100m,
         AvailableMarginUsdt = 100m,
-        DailyRealizedPnl = dailyRealizedPnl,
-        MaxDailyLossUsdt = 20m
+        DailyRealizedPnl = dailyRealizedPnl
     };
 
     private static FuturesExecutionService CreateExecutionService(

@@ -45,9 +45,10 @@ Current scope:
 - futures auto-configuration on `/futures`, with refresh/apply actions based on recent `linear` candles
 - MVP is locked to USDT linear perpetuals: futures profile category `linear`, isolated margin, one-way mode, long-only
 - leverage, max notional, max margin, stop loss, take profit, liquidation buffer, reduce-only flag
-- read-only Bybit position sync through `/v5/position/list`
+- read-only Bybit position sync through `/v5/position/list` plus private WebSocket user stream sync for `order`, `execution`, and `position`
 - MVP strategy action model: `OpenLong`, `CloseLong`, `ReduceOnlyClose`
 - `FuturesBotWorker` runs independently from `GridBotWorker`: it reads `futures_settings`, fetches ticker/candles/position, builds a futures decision, applies `FuturesRiskManager`, and executes via paper simulation or Bybit testnet
+- `FuturesUserStreamWorker` runs outside paper mode when `FUTURES_USER_STREAM_ENABLED=true`: it authenticates to Bybit private WebSocket, keeps local managed orders/fills/positions current between 30-second REST reconciliation cycles, and pauses the profile on non-normal position status or liquidation-buffer breach
 - `FuturesExecutionService` is the dedicated execution layer: `OpenLong` maps to Bybit `Buy` with `reduceOnly=false`; `CloseLong` and `ReduceOnlyClose` map to Bybit `Sell` with `reduceOnly=true`
 - `FuturesPreflightService` validates `FUTURES_ENABLED=true`, `category=linear`, isolated margin, one-way mode, leverage, and instrument min qty/min notional before testnet trading
 - futures runtime guards keep execution paper-only unless `FUTURES_TESTNET_ENABLED=true`; mainnet also requires `FUTURES_MAINNET_ENABLED=true`
@@ -60,7 +61,7 @@ Current scope:
 - Bybit futures client methods are present for `/v5/position/set-leverage`, `/v5/position/switch-isolated`, `/v5/position/switch-mode`, and `/v5/position/trading-stop`
 - futures accounting is separated from spot accounting through `FuturesAccounting` and `FuturesPositionSnapshot`
 - futures paper simulation is separated through `FuturesPaperSimulator`: leverage, margin, realized/unrealized PnL, fees, funding cost, and liquidation are simulated under a futures-only state key without touching spot paper state
-- futures risk checks are separated through `FuturesRiskManager`: max notional, max margin, max leverage, liquidation buffer, stop-loss requirement, daily loss block for increasing positions, and funding cost
+- futures risk checks are separated through `FuturesRiskManager`: max notional, max margin, max leverage, liquidation buffer, stop-loss requirement, absolute/equity-based daily loss, equity-based drawdown, max open positions, emergency pause, and funding cost
 - SQLite migrates futures metadata onto `grid_orders`, legacy `orders`, and `bot_state`: `position_side`, `reduce_only`, `position_idx`, `leverage`, `margin_mode`, `entry_price`, `mark_price`, `liquidation_price`, `unrealized_pnl`
 - `GridBotWorker` hard-fails non-spot runtime categories when the spot worker is registered. Futures profile category is controlled by `FUTURES_CATEGORY`.
 - In futures-only mode (`CATEGORY=linear` and `FUTURES_ENABLED=true`) the spot worker is not registered; with `CATEGORY=spot`, spot and futures workers can run side by side.
@@ -74,6 +75,7 @@ FUTURES_ENABLED=true
 FUTURES_TESTNET_ENABLED=false
 FUTURES_MAINNET_ENABLED=false
 FUTURES_CATEGORY=linear
+FUTURES_USER_STREAM_ENABLED=true
 LEVERAGE=2
 FUTURES_MVP_MAX_LEVERAGE=2
 FUTURES_MIN_SIZE_ORDER_COUNT=3
@@ -83,8 +85,14 @@ MAX_NOTIONAL_USDT=100
 MAX_MARGIN_USDT=50
 FUTURES_MAX_LEVERAGE=2
 FUTURES_MAX_FUNDING_COST_USDT=1
-MIN_LIQUIDATION_BUFFER_PERCENT=15
-STOP_LOSS_REQUIRED=true
+FUTURES_MAX_DAILY_LOSS_USDT=20
+FUTURES_MAX_DAILY_LOSS_EQUITY_PERCENT=0
+FUTURES_MAX_DRAWDOWN_EQUITY_PERCENT=0
+FUTURES_MAX_OPEN_POSITIONS=1
+FUTURES_EMERGENCY_PAUSE=false
+FUTURES_MIN_LIQUIDATION_BUFFER_PERCENT=15
+FUTURES_STOP_LOSS_REQUIRED=true
+BYBIT_PRIVATE_WS_URL=
 ```
 
 Cross margin, hedge mode, and shorts are deliberately rejected by the futures API until the second phase.

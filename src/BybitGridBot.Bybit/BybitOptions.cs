@@ -15,6 +15,9 @@ public sealed class BybitOptions
     [ConfigurationKeyName("BYBIT_TRADING_BASE_URL")]
     public string? TradingBaseUrl { get; init; }
 
+    [ConfigurationKeyName("BYBIT_PRIVATE_WS_URL")]
+    public string? PrivateWebSocketUrl { get; init; }
+
     [ConfigurationKeyName("TRADING_MODE")]
     public TradingMode TradingMode { get; init; } = TradingMode.Paper;
 
@@ -61,6 +64,20 @@ public sealed class BybitOptions
         {
             TradingMode.Mainnet => "https://api.bybit.com",
             _ => BaseUrl.TrimEnd('/')
+        };
+    }
+
+    public string ResolvePrivateWebSocketUrl()
+    {
+        if (!string.IsNullOrWhiteSpace(PrivateWebSocketUrl))
+        {
+            return PrivateWebSocketUrl.TrimEnd('/');
+        }
+
+        return TradingMode switch
+        {
+            TradingMode.Mainnet => "wss://stream.bybit.com/v5/private",
+            _ => "wss://stream-testnet.bybit.com/v5/private"
         };
     }
 }

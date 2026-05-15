@@ -215,6 +215,8 @@ public sealed class BybitPositionSnapshot
 
     public decimal CurRealizedPnl { get; init; }
 
+    public string PositionStatus { get; init; } = "Normal";
+
     public int PositionIdx { get; init; }
 
     public int TradeMode { get; init; }
@@ -278,6 +280,8 @@ public sealed class BybitExecutionSnapshot
     public decimal ExecFee { get; init; }
 
     public decimal ClosedSize { get; init; }
+
+    public decimal ExecPnl { get; init; }
 
     public bool IsMaker { get; init; }
 
@@ -460,6 +464,9 @@ internal sealed class BybitPositionItem
     [JsonPropertyName("curRealisedPnl")]
     public string CurRealizedPnl { get; init; } = "0";
 
+    [JsonPropertyName("positionStatus")]
+    public string PositionStatus { get; init; } = "Normal";
+
     [JsonPropertyName("positionIdx")]
     public int PositionIdx { get; init; }
 
@@ -567,6 +574,9 @@ internal sealed class BybitExecutionItem
 
     [JsonPropertyName("closedSize")]
     public string ClosedSize { get; init; } = "0";
+
+    [JsonPropertyName("execPnl")]
+    public string ExecPnl { get; init; } = "0";
 
     [JsonPropertyName("isMaker")]
     public bool IsMaker { get; init; }
@@ -685,6 +695,7 @@ internal static class BybitModelMapper
             ExecValue = ParseDecimal(item.ExecValue),
             ExecFee = ParseDecimal(item.ExecFee),
             ClosedSize = ParseDecimal(item.ClosedSize),
+            ExecPnl = ParseDecimal(item.ExecPnl),
             IsMaker = item.IsMaker,
             ExecTime = ParseUnixMilliseconds(item.ExecTime)
         };
@@ -707,6 +718,7 @@ internal static class BybitModelMapper
             UnrealizedPnl = ParseDecimal(item.UnrealizedPnl),
             RealizedPnl = ParseDecimal(item.RealizedPnl),
             CurRealizedPnl = ParseDecimal(item.CurRealizedPnl),
+            PositionStatus = string.IsNullOrWhiteSpace(item.PositionStatus) ? "Normal" : item.PositionStatus,
             PositionIdx = item.PositionIdx,
             TradeMode = item.TradeMode,
             UpdatedAt = string.IsNullOrWhiteSpace(item.UpdatedTime)

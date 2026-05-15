@@ -17,6 +17,9 @@ public sealed class FuturesOptions
     [ConfigurationKeyName("FUTURES_CATEGORY")]
     public string Category { get; init; } = "linear";
 
+    [ConfigurationKeyName("FUTURES_USER_STREAM_ENABLED")]
+    public bool UserStreamEnabled { get; init; } = true;
+
     [ConfigurationKeyName("LEVERAGE")]
     [Range(typeof(decimal), "1", "1000")]
     public decimal Leverage { get; init; } = 2m;

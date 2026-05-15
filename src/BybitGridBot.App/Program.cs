@@ -39,6 +39,7 @@ builder.Services.AddOptions<FuturesRiskOptions>().Bind(builder.Configuration);
 builder.Services.AddOptions<TelegramOptions>().Bind(builder.Configuration);
 
 builder.Services.AddSingleton<BybitSigner>();
+builder.Services.AddSingleton<IBybitUserStreamClient, BybitUserStreamClient>();
 builder.Services.AddSingleton<IGridTradingStrategy, GridStrategy>();
 builder.Services.AddSingleton<DcaStrategy>();
 builder.Services.AddSingleton<BtdStrategy>();
@@ -100,6 +101,7 @@ if (ShouldRunSpotWorker(builder.Configuration))
 }
 
 builder.Services.AddHostedService<FuturesBotWorker>();
+builder.Services.AddHostedService<FuturesUserStreamWorker>();
 
 var app = builder.Build();
 

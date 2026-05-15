@@ -6,10 +6,33 @@ public sealed class FuturesRiskManager
 {
     public RiskDecision Evaluate(FuturesRiskEvaluationContext context)
     {
+        if (context.RiskOptions.EmergencyPause && context.Intent.IsPositionIncreasing)
+        {
+            return Block("FUTURES_EMERGENCY_PAUSE is enabled. Increasing futures position is blocked.", RiskSeverity.Critical, RiskSuggestedAction.PauseBot);
+        }
+
         if (context.Intent.IsPositionIncreasing &&
-            context.DailyRealizedPnl <= -context.MaxDailyLossUsdt)
+            context.Position.Size <= 0m &&
+            context.RiskOptions.MaxOpenPositions > 0 &&
+            context.OpenPositionCount >= context.RiskOptions.MaxOpenPositions)
+        {
+            return Block("FUTURES_MAX_OPEN_POSITIONS limit reached.", RiskSeverity.Warning, RiskSuggestedAction.BlockNewOrders);
+        }
+
+        var maxDailyLossUsdt = ResolveMaxDailyLossUsdt(context);
+        if (context.Intent.IsPositionIncreasing &&
+            maxDailyLossUsdt > 0m &&
+            context.DailyRealizedPnl <= -maxDailyLossUsdt)
         {
             return Block("MAX_DAILY_LOSS_USDT limit reached. Increasing futures position is blocked.", RiskSeverity.Critical, RiskSuggestedAction.PauseBot);
+        }
+
+        var maxDrawdownUsdt = ResolveMaxDrawdownUsdt(context);
+        if (context.Intent.IsPositionIncreasing &&
+            maxDrawdownUsdt > 0m &&
+            context.TotalRealizedPnl <= -maxDrawdownUsdt)
+        {
+            return Block("FUTURES_MAX_DRAWDOWN_EQUITY_PERCENT limit reached. Increasing futures position is blocked.", RiskSeverity.Critical, RiskSuggestedAction.PauseBot);
         }
 
         if (context.Intent.Leverage <= 0m)
@@ -92,6 +115,36 @@ public sealed class FuturesRiskManager
         return Math.Abs(referencePrice - liquidationPrice) / referencePrice * 100m;
     }
 
+    private static decimal ResolveMaxDailyLossUsdt(FuturesRiskEvaluationContext context)
+    {
+        var configuredUsdt = context.RiskOptions.MaxDailyLossUsdt;
+        var equityBasedUsdt = context.AccountEquityUsdt > 0m && context.RiskOptions.MaxDailyLossEquityPercent > 0m
+            ? context.AccountEquityUsdt * context.RiskOptions.MaxDailyLossEquityPercent / 100m
+            : 0m;
+
+        return MinPositive(configuredUsdt, equityBasedUsdt);
+    }
+
+    private static decimal ResolveMaxDrawdownUsdt(FuturesRiskEvaluationContext context) =>
+        context.AccountEquityUsdt > 0m && context.RiskOptions.MaxDrawdownEquityPercent > 0m
+            ? context.AccountEquityUsdt * context.RiskOptions.MaxDrawdownEquityPercent / 100m
+            : 0m;
+
+    private static decimal MinPositive(decimal left, decimal right)
+    {
+        if (left <= 0m)
+        {
+            return Math.Max(0m, right);
+        }
+
+        if (right <= 0m)
+        {
+            return left;
+        }
+
+        return Math.Min(left, right);
+    }
+
     private static RiskDecision Block(string reason, RiskSeverity severity, RiskSuggestedAction action) => new()
     {
         IsAllowed = false,
@@ -115,5 +168,9 @@ public sealed class FuturesRiskEvaluationContext
 
     public decimal DailyRealizedPnl { get; init; }
 
-    public decimal MaxDailyLossUsdt { get; init; } = 20m;
+    public decimal TotalRealizedPnl { get; init; }
+
+    public decimal AccountEquityUsdt { get; init; }
+
+    public int OpenPositionCount { get; init; }
 }

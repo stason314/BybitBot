@@ -83,7 +83,7 @@ public sealed class FuturesBotWorker : BackgroundService
                 var profiles = await _repository.GetFuturesSettingsProfilesAsync(stoppingToken);
                 foreach (var profile in profiles)
                 {
-                    await RunProfileCycleAsync(profile, stoppingToken);
+                    await RunProfileCycleAsync(profile, profiles, stoppingToken);
                 }
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
@@ -103,7 +103,10 @@ public sealed class FuturesBotWorker : BackgroundService
         }
     }
 
-    private async Task RunProfileCycleAsync(FuturesBotSettings settings, CancellationToken cancellationToken)
+    private async Task RunProfileCycleAsync(
+        FuturesBotSettings settings,
+        IReadOnlyCollection<FuturesBotSettings> profiles,
+        CancellationToken cancellationToken)
     {
         if (!settings.Enabled)
         {
@@ -147,6 +150,24 @@ public sealed class FuturesBotWorker : BackgroundService
             }
         }
 
+        if (_riskOptions.EmergencyPause)
+        {
+            await PauseProfileAsync(state, "FUTURES_EMERGENCY_PAUSE is enabled.", cancellationToken);
+            _logger.LogWarning("Futures profile paused by emergency pause. Symbol: {Symbol}", settings.Symbol);
+            return;
+        }
+
+        if (state.IsPaused)
+        {
+            _logger.LogInformation(
+                "Futures profile paused. Symbol: {Symbol}. Reason: {Reason}",
+                settings.Symbol,
+                state.PauseReason);
+            return;
+        }
+
+        var accountRisk = await ResolveAccountRiskSnapshotAsync(settings, position, cancellationToken);
+        var openPositionCount = await CountOpenFuturesPositionsAsync(profiles, cancellationToken);
         var decision = _strategyRouter.Decide(new FuturesStrategyContext
         {
             Settings = settings,
@@ -163,9 +184,11 @@ public sealed class FuturesBotWorker : BackgroundService
                 Intent = intent,
                 Position = position,
                 MarkPrice = currentPrice,
-                AvailableMarginUsdt = decimal.Max(0m, settings.MaxMarginUsdt - position.MarginUsedUsdt),
+                AvailableMarginUsdt = accountRisk.AvailableMarginUsdt,
                 DailyRealizedPnl = state.DailyRealizedPnl,
-                MaxDailyLossUsdt = 20m
+                TotalRealizedPnl = state.TotalRealizedPnl,
+                AccountEquityUsdt = accountRisk.AccountEquityUsdt,
+                OpenPositionCount = openPositionCount
             });
             await _repository.AddFuturesRiskDecisionAsync(new FuturesRiskDecisionRecord
             {
@@ -181,6 +204,11 @@ public sealed class FuturesBotWorker : BackgroundService
             }, cancellationToken);
             if (!riskDecision.IsAllowed)
             {
+                if (riskDecision.SuggestedAction == RiskSuggestedAction.PauseBot)
+                {
+                    await PauseProfileAsync(state, riskDecision.Reason, cancellationToken);
+                }
+
                 _logger.LogInformation(
                     "Futures intent blocked for {Symbol}. Action: {Action}. Reason: {Reason}",
                     settings.Symbol,
@@ -216,6 +244,59 @@ public sealed class FuturesBotWorker : BackgroundService
             await _repository.SaveBotStateAsync(state, cancellationToken);
             await _repository.UpsertFuturesPositionAsync(position, _appOptions.TradingMode, cancellationToken);
         }
+    }
+
+    private async Task<int> CountOpenFuturesPositionsAsync(
+        IReadOnlyCollection<FuturesBotSettings> profiles,
+        CancellationToken cancellationToken)
+    {
+        var count = 0;
+        foreach (var profile in profiles.Where(static profile => profile.Enabled))
+        {
+            var position = await _repository.GetFuturesPositionAsync(profile.Symbol, cancellationToken);
+            if (position?.Size > 0m)
+            {
+                count++;
+            }
+        }
+
+        return count;
+    }
+
+    private async Task<FuturesAccountRiskSnapshot> ResolveAccountRiskSnapshotAsync(
+        FuturesBotSettings settings,
+        FuturesPositionSnapshot position,
+        CancellationToken cancellationToken)
+    {
+        var configuredAvailableMargin = decimal.Max(0m, settings.MaxMarginUsdt - position.MarginUsedUsdt);
+        if (_appOptions.TradingMode == TradingMode.Paper)
+        {
+            return new FuturesAccountRiskSnapshot(configuredAvailableMargin, settings.MaxMarginUsdt);
+        }
+
+        var wallet = await _bybitRestClient.GetWalletBalanceAsync(cancellationToken, "USDT");
+        var accountEquity = wallet.Coins.TryGetValue("USDT", out var usdt) && usdt.Equity > 0m
+            ? usdt.Equity
+            : wallet.TotalAvailableBalance;
+        var availableMargin = wallet.TotalAvailableBalance > 0m
+            ? decimal.Min(configuredAvailableMargin, wallet.TotalAvailableBalance)
+            : configuredAvailableMargin;
+
+        return new FuturesAccountRiskSnapshot(availableMargin, accountEquity);
+    }
+
+    private async Task PauseProfileAsync(BotState state, string reason, CancellationToken cancellationToken)
+    {
+        if (state.IsPaused && string.Equals(state.PauseReason, reason, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        state.IsPaused = true;
+        state.PauseReason = reason;
+        state.UpdatedAt = DateTimeOffset.UtcNow;
+        await _repository.SaveBotStateAsync(state, cancellationToken);
+        await _notifier.NotifyAsync($"Futures profile paused.\nSymbol: `{state.Symbol}`\nReason: `{reason}`", cancellationToken);
     }
 
     private async Task<BotState> EnsureFuturesStateAsync(
@@ -307,4 +388,6 @@ public sealed class FuturesBotWorker : BackgroundService
         MinOrderQty = instrument.MinOrderQty,
         MinOrderAmount = instrument.MinOrderAmount
     };
+
+    private sealed record FuturesAccountRiskSnapshot(decimal AvailableMarginUsdt, decimal AccountEquityUsdt);
 }
