@@ -82,7 +82,10 @@ public sealed class GridDashboardService : IGridDashboardService
                 UpdatedAt = DateTimeOffset.UtcNow
             };
         var levels = await _repository.GetGridLevelsAsync(gridOptions.Symbol, cancellationToken);
-        if (levels.Count == 0 && runtimeSettings.StrategyType == TradingStrategyType.Grid)
+        if (levels.Count == 0 &&
+            runtimeSettings.StrategyType is TradingStrategyType.Grid
+                or TradingStrategyType.Combo
+                or TradingStrategyType.Hybrid)
         {
             levels = _strategy.BuildGrid(gridOptions);
         }
@@ -311,7 +314,7 @@ public sealed class GridDashboardService : IGridDashboardService
 
         if (strategyType is null)
         {
-            errors.Add("Strategy type must be grid, dca, combo, btd, signal, or notrade.");
+            errors.Add("Strategy type must be grid, dca, combo, btd, signal, hybrid, or notrade.");
         }
 
         if (strategyConfigJson is null)
@@ -921,7 +924,7 @@ public sealed class GridDashboardService : IGridDashboardService
           <div><label for="symbol">Symbol</label><input id="symbol" name="symbol" placeholder="BILLUSDT" required /></div>
           <div><label for="category">Category</label><input id="category" name="category" value="spot" required /></div>
           <div><label for="strategyMode">Strategy Mode</label><select id="strategyMode" name="strategyMode"><option value="manual">manual</option><option value="auto">auto</option></select></div>
-          <div><label for="strategyType">Strategy Type</label><select id="strategyType" name="strategyType"><option value="grid">Grid</option><option value="dca">DCA</option><option value="combo">Combo Grid + DCA</option><option value="btd">BTD Buy The Dip</option><option value="signal">Signal Bot</option><option value="notrade">NoTrade</option></select></div>
+          <div><label for="strategyType">Strategy Type</label><select id="strategyType" name="strategyType"><option value="grid">Grid</option><option value="dca">DCA</option><option value="combo">Combo Grid + DCA</option><option value="btd">BTD Buy The Dip</option><option value="signal">Signal Bot</option><option value="hybrid">Hybrid Grid + DCA + BTD + Signal</option><option value="notrade">NoTrade</option></select></div>
           <div><label for="lowerPrice">Grid Lower</label><input id="lowerPrice" name="lowerPrice" type="number" step="0.00000001" required /></div>
           <div><label for="upperPrice">Grid Upper</label><input id="upperPrice" name="upperPrice" type="number" step="0.00000001" required /></div>
           <div><label for="step">Grid Step</label><input id="step" name="step" type="number" step="0.00000001" required /></div>
@@ -1665,6 +1668,7 @@ public sealed class GridDashboardService : IGridDashboardService
             "combo" => TradingStrategyType.Combo,
             "btd" => TradingStrategyType.Btd,
             "signal" or "signalbot" or "signal_bot" or "signal bot" => TradingStrategyType.Signal,
+            "hybrid" or "multi" or "all" or "combo_signal" or "combo signal" or "hybrid_signal" or "grid_dca_btd_signal" => TradingStrategyType.Hybrid,
             "notrade" or "no_trade" or "no trade" => TradingStrategyType.NoTrade,
             _ => null
         };
@@ -1783,6 +1787,7 @@ public sealed class GridDashboardService : IGridDashboardService
             TradingStrategyType.Dca => new OrderSourceContext("Managed", "DCA", "DCA"),
             TradingStrategyType.Btd => new OrderSourceContext("Managed", "BTD", "BTD"),
             TradingStrategyType.Combo => new OrderSourceContext("Combo-Grid", "Combo-DCA", "Combo-BTD"),
+            TradingStrategyType.Hybrid => new OrderSourceContext("Hybrid-Grid", "Hybrid-DCA", "Hybrid-BTD"),
             TradingStrategyType.Signal => new OrderSourceContext("Managed", "DCA", "BTD"),
             TradingStrategyType.NoTrade => new OrderSourceContext("Managed", "DCA", "BTD"),
             _ => new OrderSourceContext("Grid", "DCA", "BTD")

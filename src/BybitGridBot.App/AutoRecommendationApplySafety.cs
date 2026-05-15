@@ -102,7 +102,9 @@ internal static class AutoRecommendationApplySafety
             return false;
         }
 
-        var recommendedSellPrices = recommendedSettings.StrategyType is TradingStrategyType.Grid or TradingStrategyType.Combo
+        var recommendedSellPrices = recommendedSettings.StrategyType is TradingStrategyType.Grid
+                or TradingStrategyType.Combo
+                or TradingStrategyType.Hybrid
             ? BuildRecommendedSellPrices(recommendedSettings, state, strategy)
             : [];
         var tolerance = decimal.Max(0.00000001m, recommendation.Step / 2m);
@@ -147,6 +149,7 @@ internal static class AutoRecommendationApplySafety
         return strategyType is TradingStrategyType.Grid
             or TradingStrategyType.Dca
             or TradingStrategyType.Combo
+            or TradingStrategyType.Hybrid
             or TradingStrategyType.Btd
             or TradingStrategyType.Signal;
     }

@@ -20,6 +20,7 @@ Current baseline:
 - `TradingStrategyType.Combo` runs grid first and enables DCA accumulation below a configured trigger;
 - `TradingStrategyType.Btd` buys sharp dips only when market regime is not danger;
 - `TradingStrategyType.Signal` trades directly from `SignalAnalyzer` output;
+- `TradingStrategyType.Hybrid` runs grid, DCA, BTD, and signal overlay in the same runtime profile;
 - `TradingStrategyType.NoTrade` syncs state and fills but creates no new orders;
 - `StrategySelectionMode.Manual` is the default runtime mode;
 - runtime settings persist strategy mode/type/config JSON so future UI and auto-selection can be added without another schema break.
@@ -96,6 +97,12 @@ If `dcaBelowPrice` is omitted, `Combo` starts DCA when price is at or below `Gri
 ```
 
 It opens buy limits on `Buy` signals when confidence is high enough, closes available inventory on `Sell` signals, and creates no new orders on `Hold` or `Avoid`. `Avoid` also cancels pending signal buy entries so stale limits do not open a new position. Stop-loss and take-profit exits are evaluated before ordinary signal entries. Runtime `Stop Lower` and `Stop Upper` remain hard trading boundaries.
+
+`Hybrid` uses the same JSON fields as `Combo`, `Btd`, and `Signal` in one profile. Grid orders are unlabeled grid entries, DCA entries use `dca-entry`, BTD entries use `btd-entry`, and signal orders use `signal-entry`/`signal-exit`.
+
+Signal exits in `Hybrid` are limited to signal-owned inventory, so they do not sell inventory accumulated by grid, DCA, or BTD. DCA and BTD take-profit orders stay parent-linked to their own entry orders. Signal fills do not create grid follow-up orders.
+
+When `Hybrid` needs separate signal limits, `Signal` accepts optional overrides: `signalOrderSizeUsdt`, `signalMaxPositionUsdt`, `signalStopLossPercent`, `signalTakeProfitPercent`, and `signalLimitOffsetPercent`. Without these, the shared fields are used.
 
 `NoTrade` is a safety strategy for auto mode. It keeps market/state synchronization running, including paper/live fill processing for existing orders, but does not create new orders.
 
