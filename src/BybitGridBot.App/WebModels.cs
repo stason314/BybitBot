@@ -372,6 +372,8 @@ public sealed class FuturesDashboardResponse
 
     public required FuturesPnlStatsView PnlStats { get; init; }
 
+    public required FuturesSoakStatusView TestnetSoak { get; init; }
+
     public required FuturesAutoRecommendationView AutoRecommendation { get; init; }
 
     public required IReadOnlyList<string> StrategyActions { get; init; }
@@ -543,6 +545,29 @@ public sealed class FuturesPnlStatsView
     public decimal AverageWin { get; init; }
 
     public decimal AverageLoss { get; init; }
+}
+
+public sealed class FuturesSoakStatusView
+{
+    public bool IsTestnetMode { get; init; }
+
+    public bool TestnetEnabled { get; init; }
+
+    public bool UserStreamEnabled { get; init; }
+
+    public bool HasOpenPosition { get; init; }
+
+    public int ActiveOrderCount { get; init; }
+
+    public int RecentOrderCount { get; init; }
+
+    public int FillCount { get; init; }
+
+    public int RiskDecisionCount { get; init; }
+
+    public string LastRiskSource { get; init; } = "-";
+
+    public string LastRiskReason { get; init; } = "-";
 }
 
 public sealed class FuturesRiskDecisionView

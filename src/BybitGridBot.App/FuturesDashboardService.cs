@@ -100,6 +100,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         var activeOrders = await _repository.GetActiveFuturesOrdersAsync(selectedSettings.Symbol, cancellationToken);
         var riskDecisions = await _repository.GetFuturesRiskDecisionsAsync(selectedSettings.Symbol, 20, cancellationToken);
         var lastPreflight = riskDecisions.FirstOrDefault(decision => string.Equals(decision.Source, "Preflight", StringComparison.OrdinalIgnoreCase));
+        var recentFills = await _repository.GetFuturesFillsAsync(selectedSettings.Symbol, 100, cancellationToken);
 
         return new FuturesDashboardResponse
         {
@@ -131,6 +132,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             Position = position,
             PaperAccount = BuildPaperAccount(state, position, _futuresOptions.PaperInitialEquityUsdt),
             PnlStats = BuildPnlStats(recentOrders),
+            TestnetSoak = BuildTestnetSoakStatus(position, activeOrders, recentOrders, recentFills, riskDecisions),
             AutoRecommendation = MapAutoRecommendation(recommendation),
             StrategyActions = StrategyActions,
             ActiveOrders = activeOrders.Select(MapOrder).ToArray(),
@@ -846,6 +848,15 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
 
     <section class="panel" style="margin-bottom:18px;">
       <div class="actions" style="justify-content:space-between;">
+        <h2 style="margin:0;">Testnet Soak</h2>
+        <span class="subtle">Real-fill readiness and reconciliation signals</span>
+      </div>
+      <div class="stats" id="testnetSoakStats" style="margin-bottom:0;"></div>
+      <div class="subtle" id="testnetSoakRisk" style="margin-top:12px;"></div>
+    </section>
+
+    <section class="panel" style="margin-bottom:18px;">
+      <div class="actions" style="justify-content:space-between;">
         <h2 style="margin:0;">Auto Recommendation</h2>
         <div class="actions">
           <button type="button" id="refreshAutoRecommendation">Refresh</button>
@@ -1152,6 +1163,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
       settings: latest?.settings,
       paperAccount: latest?.paperAccount,
       pnlStats: latest?.pnlStats,
+      testnetSoak: latest?.testnetSoak,
       position: latest?.position,
       activeOrders: latest?.activeOrders || [],
       recentOrders: recentOrdersForHours(hours),
@@ -1232,6 +1244,19 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             <td>${escapeHtml(decision.reason)}</td>
           </tr>`).join('');
     };
+    const renderTestnetSoak = (soak) => {
+      byId('testnetSoakStats').innerHTML = [
+        ['Mode', soak.isTestnetMode ? 'Testnet' : latest?.tradingMode],
+        ['Testnet Flag', soak.testnetEnabled ? 'enabled' : 'disabled'],
+        ['User Stream', soak.userStreamEnabled ? 'enabled' : 'disabled'],
+        ['Open Position', soak.hasOpenPosition ? 'yes' : 'no'],
+        ['Active Orders', formatNumber(soak.activeOrderCount)],
+        ['Recent Orders', formatNumber(soak.recentOrderCount)],
+        ['Fills', formatNumber(soak.fillCount)],
+        ['Risk Events', formatNumber(soak.riskDecisionCount)]
+      ].map(([label, value]) => `<div class="stat"><div class="label">${label}</div><div class="value">${escapeHtml(value)}</div></div>`).join('');
+      byId('testnetSoakRisk').textContent = `${soak.lastRiskSource || '-'}: ${soak.lastRiskReason || '-'}`;
+    };
     const renderAutoRecommendation = (recommendation) => {
       byId('autoRecommendationReason').textContent = recommendation.reason || '-';
       byId('autoRecommendationStats').innerHTML = [
@@ -1263,6 +1288,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
       renderOrders(data.activeOrders || []);
       renderRecentOrders(data.recentOrders || []);
       renderRiskDecisions(data.riskDecisions || []);
+      renderTestnetSoak(data.testnetSoak || {});
       renderAutoRecommendation(data.autoRecommendation);
       byId('strategyActions').innerHTML = data.strategyActions.map(action => `<span class="chip">${escapeHtml(action)}</span>`).join('');
       if (force || !dirty) {
@@ -1562,6 +1588,29 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             ProfitFactor = grossLoss == 0m ? (grossProfit > 0m ? grossProfit : 0m) : grossProfit / Math.Abs(grossLoss),
             AverageWin = wins.Length == 0 ? 0m : wins.Average(),
             AverageLoss = losses.Length == 0 ? 0m : losses.Average()
+        };
+    }
+
+    private FuturesSoakStatusView BuildTestnetSoakStatus(
+        FuturesPositionView position,
+        IReadOnlyCollection<FuturesOrderRecord> activeOrders,
+        IReadOnlyCollection<FuturesOrderRecord> recentOrders,
+        IReadOnlyCollection<FuturesFillRecord> fills,
+        IReadOnlyCollection<FuturesRiskDecisionRecord> riskDecisions)
+    {
+        var lastRisk = riskDecisions.OrderByDescending(decision => decision.CreatedAt).FirstOrDefault();
+        return new FuturesSoakStatusView
+        {
+            IsTestnetMode = _appOptions.TradingMode == TradingMode.Testnet,
+            TestnetEnabled = _futuresOptions.TestnetEnabled,
+            UserStreamEnabled = _futuresOptions.UserStreamEnabled,
+            HasOpenPosition = position.Size > 0m,
+            ActiveOrderCount = activeOrders.Count,
+            RecentOrderCount = recentOrders.Count,
+            FillCount = fills.Count,
+            RiskDecisionCount = riskDecisions.Count,
+            LastRiskSource = lastRisk?.Source ?? "-",
+            LastRiskReason = lastRisk?.Reason ?? "-"
         };
     }
 
