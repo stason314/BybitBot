@@ -4693,6 +4693,11 @@ public sealed class GridBotWorker : BackgroundService
 
         if (_appOptions.TradingMode == TradingMode.Mainnet)
         {
+            if (!_appOptions.SpotMainnetEnabled)
+            {
+                throw new InvalidOperationException("Spot mainnet order placement is blocked. Set SPOT_MAINNET_ENABLED=true only after the spot mainnet checklist is complete.");
+            }
+
             if (_gridOptions.OrderSizeUsdt <= 0m)
             {
                 throw new InvalidOperationException("ORDER_SIZE_USDT must be positive for mainnet.");

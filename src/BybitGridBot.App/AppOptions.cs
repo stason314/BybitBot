@@ -24,4 +24,7 @@ public sealed class AppOptions
 
     [ConfigurationKeyName("SPOT_USER_STREAM_ENABLED")]
     public bool SpotUserStreamEnabled { get; init; } = true;
+
+    [ConfigurationKeyName("SPOT_MAINNET_ENABLED")]
+    public bool SpotMainnetEnabled { get; init; } = false;
 }
