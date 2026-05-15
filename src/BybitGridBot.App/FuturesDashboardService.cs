@@ -639,30 +639,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             };
         }
 
-        var activeOrders = await _repository.GetActiveFuturesOrdersAsync(settings.Symbol, cancellationToken);
-        if (activeOrders.Count > 0)
-        {
-            return new UpdateSettingsResponse
-            {
-                Success = false,
-                Symbol = normalizedSymbol,
-                Message = "Cannot reset paper stats while futures orders are active.",
-                Errors = ["Cancel active futures orders before resetting paper stats."]
-            };
-        }
-
         var position = await ResolvePositionSnapshotAsync(settings, cancellationToken);
-        if (position.Size > 0m)
-        {
-            return new UpdateSettingsResponse
-            {
-                Success = false,
-                Symbol = normalizedSymbol,
-                Message = "Cannot reset paper stats while a futures position is open.",
-                Errors = ["Close the paper futures position before resetting stats."]
-            };
-        }
-
         var stateKey = FuturesStateKeys.ForSymbol(settings.Symbol);
         var currentState = await _repository.GetBotStateAsync(stateKey, cancellationToken);
         var markPrice = position.MarkPrice > 0m
@@ -705,7 +682,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         {
             Success = true,
             Symbol = normalizedSymbol,
-            Message = $"Paper stats reset for {normalizedSymbol}."
+            Message = $"Paper stats and simulation state reset for {normalizedSymbol}."
         };
     }
 
@@ -1444,7 +1421,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
     byId('resetPaperStats').addEventListener('click', async () => {
       const symbol = selectedSymbol || latest?.settings?.symbol;
       if (latest?.tradingMode !== 'Paper' || !symbol) return;
-      if (!window.confirm(`Reset paper stats for ${symbol}? Close positions first; this clears futures paper orders, fills, risk decisions, and PnL history for this symbol.`)) {
+      if (!window.confirm(`Reset paper simulation for ${symbol}? This clears paper position, orders, fills, risk decisions, PnL history, and restores initial equity for this symbol.`)) {
         return;
       }
 
