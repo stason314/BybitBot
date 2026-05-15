@@ -17,6 +17,8 @@ public sealed class GridBotWorker : BackgroundService
     private const string DcaEntryMarker = "dca-entry";
     private const string SignalEntryMarker = "signal-entry";
     private const string SignalExitMarker = "signal-exit";
+    private const string TrendEntryMarker = "trend-entry";
+    private const string TrendExitMarker = "trend-exit";
     private const decimal SignalMarketLikeLimitBufferPercent = 0.05m;
     private static readonly TimeSpan TimedAutoRecommendationApplyInterval = TimeSpan.FromMinutes(30);
     private static readonly JsonSerializerOptions StrategyJsonOptions = new(JsonSerializerDefaults.Web);
@@ -46,6 +48,15 @@ public sealed class GridBotWorker : BackgroundService
     private string _quoteAsset;
 
     private readonly record struct SignalPositionSnapshot(decimal Quantity, decimal AverageEntryPrice);
+
+    private readonly record struct TrendFollowingSignal(
+        bool ShouldBuy,
+        bool ShouldExit,
+        string ExitReason,
+        decimal TrendStrength,
+        decimal Resistance,
+        decimal VolumeRatio,
+        decimal PullbackPercent);
 
     public GridBotWorker(
         IOptions<AppOptions> appOptions,
@@ -264,6 +275,13 @@ public sealed class GridBotWorker : BackgroundService
             return;
         }
 
+        if (profile.StrategyType == TradingStrategyType.TrendFollow)
+        {
+            await _repository.SaveGridLevelsAsync(_gridOptions.Symbol, [], cancellationToken);
+            await RunTrendFollowCycleAsync(profile, state, instrument, cancellationToken);
+            return;
+        }
+
         var levels = await EnsureGridLevelsAsync(cancellationToken);
         if (profile.StrategyType == TradingStrategyType.Combo)
         {
@@ -319,7 +337,8 @@ public sealed class GridBotWorker : BackgroundService
         return newProfile.StrategySelectionMode == StrategySelectionMode.Auto &&
             newProfile.StrategyType is TradingStrategyType.Btd
                 or TradingStrategyType.NoTrade
-                or TradingStrategyType.Signal;
+                or TradingStrategyType.Signal
+                or TradingStrategyType.TrendFollow;
     }
 
     private async Task<bool> ShouldPreserveProfitableSellOrderAsync(
@@ -685,6 +704,76 @@ public sealed class GridBotWorker : BackgroundService
         return state;
     }
 
+    private async Task<BotState> RunTrendFollowCycleAsync(
+        GridBotSettings profile,
+        BotState state,
+        BybitInstrumentInfo instrument,
+        CancellationToken cancellationToken)
+    {
+        ResetDailyPnlIfNeeded(state);
+
+        var config = ParseTrendFollowingStrategyConfig(profile);
+        var ticker = await _bybitRestClient.GetTickerAsync(_gridOptions.Category, _gridOptions.Symbol, cancellationToken);
+        var currentPrice = ticker.LastPrice;
+        state.LastObservedPrice = currentPrice;
+        state.UpdatedAt = DateTimeOffset.UtcNow;
+
+        _logger.LogInformation("Current price for {Symbol}: {Price}", _gridOptions.Symbol, currentPrice);
+
+        if (_appOptions.TradingMode == TradingMode.Paper)
+        {
+            var activeOrders = await _repository.GetActiveOrdersAsync(_gridOptions.Symbol, cancellationToken);
+            if (await HandleStopConditionsAsync(profile, state, currentPrice, activeOrders, cancellationToken))
+            {
+                await _repository.SaveBotStateAsync(state, cancellationToken);
+                return state;
+            }
+
+            await CleanSignalActiveOrdersAsync(state, activeOrders, cancellationToken);
+            await SimulatePaperFillsAsync(state, [], profile, currentPrice, cancellationToken);
+        }
+        else
+        {
+            await SynchronizeLiveOrdersAsync(state, [], profile, cancellationToken);
+            var activeOrders = await _repository.GetActiveOrdersAsync(_gridOptions.Symbol, cancellationToken);
+            if (await HandleStopConditionsAsync(profile, state, currentPrice, activeOrders, cancellationToken))
+            {
+                await _repository.SaveBotStateAsync(state, cancellationToken);
+                return state;
+            }
+
+            await CleanSignalActiveOrdersAsync(state, activeOrders, cancellationToken);
+        }
+
+        if (state.IsPaused)
+        {
+            await _repository.SaveBotStateAsync(state, cancellationToken);
+            return state;
+        }
+
+        if (state.DailyRealizedPnl <= -_riskOptions.MaxDailyLossUsdt)
+        {
+            var activeOrders = await _repository.GetActiveOrdersAsync(_gridOptions.Symbol, cancellationToken);
+            await PauseTradingAsync(
+                state,
+                "Daily loss limit reached.",
+                activeOrders,
+                null,
+                "Daily loss limit reached. Trading paused.",
+                cancellationToken);
+            await _repository.SaveBotStateAsync(state, cancellationToken);
+            return state;
+        }
+
+        await EnsureTrendFollowingOverlayOrdersAsync(profile, config, state, instrument, currentPrice, cancellationToken);
+
+        state.IsInitialized = true;
+        state.UpdatedAt = DateTimeOffset.UtcNow;
+        await _repository.SaveBotStateAsync(state, cancellationToken);
+
+        return state;
+    }
+
     private async Task<BotState> RunComboCycleAsync(
         GridBotSettings profile,
         BotState state,
@@ -754,6 +843,14 @@ public sealed class GridBotWorker : BackgroundService
             currentPrice,
             cancellationToken);
 
+        await EnsureTrendFollowingOverlayOrdersAsync(
+            profile,
+            ParseTrendFollowingStrategyConfig(profile),
+            result,
+            instrument,
+            currentPrice,
+            cancellationToken);
+
         await EnsureSignalOverlayOrdersAsync(
             profile,
             ParseSignalStrategyConfig(profile),
@@ -818,6 +915,71 @@ public sealed class GridBotWorker : BackgroundService
             wallet,
             BtdEntryMarker,
             "BTD",
+            cancellationToken);
+    }
+
+    private async Task EnsureTrendFollowingOverlayOrdersAsync(
+        GridBotSettings profile,
+        TrendFollowingStrategyConfig config,
+        BotState state,
+        BybitInstrumentInfo instrument,
+        decimal currentPrice,
+        CancellationToken cancellationToken)
+    {
+        var candles = await _bybitRestClient.GetKlinesAsync(
+            _gridOptions.Category,
+            _gridOptions.Symbol,
+            string.IsNullOrWhiteSpace(config.CandleInterval) ? "1" : config.CandleInterval,
+            Math.Max(30, config.LookbackCandles),
+            cancellationToken);
+        var trend = AnalyzeTrendFollowing(candles, config);
+        var refreshedActiveOrders = await _repository.GetActiveOrdersAsync(_gridOptions.Symbol, cancellationToken);
+        var wallet = _appOptions.TradingMode == TradingMode.Paper
+            ? null
+            : await _bybitRestClient.GetWalletBalanceAsync(cancellationToken, _quoteAsset, _baseAsset);
+        var trendPosition = await GetTrendPositionSnapshotAsync(cancellationToken);
+        var isStopLoss = ShouldTrendStopLoss(config, trendPosition.Quantity, trendPosition.AverageEntryPrice, currentPrice);
+        var isTakeProfit = ShouldTrendTakeProfit(config, trendPosition.Quantity, trendPosition.AverageEntryPrice, currentPrice);
+
+        if (isStopLoss || isTakeProfit || (trendPosition.Quantity > 0m && trend.ShouldExit))
+        {
+            await CancelActiveTrendBuyOrdersAsync(refreshedActiveOrders, cancellationToken);
+            await EnsureTrendSellOrderAsync(
+                config,
+                state,
+                instrument,
+                currentPrice,
+                refreshedActiveOrders,
+                wallet,
+                isStopLoss ? "stop-loss" : isTakeProfit ? "take-profit" : trend.ExitReason,
+                cancellationToken);
+            return;
+        }
+
+        if (!trend.ShouldBuy)
+        {
+            _logger.LogInformation(
+                "Trend-following overlay holds. TrendStrength: {TrendStrength}, Resistance: {Resistance}, VolumeRatio: {VolumeRatio}, Pullback: {PullbackPercent}",
+                trend.TrendStrength,
+                trend.Resistance,
+                trend.VolumeRatio,
+                trend.PullbackPercent);
+            return;
+        }
+
+        var allOrders = await _repository.GetOrdersAsync(_gridOptions.Symbol, cancellationToken);
+        if (IsTrendCooldownActive(profile, config, DateTimeOffset.UtcNow, allOrders))
+        {
+            return;
+        }
+
+        await EnsureTrendBuyOrderAsync(
+            config,
+            state,
+            instrument,
+            currentPrice,
+            refreshedActiveOrders,
+            wallet,
             cancellationToken);
     }
 
@@ -1140,6 +1302,7 @@ public sealed class GridBotWorker : BackgroundService
 
             if (order.Side == TradeSide.Sell &&
                 !IsSignalOrder(order) &&
+                !IsTrendOrder(order) &&
                 !await HasMinimumNetProfitForOrderAsync(profile, state, order, remainingQuantity, cancellationToken))
             {
                 await CancelManagedOrderAsync(order, cancellationToken);
@@ -1186,7 +1349,7 @@ public sealed class GridBotWorker : BackgroundService
             else if (ShouldSkipGridFollowUp(profile, order))
             {
                 _logger.LogInformation(
-                    "Grid follow-up skipped for {OrderLinkId} because it belongs to the signal overlay.",
+                    "Grid follow-up skipped for {OrderLinkId} because it belongs to a standalone overlay.",
                     order.OrderLinkId);
             }
             else
@@ -1359,7 +1522,7 @@ public sealed class GridBotWorker : BackgroundService
                 else if (ShouldSkipGridFollowUp(profile, order))
                 {
                     _logger.LogInformation(
-                        "Grid follow-up skipped for {OrderLinkId} because it belongs to the signal overlay.",
+                        "Grid follow-up skipped for {OrderLinkId} because it belongs to a standalone overlay.",
                         order.OrderLinkId);
                 }
                 else
@@ -1860,11 +2023,133 @@ public sealed class GridBotWorker : BackgroundService
             quantity);
     }
 
+    private async Task EnsureTrendBuyOrderAsync(
+        TrendFollowingStrategyConfig config,
+        BotState state,
+        BybitInstrumentInfo instrument,
+        decimal currentPrice,
+        IReadOnlyCollection<GridOrder> activeOrders,
+        BybitWalletBalance? wallet,
+        CancellationToken cancellationToken)
+    {
+        if (activeOrders.Any(order => order.IsActive && IsTrendOrder(order)))
+        {
+            return;
+        }
+
+        var orderSizeUsdt = GetTrendOrderSizeUsdt(config, state);
+        var limitPrice = instrument.RoundPrice(CalculateTrendBuyPrice(currentPrice, config));
+        if (limitPrice <= 0m || HasActiveOrderAtLevel(activeOrders, limitPrice))
+        {
+            return;
+        }
+
+        var quantity = instrument.RoundQuantity(orderSizeUsdt / limitPrice);
+        if (quantity <= 0m || quantity < instrument.MinOrderQty)
+        {
+            return;
+        }
+
+        var riskOptions = new RiskOptions
+        {
+            MaxDailyLossUsdt = _riskOptions.MaxDailyLossUsdt,
+            MaxOpenOrders = _riskOptions.MaxOpenOrders,
+            MaxPositionUsdt = config.MaxPositionUsdt is > 0m ? config.MaxPositionUsdt.Value : _riskOptions.MaxPositionUsdt,
+            MinOrderSizeUsdt = _riskOptions.MinOrderSizeUsdt
+        };
+        var violations = _riskManager.ValidateOrderPlacement(
+            riskOptions,
+            _gridOptions,
+            state,
+            activeOrders,
+            currentPrice,
+            orderSizeUsdt,
+            instrument.MinOrderAmount,
+            GetAvailableQuoteBalance(state, activeOrders, wallet));
+
+        if (violations.Count > 0)
+        {
+            _logger.LogWarning("Trend-following buy order at {Price} skipped: {Violations}", limitPrice, string.Join(" | ", violations));
+            return;
+        }
+
+        await ExecuteStrategyDecisionAsync(
+            new StrategyDecision
+            {
+                OrderIntents = [new OrderIntent(TradeSide.Buy, limitPrice, quantity, TrendEntryMarker)]
+            },
+            cancellationToken);
+
+        _logger.LogInformation(
+            "Trend-following buy order created for {Symbol}. Price: {Price}, Quantity: {Quantity}",
+            _gridOptions.Symbol,
+            limitPrice,
+            quantity);
+    }
+
+    private async Task EnsureTrendSellOrderAsync(
+        TrendFollowingStrategyConfig config,
+        BotState state,
+        BybitInstrumentInfo instrument,
+        decimal currentPrice,
+        IReadOnlyCollection<GridOrder> activeOrders,
+        BybitWalletBalance? wallet,
+        string reason,
+        CancellationToken cancellationToken)
+    {
+        if (activeOrders.Any(order => order.IsActive && order.Side == TradeSide.Sell && IsTrendOrder(order)))
+        {
+            return;
+        }
+
+        var trendPosition = await GetTrendPositionSnapshotAsync(cancellationToken);
+        var availableBase = GetAvailableBaseBalance(state, activeOrders, wallet);
+        var quantity = instrument.RoundQuantity(decimal.Min(availableBase, trendPosition.Quantity));
+        if (quantity <= 0m || quantity < instrument.MinOrderQty)
+        {
+            _logger.LogInformation(
+                "Trend-following sell skipped because trend-owned inventory is insufficient. Trend quantity: {TrendQuantity}, available base: {AvailableBase}.",
+                trendPosition.Quantity,
+                availableBase);
+            return;
+        }
+
+        var limitPrice = instrument.RoundPrice(CalculateTrendSellPrice(currentPrice, config));
+        if (limitPrice <= 0m || HasActiveOrderAtLevel(activeOrders, limitPrice))
+        {
+            return;
+        }
+
+        await ExecuteStrategyDecisionAsync(
+            new StrategyDecision
+            {
+                OrderIntents = [new OrderIntent(TradeSide.Sell, limitPrice, quantity, TrendExitMarker)]
+            },
+            cancellationToken);
+
+        _logger.LogInformation(
+            "Trend-following sell order created for {Symbol}. Reason: {Reason}, Price: {Price}, Quantity: {Quantity}",
+            _gridOptions.Symbol,
+            reason,
+            limitPrice,
+            quantity);
+    }
+
     private async Task CancelActiveSignalBuyOrdersAsync(
         IReadOnlyCollection<GridOrder> activeOrders,
         CancellationToken cancellationToken)
     {
         foreach (var order in activeOrders.Where(order => order.IsActive && order.Side == TradeSide.Buy && IsSignalOrder(order)).ToArray())
+        {
+            await CancelManagedOrderAsync(order, cancellationToken);
+        }
+    }
+
+    private async Task CancelActiveTrendBuyOrdersAsync(
+        IReadOnlyCollection<GridOrder> activeOrders,
+        CancellationToken cancellationToken)
+    {
+        foreach (var order in activeOrders.Where(order => order.IsActive && order.Side == TradeSide.Buy && IsTrendOrder(order)).ToArray())
         {
             await CancelManagedOrderAsync(order, cancellationToken);
         }
@@ -1893,6 +2178,25 @@ public sealed class GridBotWorker : BackgroundService
             .Sum(order => order.FilledQuantity);
         var quantity = decimal.Max(0m, signalBuyQuantity - signalSells);
         var averageEntryPrice = signalBuyQuantity > 0m ? signalBuyCost / signalBuyQuantity : 0m;
+
+        return new SignalPositionSnapshot(quantity, averageEntryPrice);
+    }
+
+    private async Task<SignalPositionSnapshot> GetTrendPositionSnapshotAsync(CancellationToken cancellationToken)
+    {
+        var orders = await _repository.GetOrdersAsync(_gridOptions.Symbol, cancellationToken);
+        var trendBuyOrders = orders
+            .Where(order => order.Side == TradeSide.Buy &&
+                string.Equals(order.ParentOrderLinkId, TrendEntryMarker, StringComparison.Ordinal))
+            .ToArray();
+        var trendBuyQuantity = trendBuyOrders.Sum(order => order.FilledQuantity);
+        var trendBuyCost = trendBuyOrders.Sum(order => order.FilledQuantity * (order.AverageFillPrice > 0m ? order.AverageFillPrice : order.Price));
+        var trendSells = orders
+            .Where(order => order.Side == TradeSide.Sell &&
+                string.Equals(order.ParentOrderLinkId, TrendExitMarker, StringComparison.Ordinal))
+            .Sum(order => order.FilledQuantity);
+        var quantity = decimal.Max(0m, trendBuyQuantity - trendSells);
+        var averageEntryPrice = trendBuyQuantity > 0m ? trendBuyCost / trendBuyQuantity : 0m;
 
         return new SignalPositionSnapshot(quantity, averageEntryPrice);
     }
@@ -2035,7 +2339,7 @@ public sealed class GridBotWorker : BackgroundService
 
         foreach (var order in activeOrders.Where(order => order.Side == TradeSide.Sell).ToArray())
         {
-            if (IsSignalOrder(order))
+            if (IsSignalOrder(order) || IsTrendOrder(order))
             {
                 continue;
             }
@@ -2422,6 +2726,24 @@ public sealed class GridBotWorker : BackgroundService
         return Math.Max(orderSize, 0m);
     }
 
+    private decimal GetTrendOrderSizeUsdt(TrendFollowingStrategyConfig config, BotState state)
+    {
+        var configuredOrderSize = config.TrendOrderSizeUsdt is > 0m
+            ? config.TrendOrderSizeUsdt
+            : config.OrderSizeUsdt;
+        var orderSize = configuredOrderSize is > 0m
+            ? configuredOrderSize.Value
+            : _gridOptions.OrderSizeUsdt;
+
+        if (_gridOptions.DailyTakeProfitUsdt > 0m &&
+            state.DailyRealizedPnl >= _gridOptions.DailyTakeProfitUsdt)
+        {
+            orderSize *= _gridOptions.DailyTakeProfitOrderMultiplier;
+        }
+
+        return Math.Max(orderSize, 0m);
+    }
+
     private static decimal CalculateSignalBuyPrice(decimal currentPrice, SignalStrategyConfig config)
     {
         var offset = Math.Max(SignalMarketLikeLimitBufferPercent, GetSignalLimitOffsetPercent(config)) / 100m;
@@ -2431,6 +2753,18 @@ public sealed class GridBotWorker : BackgroundService
     private static decimal CalculateSignalSellPrice(decimal currentPrice, SignalStrategyConfig config)
     {
         var offset = Math.Max(SignalMarketLikeLimitBufferPercent, GetSignalLimitOffsetPercent(config)) / 100m;
+        return currentPrice * (1m - offset);
+    }
+
+    private static decimal CalculateTrendBuyPrice(decimal currentPrice, TrendFollowingStrategyConfig config)
+    {
+        var offset = Math.Max(SignalMarketLikeLimitBufferPercent, config.LimitOffsetPercent) / 100m;
+        return currentPrice * (1m + offset);
+    }
+
+    private static decimal CalculateTrendSellPrice(decimal currentPrice, TrendFollowingStrategyConfig config)
+    {
+        var offset = Math.Max(SignalMarketLikeLimitBufferPercent, config.LimitOffsetPercent) / 100m;
         return currentPrice * (1m - offset);
     }
 
@@ -2483,6 +2817,96 @@ public sealed class GridBotWorker : BackgroundService
     private static decimal GetSignalLimitOffsetPercent(SignalStrategyConfig config) =>
         config.SignalLimitOffsetPercent is > 0m ? config.SignalLimitOffsetPercent.Value : config.LimitOffsetPercent;
 
+    private static bool ShouldTrendStopLoss(
+        TrendFollowingStrategyConfig config,
+        decimal positionQuantity,
+        decimal averageEntryPrice,
+        decimal currentPrice)
+    {
+        if (positionQuantity <= 0m || averageEntryPrice <= 0m || config.StopLossPercent <= 0m)
+        {
+            return false;
+        }
+
+        return currentPrice <= averageEntryPrice * (1m - config.StopLossPercent / 100m);
+    }
+
+    private static bool ShouldTrendTakeProfit(
+        TrendFollowingStrategyConfig config,
+        decimal positionQuantity,
+        decimal averageEntryPrice,
+        decimal currentPrice)
+    {
+        if (positionQuantity <= 0m || averageEntryPrice <= 0m || config.TakeProfitPercent <= 0m)
+        {
+            return false;
+        }
+
+        return currentPrice >= averageEntryPrice * (1m + config.TakeProfitPercent / 100m);
+    }
+
+    private static TrendFollowingSignal AnalyzeTrendFollowing(
+        IReadOnlyCollection<Candle> candles,
+        TrendFollowingStrategyConfig config)
+    {
+        var ordered = candles.OrderBy(candle => candle.OpenTime).ToArray();
+        if (ordered.Length < 5)
+        {
+            return new TrendFollowingSignal(false, false, "insufficient-data", 0m, 0m, 0m, 0m);
+        }
+
+        var latest = ordered[^1];
+        var lookback = Math.Min(Math.Max(2, config.BreakoutLookbackCandles), ordered.Length - 1);
+        var previous = ordered.Take(ordered.Length - 1).TakeLast(lookback).ToArray();
+        var resistance = previous.Max(candle => candle.High);
+        var recentHigh = ordered.TakeLast(lookback).Max(candle => candle.High);
+        var emaFast = CalculateEma(ordered.Select(candle => candle.Close), 9);
+        var emaSlow = CalculateEma(ordered.Select(candle => candle.Close), 21);
+        var trendStrength = latest.Close > 0m ? (emaFast - emaSlow) / latest.Close * 100m : 0m;
+        var averageVolume = previous.TakeLast(Math.Min(20, previous.Length)).Average(candle => candle.Volume);
+        var volumeRatio = averageVolume > 0m ? latest.Volume / averageVolume : 0m;
+        var breakoutPrice = resistance * (1m + Math.Max(0m, config.BreakoutBufferPercent) / 100m);
+        var pullbackPercent = recentHigh > 0m ? (recentHigh - latest.Close) / recentHigh * 100m : 0m;
+        var shouldBuy = latest.Close >= breakoutPrice &&
+            trendStrength >= config.MinTrendStrengthPercent &&
+            volumeRatio >= config.MinVolumeRatio;
+        var shouldExit = latest.Close < emaSlow ||
+            trendStrength <= -config.MinTrendStrengthPercent ||
+            pullbackPercent >= config.PullbackExitPercent;
+        var exitReason = latest.Close < emaSlow
+            ? "ema-breakdown"
+            : trendStrength <= -config.MinTrendStrengthPercent
+                ? "trend-reversal"
+                : "pullback-exit";
+
+        return new TrendFollowingSignal(
+            shouldBuy,
+            shouldExit,
+            exitReason,
+            decimal.Round(trendStrength, 4, MidpointRounding.AwayFromZero),
+            decimal.Round(resistance, 8, MidpointRounding.AwayFromZero),
+            decimal.Round(volumeRatio, 4, MidpointRounding.AwayFromZero),
+            decimal.Round(pullbackPercent, 4, MidpointRounding.AwayFromZero));
+    }
+
+    private static decimal CalculateEma(IEnumerable<decimal> values, int period)
+    {
+        var orderedValues = values.ToArray();
+        if (orderedValues.Length == 0)
+        {
+            return 0m;
+        }
+
+        var multiplier = 2m / (period + 1m);
+        var ema = orderedValues[0];
+        foreach (var value in orderedValues.Skip(1))
+        {
+            ema = (value - ema) * multiplier + ema;
+        }
+
+        return ema;
+    }
+
     private static bool IsSignalCooldownActive(
         GridBotSettings profile,
         SignalStrategyConfig config,
@@ -2501,6 +2925,26 @@ public sealed class GridBotWorker : BackgroundService
 
         return latestSignalOrder is not null &&
             now - latestSignalOrder.CreatedAt < TimeSpan.FromMinutes(cooldownMinutes);
+    }
+
+    private static bool IsTrendCooldownActive(
+        GridBotSettings profile,
+        TrendFollowingStrategyConfig config,
+        DateTimeOffset now,
+        IReadOnlyCollection<GridOrder> orders)
+    {
+        var cooldownMinutes = Math.Max(0, config.CooldownMinutes);
+        if (cooldownMinutes == 0)
+        {
+            return false;
+        }
+
+        var latestTrendOrder = GetTrendScopeOrders(profile, orders)
+            .OrderByDescending(order => order.CreatedAt)
+            .FirstOrDefault();
+
+        return latestTrendOrder is not null &&
+            now - latestTrendOrder.CreatedAt < TimeSpan.FromMinutes(cooldownMinutes);
     }
 
     private static IEnumerable<GridOrder> GetDcaEntryScopeOrders(
@@ -2530,10 +2974,25 @@ public sealed class GridBotWorker : BackgroundService
             : orders;
     }
 
+    private static IEnumerable<GridOrder> GetTrendScopeOrders(
+        GridBotSettings profile,
+        IEnumerable<GridOrder> orders)
+    {
+        return profile.StrategyType is TradingStrategyType.TrendFollow or TradingStrategyType.Hybrid
+            ? orders.Where(IsTrendOrder)
+            : orders;
+    }
+
     private static bool IsSignalOrder(GridOrder order)
     {
         return string.Equals(order.ParentOrderLinkId, SignalEntryMarker, StringComparison.Ordinal) ||
             string.Equals(order.ParentOrderLinkId, SignalExitMarker, StringComparison.Ordinal);
+    }
+
+    private static bool IsTrendOrder(GridOrder order)
+    {
+        return string.Equals(order.ParentOrderLinkId, TrendEntryMarker, StringComparison.Ordinal) ||
+            string.Equals(order.ParentOrderLinkId, TrendExitMarker, StringComparison.Ordinal);
     }
 
     private DcaStrategyConfig ParseDcaStrategyConfig(GridBotSettings profile)
@@ -2593,6 +3052,25 @@ public sealed class GridBotWorker : BackgroundService
         }
     }
 
+    private TrendFollowingStrategyConfig ParseTrendFollowingStrategyConfig(GridBotSettings profile)
+    {
+        try
+        {
+            return JsonSerializer.Deserialize<TrendFollowingStrategyConfig>(
+                    string.IsNullOrWhiteSpace(profile.StrategyConfigJson) ? "{}" : profile.StrategyConfigJson,
+                    StrategyJsonOptions)
+                ?? new TrendFollowingStrategyConfig();
+        }
+        catch (JsonException exception)
+        {
+            _logger.LogWarning(
+                exception,
+                "Invalid trend-following strategy config for {Symbol}. Falling back to defaults.",
+                profile.Symbol);
+            return new TrendFollowingStrategyConfig();
+        }
+    }
+
     private ComboStrategyConfig ParseComboStrategyConfig(GridBotSettings profile)
     {
         try
@@ -2631,8 +3109,8 @@ public sealed class GridBotWorker : BackgroundService
 
     private static bool ShouldSkipGridFollowUp(GridBotSettings? profile, GridOrder order)
     {
-        return profile?.StrategyType is (TradingStrategyType.Signal or TradingStrategyType.Hybrid) &&
-            IsSignalOrder(order);
+        return profile?.StrategyType is (TradingStrategyType.Signal or TradingStrategyType.TrendFollow or TradingStrategyType.Hybrid) &&
+            (IsSignalOrder(order) || IsTrendOrder(order));
     }
 
     private async Task<bool> HasMinimumNetProfitForOrderAsync(

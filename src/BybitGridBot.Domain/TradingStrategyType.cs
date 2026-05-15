@@ -7,6 +7,7 @@ public enum TradingStrategyType
     Combo,
     Btd,
     Signal,
+    TrendFollow,
     Hybrid,
     NoTrade
 }

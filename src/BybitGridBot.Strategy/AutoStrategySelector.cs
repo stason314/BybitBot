@@ -80,6 +80,22 @@ public sealed class AutoStrategySelector
                 metrics);
         }
 
+        if (ShouldRecommendTrendFollowing(regime, signal))
+        {
+            var trendOrderSize = decimal.Max(currentOptions.MinOrderSizeUsdt, orderSize * 0.75m);
+            return Build(
+                TradingStrategyType.TrendFollow,
+                $"Breakout trend setup detected. Use TrendFollow to buy confirmed breakouts and exit on pullback or trend reversal. Trend strength: {signal.TrendStrength:0.####}, volume ratio: {signal.VolumeRatio:0.####}.",
+                lower,
+                upper,
+                step,
+                trendOrderSize,
+                stopLower,
+                stopUpper,
+                BuildTrendFollowingConfig(trendOrderSize, currentOptions.MinOrderSizeUsdt, stopLower, stopUpper),
+                metrics);
+        }
+
         if (ShouldRecommendDipStrategy(regime, signal, drawdownPercent))
         {
             var dipOrderSize = RecommendActiveOrderSize(currentOptions, orderSize * 0.6m);
@@ -280,6 +296,18 @@ public sealed class AutoStrategySelector
             regime.Regime is MarketRegimeType.Breakout or MarketRegimeType.Trend;
     }
 
+    private static bool ShouldRecommendTrendFollowing(MarketRegimeAnalysis regime, SignalAnalysis signal)
+    {
+        if (regime.Regime != MarketRegimeType.Breakout || regime.MovePercent <= 0m)
+        {
+            return false;
+        }
+
+        return signal.TrendStrength >= 0.08m &&
+            signal.BollingerPosition >= 0.5m &&
+            signal.VolumeRatio >= 1.2m;
+    }
+
     private static bool ShouldRecommendVolatileRange(
         MarketRegimeAnalysis regime,
         SignalAnalysis signal,
@@ -346,6 +374,7 @@ public sealed class AutoStrategySelector
             TradingStrategyType.Combo => BuildComboConfig(orderSize, minOrderSize, lower),
             TradingStrategyType.Btd => BuildBtdConfig(orderSize, minOrderSize, metrics.DrawdownPercent, metrics.LastPrice, stopLower, stopUpper),
             TradingStrategyType.Signal => BuildSignalConfig(orderSize, minOrderSize, stopLower, stopUpper),
+            TradingStrategyType.TrendFollow => BuildTrendFollowingConfig(orderSize, minOrderSize, stopLower, stopUpper),
             TradingStrategyType.Hybrid => BuildHybridConfig(orderSize, minOrderSize, lower, metrics.DrawdownPercent, metrics.LastPrice, stopLower, stopUpper),
             _ => "{}"
         };
@@ -394,6 +423,12 @@ public sealed class AutoStrategySelector
             maxPositionUsdt = 400m,
             dcaBelowPrice = decimal.Round(dcaBelowPrice, 8, MidpointRounding.ToZero),
             referencePrice = decimal.Round(lastPrice, 8, MidpointRounding.AwayFromZero),
+            trendOrderSizeUsdt = roundedOrderSize,
+            minTrendStrengthPercent = 0.08m,
+            minVolumeRatio = 1.2m,
+            breakoutBufferPercent = 0.1m,
+            breakoutLookbackCandles = 60,
+            pullbackExitPercent = 0.8m,
             signalOrderSizeUsdt = roundedOrderSize,
             signalMaxPositionUsdt = 200m,
             signalTakeProfitPercent = 2m,
@@ -402,6 +437,36 @@ public sealed class AutoStrategySelector
             cooldownMinutes = 30,
             minConfidence = 0.65m,
             lookbackCandles = 120,
+            stopLowerPrice = stopLower,
+            stopUpperPrice = stopUpper
+        };
+
+        return JsonSerializer.Serialize(config, JsonOptions);
+    }
+
+    private static string BuildTrendFollowingConfig(
+        decimal orderSize,
+        decimal minOrderSize,
+        decimal stopLower,
+        decimal stopUpper)
+    {
+        var roundedOrderSize = decimal.Round(decimal.Max(minOrderSize, orderSize), 2, MidpointRounding.AwayFromZero);
+        var config = new
+        {
+            orderSizeUsdt = roundedOrderSize,
+            trendOrderSizeUsdt = roundedOrderSize,
+            cooldownMinutes = 20,
+            lookbackCandles = 120,
+            breakoutLookbackCandles = 60,
+            candleInterval = "1",
+            minTrendStrengthPercent = 0.08m,
+            minVolumeRatio = 1.2m,
+            breakoutBufferPercent = 0.1m,
+            pullbackExitPercent = 0.8m,
+            stopLossPercent = 2m,
+            takeProfitPercent = 3m,
+            limitOffsetPercent = 0m,
+            maxPositionUsdt = 400m,
             stopLowerPrice = stopLower,
             stopUpperPrice = stopUpper
         };

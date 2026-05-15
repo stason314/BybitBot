@@ -20,7 +20,8 @@ Current baseline:
 - `TradingStrategyType.Combo` runs grid first and enables DCA accumulation below a configured trigger;
 - `TradingStrategyType.Btd` buys sharp dips only when market regime is not danger;
 - `TradingStrategyType.Signal` trades directly from `SignalAnalyzer` output;
-- `TradingStrategyType.Hybrid` runs grid, DCA, BTD, and signal overlay in the same runtime profile;
+- `TradingStrategyType.TrendFollow` buys confirmed breakouts and exits on pullback, take-profit, stop-loss, or trend reversal;
+- `TradingStrategyType.Hybrid` runs grid, DCA, BTD, TrendFollow, and signal overlay in the same runtime profile;
 - `TradingStrategyType.NoTrade` syncs state and fills but creates no new orders;
 - `StrategySelectionMode.Manual` is the default runtime mode;
 - runtime settings persist strategy mode/type/config JSON so future UI and auto-selection can be added without another schema break.
@@ -98,9 +99,32 @@ If `dcaBelowPrice` is omitted, `Combo` starts DCA when price is at or below `Gri
 
 It opens buy limits on `Buy` signals when confidence is high enough, closes available inventory on `Sell` signals, and creates no new orders on `Hold` or `Avoid`. `Avoid` also cancels pending signal buy entries so stale limits do not open a new position. Stop-loss and take-profit exits are evaluated before ordinary signal entries. Runtime `Stop Lower` and `Stop Upper` remain hard trading boundaries.
 
-`Hybrid` uses the same JSON fields as `Combo`, `Btd`, and `Signal` in one profile. Grid orders are unlabeled grid entries, DCA entries use `dca-entry`, BTD entries use `btd-entry`, and signal orders use `signal-entry`/`signal-exit`.
+`TrendFollow` uses breakout and trend-confirmation fields:
 
-Signal exits in `Hybrid` are limited to signal-owned inventory, so they do not sell inventory accumulated by grid, DCA, or BTD. DCA and BTD take-profit orders stay parent-linked to their own entry orders. Signal fills do not create grid follow-up orders.
+```json
+{
+  "orderSizeUsdt": 20,
+  "trendOrderSizeUsdt": 20,
+  "cooldownMinutes": 20,
+  "lookbackCandles": 120,
+  "breakoutLookbackCandles": 60,
+  "candleInterval": "1",
+  "minTrendStrengthPercent": 0.08,
+  "minVolumeRatio": 1.2,
+  "breakoutBufferPercent": 0.1,
+  "pullbackExitPercent": 0.8,
+  "stopLossPercent": 2,
+  "takeProfitPercent": 3,
+  "limitOffsetPercent": 0,
+  "maxPositionUsdt": 400
+}
+```
+
+It places buy limits only after price breaks recent resistance with enough EMA trend strength and volume. It only sells trend-owned inventory, marked by `trend-entry`/`trend-exit`, so standalone and `Hybrid` use do not accidentally liquidate grid, DCA, BTD, or signal positions.
+
+`Hybrid` uses the same JSON fields as `Combo`, `Btd`, `TrendFollow`, and `Signal` in one profile. Grid orders are unlabeled grid entries, DCA entries use `dca-entry`, BTD entries use `btd-entry`, TrendFollow orders use `trend-entry`/`trend-exit`, and signal orders use `signal-entry`/`signal-exit`.
+
+Signal and TrendFollow exits in `Hybrid` are limited to their own inventory, so they do not sell inventory accumulated by grid, DCA, or BTD. DCA and BTD take-profit orders stay parent-linked to their own entry orders. Signal and TrendFollow fills do not create grid follow-up orders.
 
 When `Hybrid` needs separate signal limits, `Signal` accepts optional overrides: `signalOrderSizeUsdt`, `signalMaxPositionUsdt`, `signalStopLossPercent`, `signalTakeProfitPercent`, and `signalLimitOffsetPercent`. Without these, the shared fields are used.
 
@@ -109,14 +133,14 @@ When `Hybrid` needs separate signal limits, `Signal` accepts optional overrides:
 Next steps:
 1. Move remaining grid order-planning details fully behind strategy implementations.
 2. Harden auto recommendation safety checks before enabling timed auto-apply.
-3. Add adaptive grid and volume-breakout strategies as separate implementations.
+3. Tune paper-mode thresholds for Hybrid and TrendFollow before enabling timed auto-apply.
 
 Auto recommendation flow:
 - `AutoStrategySelector` analyzes 360 one-minute candles, about 6 hours, plus `MarketRegimeAnalysis`;
 - recommended `Stop Lower` and `Stop Upper` are intentionally wider than the active grid range so normal volatility does not pause the bot too often;
 - operators can apply recommended market parameters to the currently selected strategy without changing symbol or strategy type;
 - if price breaches stop boundaries, the worker first tries a forced same-strategy recommendation refresh and only pauses if the refreshed stop range still cannot include current price;
-- confirmed `Buy`/`Sell` signals can recommend `Signal` in breakout markets, and confirmed `Buy` signals can recommend `Signal` in trend markets;
+- confirmed `Buy`/`Sell` signals can recommend `Signal` in breakout markets, confirmed `Buy` signals can recommend `Signal` in trend markets, and breakout trend setups can recommend `TrendFollow`;
 - dashboard shows the strategy and runtime settings it would choose;
 - operator can apply the recommendation manually from the UI;
 - timed auto-apply should only be enabled after paper validation and cooldown/safety checks.

@@ -104,7 +104,50 @@ public sealed class AutoStrategySelectorTests
 
         Assert.Equal(TradingStrategyType.Hybrid, recommendation.StrategyType);
         Assert.Equal(15m, config.RootElement.GetProperty("orderSizeUsdt").GetDecimal());
+        Assert.Equal(15m, config.RootElement.GetProperty("trendOrderSizeUsdt").GetDecimal());
+        Assert.Equal(60, config.RootElement.GetProperty("breakoutLookbackCandles").GetInt32());
         Assert.Equal(15m, config.RootElement.GetProperty("signalOrderSizeUsdt").GetDecimal());
+        Assert.True(recommendation.StopLowerPrice < recommendation.LowerPrice);
+        Assert.True(recommendation.StopUpperPrice > recommendation.UpperPrice);
+    }
+
+    [Fact]
+    public void RecommendForStrategy_BuildsTrendFollowConfig()
+    {
+        var selector = new AutoStrategySelector();
+        var options = new GridOptions
+        {
+            LowerPrice = 2.0m,
+            UpperPrice = 2.2m,
+            Step = 0.01m,
+            OrderSizeUsdt = 20m,
+            MinOrderSizeUsdt = 15m,
+            StopLowerPrice = 1.9m,
+            StopUpperPrice = 2.3m
+        };
+        var candles = BuildCandles(2.10m, 2.14m, 2.08m, 30);
+
+        var recommendation = selector.RecommendForStrategy(
+            options,
+            new MarketRegimeAnalysis
+            {
+                Regime = MarketRegimeType.Breakout,
+                MovePercent = 1.2m,
+                RangePercent = 2m,
+                Recommendation = "Breakout",
+                Support = 2.08m,
+                Resistance = 2.14m
+            },
+            candles,
+            TradingStrategyType.TrendFollow);
+
+        using var config = JsonDocument.Parse(recommendation.StrategyConfigJson);
+
+        Assert.Equal(TradingStrategyType.TrendFollow, recommendation.StrategyType);
+        Assert.Equal(15m, config.RootElement.GetProperty("trendOrderSizeUsdt").GetDecimal());
+        Assert.Equal(0.08m, config.RootElement.GetProperty("minTrendStrengthPercent").GetDecimal());
+        Assert.Equal(1.2m, config.RootElement.GetProperty("minVolumeRatio").GetDecimal());
+        Assert.Equal(60, config.RootElement.GetProperty("breakoutLookbackCandles").GetInt32());
         Assert.True(recommendation.StopLowerPrice < recommendation.LowerPrice);
         Assert.True(recommendation.StopUpperPrice > recommendation.UpperPrice);
     }
