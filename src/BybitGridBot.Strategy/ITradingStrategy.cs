@@ -31,5 +31,6 @@ public interface IGridTradingStrategy : ITradingStrategy
         GridOptions options,
         MarketPhaseResult marketPhase,
         decimal currentPrice,
-        bool bigRedGuardActive);
+        bool bigRedGuardActive,
+        bool aggressiveModeActive = false);
 }
