@@ -20,6 +20,24 @@ public sealed class BotState
 
     public decimal AverageEntryPrice { get; set; }
 
+    public string? PositionSide { get; set; }
+
+    public bool ReduceOnly { get; set; }
+
+    public int PositionIdx { get; set; }
+
+    public decimal Leverage { get; set; }
+
+    public string? MarginMode { get; set; }
+
+    public decimal EntryPrice { get; set; }
+
+    public decimal MarkPrice { get; set; }
+
+    public decimal LiquidationPrice { get; set; }
+
+    public decimal UnrealizedPnl { get; set; }
+
     public decimal TotalRealizedPnl { get; set; }
 
     public decimal DailyRealizedPnl { get; set; }

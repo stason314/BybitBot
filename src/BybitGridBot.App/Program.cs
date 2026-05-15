@@ -55,6 +55,7 @@ builder.Services.AddSingleton<SignalAnalyzer>();
 builder.Services.AddSingleton<SignalEngine>();
 builder.Services.AddSingleton<AutoStrategySelector>();
 builder.Services.AddSingleton<FuturesAccounting>();
+builder.Services.AddSingleton<FuturesPaperSimulator>();
 builder.Services.AddSingleton<StrategyRouter>();
 builder.Services.AddSingleton<CapitalAllocator>();
 builder.Services.AddSingleton<ConflictResolver>();

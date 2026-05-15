@@ -48,7 +48,9 @@ Current scope:
 - MVP strategy action model: `OpenLong`, `CloseLong`, `ReduceOnlyClose`
 - Bybit futures client methods are present for `/v5/position/set-leverage`, `/v5/position/switch-isolated`, `/v5/position/switch-mode`, and `/v5/position/trading-stop`
 - futures accounting is separated from spot accounting through `FuturesAccounting` and `FuturesPositionSnapshot`
+- futures paper simulation is separated through `FuturesPaperSimulator`: leverage, margin, realized/unrealized PnL, fees, funding cost, and liquidation are simulated without touching spot paper state
 - futures risk checks are separated through `FuturesRiskManager`: max notional, max margin, max leverage, liquidation buffer, stop-loss requirement, daily loss block for increasing positions, and funding cost
+- SQLite migrates futures metadata onto `grid_orders`, legacy `orders`, and `bot_state`: `position_side`, `reduce_only`, `position_idx`, `leverage`, `margin_mode`, `entry_price`, `mark_price`, `liquidation_price`, `unrealized_pnl`
 
 Live futures order placement is not enabled in this first step.
 
@@ -69,6 +71,14 @@ STOP_LOSS_REQUIRED=true
 ```
 
 Cross margin, hedge mode, and shorts are deliberately rejected by the futures API until the second phase.
+
+Testnet rollout checklist:
+
+1. Run futures profiles in `/futures` and confirm position sync works.
+2. Run futures paper simulation with minimum notional and verify fees, funding, PnL, and liquidation behavior.
+3. Use Bybit testnet with minimum order size, isolated margin, one-way mode, and long-only direction.
+4. Confirm every close order is sent with `reduceOnly=true`.
+5. Keep mainnet disabled until the live futures worker has its own review checklist.
 
 ## How Auto/Hybrid Mode Works
 

@@ -42,6 +42,15 @@ public sealed class SqliteGridRepository : IGridRepository
                 status TEXT NOT NULL,
                 trading_mode TEXT NOT NULL,
                 parent_order_link_id TEXT NULL,
+                position_side TEXT NULL,
+                reduce_only INTEGER NOT NULL DEFAULT 0,
+                position_idx INTEGER NOT NULL DEFAULT 0,
+                leverage TEXT NOT NULL DEFAULT '0',
+                margin_mode TEXT NULL,
+                entry_price TEXT NOT NULL DEFAULT '0',
+                mark_price TEXT NOT NULL DEFAULT '0',
+                liquidation_price TEXT NOT NULL DEFAULT '0',
+                unrealized_pnl TEXT NOT NULL DEFAULT '0',
                 realized_pnl TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
@@ -58,6 +67,15 @@ public sealed class SqliteGridRepository : IGridRepository
                 base_asset_quantity TEXT NOT NULL,
                 quote_asset_balance TEXT NOT NULL,
                 average_entry_price TEXT NOT NULL,
+                position_side TEXT NULL,
+                reduce_only INTEGER NOT NULL DEFAULT 0,
+                position_idx INTEGER NOT NULL DEFAULT 0,
+                leverage TEXT NOT NULL DEFAULT '0',
+                margin_mode TEXT NULL,
+                entry_price TEXT NOT NULL DEFAULT '0',
+                mark_price TEXT NOT NULL DEFAULT '0',
+                liquidation_price TEXT NOT NULL DEFAULT '0',
+                unrealized_pnl TEXT NOT NULL DEFAULT '0',
                 total_realized_pnl TEXT NOT NULL,
                 daily_realized_pnl TEXT NOT NULL,
                 daily_pnl_date TEXT NOT NULL,
@@ -237,6 +255,15 @@ public sealed class SqliteGridRepository : IGridRepository
                 side TEXT NOT NULL,
                 price TEXT NOT NULL,
                 quantity TEXT NOT NULL,
+                position_side TEXT NULL,
+                reduce_only INTEGER NOT NULL DEFAULT 0,
+                position_idx INTEGER NOT NULL DEFAULT 0,
+                leverage TEXT NOT NULL DEFAULT '0',
+                margin_mode TEXT NULL,
+                entry_price TEXT NOT NULL DEFAULT '0',
+                mark_price TEXT NOT NULL DEFAULT '0',
+                liquidation_price TEXT NOT NULL DEFAULT '0',
+                unrealized_pnl TEXT NOT NULL DEFAULT '0',
                 status TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
@@ -274,6 +301,9 @@ public sealed class SqliteGridRepository : IGridRepository
         await EnsureColumnAsync(connection, "runtime_settings", "strategy_selection_mode", "TEXT NOT NULL DEFAULT 'Manual'", cancellationToken);
         await EnsureColumnAsync(connection, "runtime_settings", "strategy_type", "TEXT NOT NULL DEFAULT 'Grid'", cancellationToken);
         await EnsureColumnAsync(connection, "runtime_settings", "strategy_config_json", "TEXT NOT NULL DEFAULT '{}'", cancellationToken);
+        await EnsureFuturesOrderColumnsAsync(connection, "grid_orders", cancellationToken);
+        await EnsureFuturesOrderColumnsAsync(connection, "orders", cancellationToken);
+        await EnsureFuturesStateColumnsAsync(connection, "bot_state", cancellationToken);
         _logger.LogInformation("SQLite repository initialized.");
     }
 
@@ -567,7 +597,9 @@ public sealed class SqliteGridRepository : IGridRepository
     {
         const string sql = """
             SELECT order_link_id, bybit_order_id, symbol, category, side, price, quantity, filled_quantity,
-                   average_fill_price, fee_paid, status, trading_mode, parent_order_link_id, realized_pnl,
+                   average_fill_price, fee_paid, status, trading_mode, parent_order_link_id,
+                   position_side, reduce_only, position_idx, leverage, margin_mode, entry_price, mark_price,
+                   liquidation_price, unrealized_pnl, realized_pnl,
                    created_at, updated_at, filled_at
             FROM grid_orders
             WHERE symbol = $symbol
@@ -586,7 +618,9 @@ public sealed class SqliteGridRepository : IGridRepository
     {
         const string sql = """
             SELECT order_link_id, bybit_order_id, symbol, category, side, price, quantity, filled_quantity,
-                   average_fill_price, fee_paid, status, trading_mode, parent_order_link_id, realized_pnl,
+                   average_fill_price, fee_paid, status, trading_mode, parent_order_link_id,
+                   position_side, reduce_only, position_idx, leverage, margin_mode, entry_price, mark_price,
+                   liquidation_price, unrealized_pnl, realized_pnl,
                    created_at, updated_at, filled_at
             FROM grid_orders
             WHERE symbol = $symbol AND status IN ('New', 'PartiallyFilled')
@@ -605,7 +639,9 @@ public sealed class SqliteGridRepository : IGridRepository
     {
         const string sql = """
             SELECT order_link_id, bybit_order_id, symbol, category, side, price, quantity, filled_quantity,
-                   average_fill_price, fee_paid, status, trading_mode, parent_order_link_id, realized_pnl,
+                   average_fill_price, fee_paid, status, trading_mode, parent_order_link_id,
+                   position_side, reduce_only, position_idx, leverage, margin_mode, entry_price, mark_price,
+                   liquidation_price, unrealized_pnl, realized_pnl,
                    created_at, updated_at, filled_at
             FROM grid_orders
             WHERE order_link_id = $order_link_id
@@ -625,7 +661,9 @@ public sealed class SqliteGridRepository : IGridRepository
     {
         const string sql = """
             SELECT order_link_id, bybit_order_id, symbol, category, side, price, quantity, filled_quantity,
-                   average_fill_price, fee_paid, status, trading_mode, parent_order_link_id, realized_pnl,
+                   average_fill_price, fee_paid, status, trading_mode, parent_order_link_id,
+                   position_side, reduce_only, position_idx, leverage, margin_mode, entry_price, mark_price,
+                   liquidation_price, unrealized_pnl, realized_pnl,
                    created_at, updated_at, filled_at
             FROM grid_orders
             WHERE symbol = $symbol
@@ -651,12 +689,16 @@ public sealed class SqliteGridRepository : IGridRepository
         const string sql = """
             INSERT INTO grid_orders (
                 order_link_id, bybit_order_id, symbol, category, side, price, quantity, filled_quantity,
-                average_fill_price, fee_paid, status, trading_mode, parent_order_link_id, realized_pnl,
+                average_fill_price, fee_paid, status, trading_mode, parent_order_link_id,
+                position_side, reduce_only, position_idx, leverage, margin_mode, entry_price, mark_price,
+                liquidation_price, unrealized_pnl, realized_pnl,
                 created_at, updated_at, filled_at
             )
             VALUES (
                 $order_link_id, $bybit_order_id, $symbol, $category, $side, $price, $quantity, $filled_quantity,
-                $average_fill_price, $fee_paid, $status, $trading_mode, $parent_order_link_id, $realized_pnl,
+                $average_fill_price, $fee_paid, $status, $trading_mode, $parent_order_link_id,
+                $position_side, $reduce_only, $position_idx, $leverage, $margin_mode, $entry_price, $mark_price,
+                $liquidation_price, $unrealized_pnl, $realized_pnl,
                 $created_at, $updated_at, $filled_at
             )
             ON CONFLICT(order_link_id) DO UPDATE SET
@@ -672,6 +714,15 @@ public sealed class SqliteGridRepository : IGridRepository
                 status = excluded.status,
                 trading_mode = excluded.trading_mode,
                 parent_order_link_id = excluded.parent_order_link_id,
+                position_side = excluded.position_side,
+                reduce_only = excluded.reduce_only,
+                position_idx = excluded.position_idx,
+                leverage = excluded.leverage,
+                margin_mode = excluded.margin_mode,
+                entry_price = excluded.entry_price,
+                mark_price = excluded.mark_price,
+                liquidation_price = excluded.liquidation_price,
+                unrealized_pnl = excluded.unrealized_pnl,
                 realized_pnl = excluded.realized_pnl,
                 created_at = excluded.created_at,
                 updated_at = excluded.updated_at,
@@ -694,6 +745,15 @@ public sealed class SqliteGridRepository : IGridRepository
         command.Parameters.AddWithValue("$status", order.Status.ToString());
         command.Parameters.AddWithValue("$trading_mode", order.TradingMode.ToString());
         command.Parameters.AddWithValue("$parent_order_link_id", (object?)order.ParentOrderLinkId ?? DBNull.Value);
+        command.Parameters.AddWithValue("$position_side", (object?)order.PositionSide ?? DBNull.Value);
+        command.Parameters.AddWithValue("$reduce_only", order.ReduceOnly);
+        command.Parameters.AddWithValue("$position_idx", order.PositionIdx);
+        command.Parameters.AddWithValue("$leverage", FormatDecimal(order.Leverage));
+        command.Parameters.AddWithValue("$margin_mode", (object?)order.MarginMode ?? DBNull.Value);
+        command.Parameters.AddWithValue("$entry_price", FormatDecimal(order.EntryPrice));
+        command.Parameters.AddWithValue("$mark_price", FormatDecimal(order.MarkPrice));
+        command.Parameters.AddWithValue("$liquidation_price", FormatDecimal(order.LiquidationPrice));
+        command.Parameters.AddWithValue("$unrealized_pnl", FormatDecimal(order.UnrealizedPnl));
         command.Parameters.AddWithValue("$realized_pnl", FormatDecimal(order.RealizedPnl));
         command.Parameters.AddWithValue("$created_at", order.CreatedAt.ToString("O", CultureInfo.InvariantCulture));
         command.Parameters.AddWithValue("$updated_at", order.UpdatedAt.ToString("O", CultureInfo.InvariantCulture));
@@ -706,7 +766,8 @@ public sealed class SqliteGridRepository : IGridRepository
         const string sql = """
             SELECT symbol, trading_mode, is_initialized, is_paused, pause_reason, last_observed_price,
                    base_asset_quantity, quote_asset_balance, average_entry_price, total_realized_pnl,
-                   daily_realized_pnl, daily_pnl_date, updated_at
+                   daily_realized_pnl, daily_pnl_date, updated_at, position_side, reduce_only, position_idx,
+                   leverage, margin_mode, entry_price, mark_price, liquidation_price, unrealized_pnl
             FROM bot_state
             WHERE symbol = $symbol
             LIMIT 1;
@@ -737,7 +798,16 @@ public sealed class SqliteGridRepository : IGridRepository
             TotalRealizedPnl = ParseDecimal(reader.GetString(9)),
             DailyRealizedPnl = ParseDecimal(reader.GetString(10)),
             DailyPnlDate = DateOnly.Parse(reader.GetString(11), CultureInfo.InvariantCulture),
-            UpdatedAt = DateTimeOffset.Parse(reader.GetString(12), CultureInfo.InvariantCulture)
+            UpdatedAt = DateTimeOffset.Parse(reader.GetString(12), CultureInfo.InvariantCulture),
+            PositionSide = reader.IsDBNull(13) ? null : reader.GetString(13),
+            ReduceOnly = reader.GetBoolean(14),
+            PositionIdx = reader.GetInt32(15),
+            Leverage = ParseDecimal(reader.GetString(16)),
+            MarginMode = reader.IsDBNull(17) ? null : reader.GetString(17),
+            EntryPrice = ParseDecimal(reader.GetString(18)),
+            MarkPrice = ParseDecimal(reader.GetString(19)),
+            LiquidationPrice = ParseDecimal(reader.GetString(20)),
+            UnrealizedPnl = ParseDecimal(reader.GetString(21))
         };
     }
 
@@ -747,12 +817,14 @@ public sealed class SqliteGridRepository : IGridRepository
             INSERT INTO bot_state (
                 symbol, trading_mode, is_initialized, is_paused, pause_reason, last_observed_price,
                 base_asset_quantity, quote_asset_balance, average_entry_price, total_realized_pnl,
-                daily_realized_pnl, daily_pnl_date, updated_at
+                daily_realized_pnl, daily_pnl_date, updated_at, position_side, reduce_only, position_idx,
+                leverage, margin_mode, entry_price, mark_price, liquidation_price, unrealized_pnl
             )
             VALUES (
                 $symbol, $trading_mode, $is_initialized, $is_paused, $pause_reason, $last_observed_price,
                 $base_asset_quantity, $quote_asset_balance, $average_entry_price, $total_realized_pnl,
-                $daily_realized_pnl, $daily_pnl_date, $updated_at
+                $daily_realized_pnl, $daily_pnl_date, $updated_at, $position_side, $reduce_only, $position_idx,
+                $leverage, $margin_mode, $entry_price, $mark_price, $liquidation_price, $unrealized_pnl
             )
             ON CONFLICT(symbol) DO UPDATE SET
                 trading_mode = excluded.trading_mode,
@@ -766,7 +838,16 @@ public sealed class SqliteGridRepository : IGridRepository
                 total_realized_pnl = excluded.total_realized_pnl,
                 daily_realized_pnl = excluded.daily_realized_pnl,
                 daily_pnl_date = excluded.daily_pnl_date,
-                updated_at = excluded.updated_at;
+                updated_at = excluded.updated_at,
+                position_side = excluded.position_side,
+                reduce_only = excluded.reduce_only,
+                position_idx = excluded.position_idx,
+                leverage = excluded.leverage,
+                margin_mode = excluded.margin_mode,
+                entry_price = excluded.entry_price,
+                mark_price = excluded.mark_price,
+                liquidation_price = excluded.liquidation_price,
+                unrealized_pnl = excluded.unrealized_pnl;
             """;
 
         await using var connection = await OpenConnectionAsync(cancellationToken);
@@ -785,6 +866,15 @@ public sealed class SqliteGridRepository : IGridRepository
         command.Parameters.AddWithValue("$daily_realized_pnl", FormatDecimal(state.DailyRealizedPnl));
         command.Parameters.AddWithValue("$daily_pnl_date", state.DailyPnlDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
         command.Parameters.AddWithValue("$updated_at", state.UpdatedAt.ToString("O", CultureInfo.InvariantCulture));
+        command.Parameters.AddWithValue("$position_side", (object?)state.PositionSide ?? DBNull.Value);
+        command.Parameters.AddWithValue("$reduce_only", state.ReduceOnly);
+        command.Parameters.AddWithValue("$position_idx", state.PositionIdx);
+        command.Parameters.AddWithValue("$leverage", FormatDecimal(state.Leverage));
+        command.Parameters.AddWithValue("$margin_mode", (object?)state.MarginMode ?? DBNull.Value);
+        command.Parameters.AddWithValue("$entry_price", FormatDecimal(state.EntryPrice));
+        command.Parameters.AddWithValue("$mark_price", FormatDecimal(state.MarkPrice));
+        command.Parameters.AddWithValue("$liquidation_price", FormatDecimal(state.LiquidationPrice));
+        command.Parameters.AddWithValue("$unrealized_pnl", FormatDecimal(state.UnrealizedPnl));
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
@@ -851,10 +941,19 @@ public sealed class SqliteGridRepository : IGridRepository
                 Status = Enum.Parse<OrderStatus>(reader.GetString(10), true),
                 TradingMode = Enum.Parse<TradingMode>(reader.GetString(11), true),
                 ParentOrderLinkId = reader.IsDBNull(12) ? null : reader.GetString(12),
-                RealizedPnl = ParseDecimal(reader.GetString(13)),
-                CreatedAt = DateTimeOffset.Parse(reader.GetString(14), CultureInfo.InvariantCulture),
-                UpdatedAt = DateTimeOffset.Parse(reader.GetString(15), CultureInfo.InvariantCulture),
-                FilledAt = reader.IsDBNull(16) ? null : DateTimeOffset.Parse(reader.GetString(16), CultureInfo.InvariantCulture)
+                PositionSide = reader.IsDBNull(13) ? null : reader.GetString(13),
+                ReduceOnly = reader.GetBoolean(14),
+                PositionIdx = reader.GetInt32(15),
+                Leverage = ParseDecimal(reader.GetString(16)),
+                MarginMode = reader.IsDBNull(17) ? null : reader.GetString(17),
+                EntryPrice = ParseDecimal(reader.GetString(18)),
+                MarkPrice = ParseDecimal(reader.GetString(19)),
+                LiquidationPrice = ParseDecimal(reader.GetString(20)),
+                UnrealizedPnl = ParseDecimal(reader.GetString(21)),
+                RealizedPnl = ParseDecimal(reader.GetString(22)),
+                CreatedAt = DateTimeOffset.Parse(reader.GetString(23), CultureInfo.InvariantCulture),
+                UpdatedAt = DateTimeOffset.Parse(reader.GetString(24), CultureInfo.InvariantCulture),
+                FilledAt = reader.IsDBNull(25) ? null : DateTimeOffset.Parse(reader.GetString(25), CultureInfo.InvariantCulture)
             });
         }
 
@@ -898,6 +997,38 @@ public sealed class SqliteGridRepository : IGridRepository
         await using var alterCommand = connection.CreateCommand();
         alterCommand.CommandText = $"ALTER TABLE {tableName} ADD COLUMN {columnName} {columnDefinition};";
         await alterCommand.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    private static async Task EnsureFuturesOrderColumnsAsync(
+        SqliteConnection connection,
+        string tableName,
+        CancellationToken cancellationToken)
+    {
+        await EnsureColumnAsync(connection, tableName, "position_side", "TEXT NULL", cancellationToken);
+        await EnsureColumnAsync(connection, tableName, "reduce_only", "INTEGER NOT NULL DEFAULT 0", cancellationToken);
+        await EnsureColumnAsync(connection, tableName, "position_idx", "INTEGER NOT NULL DEFAULT 0", cancellationToken);
+        await EnsureColumnAsync(connection, tableName, "leverage", "TEXT NOT NULL DEFAULT '0'", cancellationToken);
+        await EnsureColumnAsync(connection, tableName, "margin_mode", "TEXT NULL", cancellationToken);
+        await EnsureColumnAsync(connection, tableName, "entry_price", "TEXT NOT NULL DEFAULT '0'", cancellationToken);
+        await EnsureColumnAsync(connection, tableName, "mark_price", "TEXT NOT NULL DEFAULT '0'", cancellationToken);
+        await EnsureColumnAsync(connection, tableName, "liquidation_price", "TEXT NOT NULL DEFAULT '0'", cancellationToken);
+        await EnsureColumnAsync(connection, tableName, "unrealized_pnl", "TEXT NOT NULL DEFAULT '0'", cancellationToken);
+    }
+
+    private static async Task EnsureFuturesStateColumnsAsync(
+        SqliteConnection connection,
+        string tableName,
+        CancellationToken cancellationToken)
+    {
+        await EnsureColumnAsync(connection, tableName, "position_side", "TEXT NULL", cancellationToken);
+        await EnsureColumnAsync(connection, tableName, "reduce_only", "INTEGER NOT NULL DEFAULT 0", cancellationToken);
+        await EnsureColumnAsync(connection, tableName, "position_idx", "INTEGER NOT NULL DEFAULT 0", cancellationToken);
+        await EnsureColumnAsync(connection, tableName, "leverage", "TEXT NOT NULL DEFAULT '0'", cancellationToken);
+        await EnsureColumnAsync(connection, tableName, "margin_mode", "TEXT NULL", cancellationToken);
+        await EnsureColumnAsync(connection, tableName, "entry_price", "TEXT NOT NULL DEFAULT '0'", cancellationToken);
+        await EnsureColumnAsync(connection, tableName, "mark_price", "TEXT NOT NULL DEFAULT '0'", cancellationToken);
+        await EnsureColumnAsync(connection, tableName, "liquidation_price", "TEXT NOT NULL DEFAULT '0'", cancellationToken);
+        await EnsureColumnAsync(connection, tableName, "unrealized_pnl", "TEXT NOT NULL DEFAULT '0'", cancellationToken);
     }
 
     private static string FormatDecimal(decimal value) => value.ToString(CultureInfo.InvariantCulture);
