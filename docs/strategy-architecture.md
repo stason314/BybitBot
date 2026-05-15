@@ -113,6 +113,7 @@ Next steps:
 
 Auto recommendation flow:
 - `AutoStrategySelector` analyzes 360 one-minute candles, about 6 hours, plus `MarketRegimeAnalysis`;
+- recommended `Stop Lower` and `Stop Upper` are intentionally wider than the active grid range so normal volatility does not pause the bot too often;
 - confirmed `Buy`/`Sell` signals can recommend `Signal` in breakout markets, and confirmed `Buy` signals can recommend `Signal` in trend markets;
 - dashboard shows the strategy and runtime settings it would choose;
 - operator can apply the recommendation manually from the UI;

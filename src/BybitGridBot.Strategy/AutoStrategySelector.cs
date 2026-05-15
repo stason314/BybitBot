@@ -6,6 +6,10 @@ namespace BybitGridBot.Strategy;
 public sealed class AutoStrategySelector
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    private const decimal DefaultStopBufferPercent = 2m;
+    private const decimal TrendStopBufferPercent = 3m;
+    private const decimal VolatileStopBufferPercent = 4m;
+    private const decimal RegimeRangeStopBufferMultiplier = 0.75m;
     private readonly SignalAnalyzer _signalAnalyzer = new();
 
     public AutoConfigRecommendation Recommend(
@@ -30,8 +34,9 @@ public sealed class AutoStrategySelector
         var padding = decimal.Max(step * 2m, atr * 1.5m);
         var lower = FloorToStep(decimal.Max(step, decimal.Min(support, lastPrice) - padding), step);
         var upper = CeilingToStep(decimal.Max(resistance, lastPrice) + padding, step);
-        var stopLower = FloorToStep(decimal.Max(step, lower - padding), step);
-        var stopUpper = CeilingToStep(upper + padding, step);
+        var stopPadding = ChooseStopPadding(regime, step, atr, lastPrice, padding);
+        var stopLower = FloorToStep(decimal.Max(step, lower - stopPadding), step);
+        var stopUpper = CeilingToStep(upper + stopPadding, step);
         var orderSize = RecommendOrderSize(currentOptions, regime);
         var signal = _signalAnalyzer.Analyze(ordered);
         var metrics = new AutoConfigMetrics
@@ -365,6 +370,30 @@ public sealed class AutoStrategySelector
     private static decimal RecommendActiveOrderSize(GridOptions options, decimal baseOrderSize)
     {
         return decimal.Max(decimal.Max(options.MinOrderSizeUsdt, baseOrderSize), 20m);
+    }
+
+    private static decimal ChooseStopPadding(
+        MarketRegimeAnalysis regime,
+        decimal step,
+        decimal atr,
+        decimal lastPrice,
+        decimal gridPadding)
+    {
+        var minimumStopPercent = regime.Regime switch
+        {
+            MarketRegimeType.Danger or MarketRegimeType.Breakout => VolatileStopBufferPercent,
+            MarketRegimeType.Trend => TrendStopBufferPercent,
+            _ => DefaultStopBufferPercent
+        };
+        var regimeStopPercent = decimal.Max(
+            minimumStopPercent,
+            decimal.Max(
+                Math.Abs(regime.MovePercent),
+                regime.RangePercent * RegimeRangeStopBufferMultiplier));
+        var pricePercentPadding = lastPrice > 0m ? lastPrice * regimeStopPercent / 100m : 0m;
+        var technicalPadding = decimal.Max(gridPadding * 2m, decimal.Max(atr * 4m, step * 4m));
+
+        return decimal.Max(technicalPadding, pricePercentPadding);
     }
 
     private static decimal CalculateAtr(IReadOnlyList<Candle> candles)

@@ -37,6 +37,40 @@ public sealed class AutoStrategySelectorTests
     }
 
     [Fact]
+    public void Recommend_UsesWideStopBoundaries()
+    {
+        var selector = new AutoStrategySelector();
+        var options = new GridOptions
+        {
+            LowerPrice = 2.0m,
+            UpperPrice = 2.2m,
+            Step = 0.01m,
+            OrderSizeUsdt = 20m,
+            StopLowerPrice = 1.9m,
+            StopUpperPrice = 2.3m
+        };
+        var candles = BuildCandles(2.10m, 2.12m, 2.08m, 30);
+
+        var recommendation = selector.Recommend(
+            options,
+            new MarketRegimeAnalysis
+            {
+                Regime = MarketRegimeType.Range,
+                Recommendation = "Range",
+                Support = 2.08m,
+                Resistance = 2.12m
+            },
+            candles);
+
+        var lowerStopDistance = recommendation.LowerPrice - recommendation.StopLowerPrice;
+        var upperStopDistance = recommendation.StopUpperPrice - recommendation.UpperPrice;
+        var gridWidth = recommendation.UpperPrice - recommendation.LowerPrice;
+
+        Assert.True(lowerStopDistance >= gridWidth * 0.5m);
+        Assert.True(upperStopDistance >= gridWidth * 0.5m);
+    }
+
+    [Fact]
     public void Recommend_ReturnsBtd_ForDowntrend()
     {
         var selector = new AutoStrategySelector();
