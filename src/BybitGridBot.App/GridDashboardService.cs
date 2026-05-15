@@ -2116,7 +2116,7 @@ public sealed class GridDashboardService : IGridDashboardService
             TradingStrategyType.Hybrid => new OrderSourceContext("Hybrid-Grid", "Hybrid-DCA", "Hybrid-BTD"),
             TradingStrategyType.Signal => new OrderSourceContext("Managed", "DCA", "BTD"),
             TradingStrategyType.TrendFollow or TradingStrategyType.TrendFollowing or TradingStrategyType.Breakout => new OrderSourceContext("Managed", "DCA", "BTD"),
-            TradingStrategyType.ReduceOnly or TradingStrategyType.NoTrade or TradingStrategyType.Pause => new OrderSourceContext("Managed", "DCA", "BTD"),
+            TradingStrategyType.ReduceOnly or TradingStrategyType.NoTrade or TradingStrategyType.Pause => new OrderSourceContext("Grid", "DCA", "BTD"),
             _ => new OrderSourceContext("Grid", "DCA", "BTD")
         };
     }
@@ -2129,6 +2129,7 @@ public sealed class GridDashboardService : IGridDashboardService
             "btd-entry" => context.BtdEntryLabel,
             "signal-entry" or "signal-exit" => "Signal",
             "trend-entry" or "trend-exit" => "Trend",
+            "reduce-only-exit" => "ReduceOnly",
             null or "" => context.DefaultLabel,
             _ => context.DefaultLabel
         };

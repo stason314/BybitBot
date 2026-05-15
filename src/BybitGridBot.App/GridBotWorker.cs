@@ -20,6 +20,7 @@ public sealed class GridBotWorker : BackgroundService
     private const string SignalExitMarker = "signal-exit";
     private const string TrendEntryMarker = "trend-entry";
     private const string TrendExitMarker = "trend-exit";
+    private const string ReduceOnlyExitMarker = "reduce-only-exit";
     private const decimal SignalMarketLikeLimitBufferPercent = 0.05m;
     private const string ReduceOnlyReasonDanger = "danger-regime";
     private const string ReduceOnlyReasonTrailing = "trailing-protection";
@@ -2142,7 +2143,7 @@ public sealed class GridBotWorker : BackgroundService
             var createdOrders = await ExecuteStrategyDecisionAsync(
                 new StrategyExecutionDecision
                 {
-                    OrderIntents = [new OrderIntent(TradeSide.Sell, price, quantity)]
+                    OrderIntents = [new OrderIntent(TradeSide.Sell, price, quantity, ReduceOnlyExitMarker)]
                 },
                 cancellationToken);
             var createdOrder = createdOrders[0];
