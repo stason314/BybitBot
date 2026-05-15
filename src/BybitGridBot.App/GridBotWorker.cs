@@ -53,6 +53,7 @@ public sealed class GridBotWorker : BackgroundService
     private readonly MarketRegimeFilter _marketRegimeFilter;
     private readonly PriceActionPhaseDetector _priceActionPhaseDetector;
     private readonly BigRedCandleGuard _bigRedCandleGuard;
+    private readonly ProfitProtectionManager _profitProtectionManager;
     private readonly ITelegramNotifier _notifier;
     private readonly IGridRepository _repository;
     private readonly RiskManager _riskManager;
@@ -95,6 +96,7 @@ public sealed class GridBotWorker : BackgroundService
         MarketRegimeFilter marketRegimeFilter,
         PriceActionPhaseDetector priceActionPhaseDetector,
         BigRedCandleGuard bigRedCandleGuard,
+        ProfitProtectionManager profitProtectionManager,
         SignalAnalyzer signalAnalyzer,
         IGridRepository repository,
         ITelegramNotifier notifier,
@@ -117,6 +119,7 @@ public sealed class GridBotWorker : BackgroundService
         _marketRegimeFilter = marketRegimeFilter;
         _priceActionPhaseDetector = priceActionPhaseDetector;
         _bigRedCandleGuard = bigRedCandleGuard;
+        _profitProtectionManager = profitProtectionManager;
         _signalAnalyzer = signalAnalyzer;
         _repository = repository;
         _notifier = notifier;
@@ -290,7 +293,7 @@ public sealed class GridBotWorker : BackgroundService
         if (profile.StrategyType is TradingStrategyType.NoTrade or TradingStrategyType.Pause)
         {
             await _repository.SaveGridLevelsAsync(_gridOptions.Symbol, [], cancellationToken);
-            await RunNoTradeCycleAsync(state, cancellationToken);
+            await RunNoTradeCycleAsync(profile, state, cancellationToken);
             return;
         }
 
@@ -566,6 +569,7 @@ public sealed class GridBotWorker : BackgroundService
     }
 
     private async Task<BotState> RunNoTradeCycleAsync(
+        GridBotSettings profile,
         BotState state,
         CancellationToken cancellationToken)
     {
@@ -577,6 +581,11 @@ public sealed class GridBotWorker : BackgroundService
         state.UpdatedAt = DateTimeOffset.UtcNow;
 
         _logger.LogInformation("NoTrade mode active for {Symbol}. Current price: {Price}. No new orders will be created.", _gridOptions.Symbol, currentPrice);
+        await RecordNoTradeReasonAsync(
+            profile,
+            NoTradeReason.StrategyCooldown,
+            $"{profile.StrategyType} mode active. No new spot orders will be created.",
+            cancellationToken);
 
         if (_appOptions.TradingMode == TradingMode.Paper)
         {
@@ -1120,12 +1129,31 @@ public sealed class GridBotWorker : BackgroundService
             _gridOptions.Category,
             _gridOptions.Symbol,
             string.IsNullOrWhiteSpace(config.CandleInterval) ? "1" : config.CandleInterval,
-            Math.Max(10, config.DipLookbackCandles),
+            Math.Max(120, Math.Max(config.DipLookbackCandles, Math.Max(_gridOptions.EmaSlow, _gridOptions.TrendEmaSlow) + 10)),
             cancellationToken);
         var regime = _marketRegimeAnalyzer.Analyze(candles);
         if (regime.Regime == MarketRegimeType.Danger)
         {
             _logger.LogInformation("BTD entry skipped because market regime is danger.");
+            await RecordNoTradeReasonAsync(profile, NoTradeReason.DumpDetected, "BTD skipped: danger regime is active.", cancellationToken);
+            return;
+        }
+
+        var btcCandles = _gridOptions.BtcFilterEnabled
+            ? await _bybitRestClient.GetKlinesAsync(
+                "spot",
+                "BTCUSDT",
+                string.IsNullOrWhiteSpace(config.CandleInterval) ? "1" : config.CandleInterval,
+                Math.Max(20, _gridOptions.BtcLookbackCandles),
+                cancellationToken)
+            : [];
+        var marketPhase = _priceActionPhaseDetector.Detect(_gridOptions, currentPrice, candles, btcCandles);
+        if (!_btdStrategy.IsDipAllowedByPhase(_gridOptions, marketPhase, currentPrice, candles, btcCandles))
+        {
+            var reasonCode = ResolveNoTradeReason(marketPhase);
+            var reason = $"BTD skipped: trend not confirmed. Phase={marketPhase.Phase}; Reason={marketPhase.Reason}";
+            _logger.LogInformation(reason);
+            await RecordNoTradeReasonAsync(profile, reasonCode, reason, cancellationToken);
             return;
         }
 
@@ -1402,6 +1430,7 @@ public sealed class GridBotWorker : BackgroundService
         if (!_strategy.IsWithinTradingRange(_gridOptions, currentPrice))
         {
             _logger.LogInformation("Price is outside the trading range. No new orders will be created.");
+            await RecordNoTradeReasonAsync(profile, NoTradeReason.PriceOutsideRange, "Current price is outside the configured trading range.", cancellationToken);
             await _repository.SaveBotStateAsync(state, cancellationToken);
             return state;
         }
@@ -1461,6 +1490,7 @@ public sealed class GridBotWorker : BackgroundService
                 bigRedGuard.Reason,
                 bigRedGuard.BlocksBuy,
                 bigRedGuard.CancelGridBuyOrders);
+            await RecordNoTradeReasonAsync(profile, bigRedGuard.NoTradeReason, bigRedGuard.Reason, cancellationToken);
 
             if (bigRedGuard.CancelGridBuyOrders)
             {
@@ -1495,6 +1525,7 @@ public sealed class GridBotWorker : BackgroundService
                 marketRegime.MovePercent,
                 marketPhase.Phase,
                 marketPhase.Reason);
+            await RecordNoTradeReasonAsync(profile, ResolveNoTradeReason(marketPhase), marketPhase.Reason, cancellationToken);
 
             await CancelActiveBuyOrdersAsync(activeGridOrders, cancellationToken);
             activeGridOrders = await _repository.GetActiveOrdersAsync(_gridOptions.Symbol, cancellationToken);
@@ -1540,16 +1571,15 @@ public sealed class GridBotWorker : BackgroundService
 
         if (!_strategy.CanCreateGridIntents(_gridOptions, marketPhase, currentPrice, bigRedGuard.IsActive))
         {
+            var noTradeReason = ResolveNoTradeReason(marketPhase);
             _logger.LogInformation(
                 "NoTradeReason={NoTradeReason}. Grid orders skipped for {Symbol}. MarketPhase={MarketPhase}, SuggestedStrategy={SuggestedStrategy}, Reason={Reason}",
-                marketPhase.Phase is MarketPhase.Unknown ? NoTradeReason.UnknownMarketPhase :
-                    marketPhase.Phase is MarketPhase.HighVolatility ? NoTradeReason.HighVolatility :
-                    marketPhase.Phase is MarketPhase.Dump ? NoTradeReason.DumpDetected :
-                    NoTradeReason.ScoreTooLow,
+                noTradeReason,
                 _gridOptions.Symbol,
                 marketPhase.Phase,
                 marketPhase.SuggestedStrategy,
                 marketPhase.Reason);
+            await RecordNoTradeReasonAsync(profile, noTradeReason, marketPhase.Reason, cancellationToken);
             await _repository.SaveBotStateAsync(state, cancellationToken);
             return state;
         }
@@ -1557,6 +1587,7 @@ public sealed class GridBotWorker : BackgroundService
         if (_marketRegimeFilter.ShouldBlockNewOrders(_gridOptions, symbolCandles, btcCandles))
         {
             _logger.LogInformation("Market regime filter blocks new grid orders for the current cycle.");
+            await RecordNoTradeReasonAsync(profile, NoTradeReason.BtcRiskOff, "Market regime filter blocks new grid orders, likely BTC risk-off or symbol dump threshold.", cancellationToken);
             await _repository.SaveBotStateAsync(state, cancellationToken);
             return state;
         }
@@ -2054,6 +2085,12 @@ public sealed class GridBotWorker : BackgroundService
         state.IsPaused = true;
         state.PauseReason = reason;
         state.UpdatedAt = DateTimeOffset.UtcNow;
+        if (reason.Contains("Daily loss", StringComparison.OrdinalIgnoreCase) ||
+            reason.Contains("MAX_DAILY_LOSS", StringComparison.OrdinalIgnoreCase))
+        {
+            await RecordNoTradeReasonAsync(ResolveCurrentProfile(), NoTradeReason.DailyLossLimitReached, reason, cancellationToken);
+        }
+
         await _repository.SaveBotStateAsync(state, cancellationToken);
 
         foreach (var order in activeOrders.Where(order => sideToCancel is null || order.Side == sideToCancel))
@@ -2122,6 +2159,24 @@ public sealed class GridBotWorker : BackgroundService
             : ShouldApplyTrailingProtection(candles, currentPrice, out var pumpPercent, out var pullbackPercent)
                 ? $"{ReduceOnlyReasonTrailing}: pump={pumpPercent:0.####}%, pullback={pullbackPercent:0.####}%"
                 : null;
+        var marketPhase = _priceActionPhaseDetector.Detect(_gridOptions, currentPrice, candles, []);
+        var profitProtection = _profitProtectionManager.Evaluate(
+            _gridOptions,
+            new PositionSnapshot
+            {
+                Symbol = _gridOptions.Symbol,
+                BaseAssetQuantity = state.BaseAssetQuantity,
+                AverageEntryPrice = state.AverageEntryPrice,
+                QuoteAssetBalance = state.QuoteAssetBalance,
+                CurrentPrice = currentPrice
+            },
+            currentPrice,
+            marketPhase);
+        if (reason is null && profitProtection.ShouldBlockNewBuys)
+        {
+            reason = $"profit-protection: {profitProtection.Reason}";
+        }
+
         if (reason is null)
         {
             return false;
@@ -2138,7 +2193,16 @@ public sealed class GridBotWorker : BackgroundService
                 "Protective no-buy mode active for {Symbol}. Reason: {Reason}. Buy orders were cancelled and no new buy orders will be created.",
                 _gridOptions.Symbol,
                 reason);
+            await RecordNoTradeReasonAsync(profile, ResolveNoTradeReason(marketPhase), reason, cancellationToken);
             return true;
+        }
+
+        var maxSellQuantity = profitProtection.ShouldTakePartialProfit && profitProtection.PartialTakeProfitPercent > 0m
+            ? state.BaseAssetQuantity * decimal.Min(100m, profitProtection.PartialTakeProfitPercent) / 100m
+            : (decimal?)null;
+        if (profitProtection.ShouldBlockNewBuys)
+        {
+            await RecordNoTradeReasonAsync(profile, ResolveNoTradeReason(marketPhase), reason, cancellationToken);
         }
 
         await ApplyReduceOnlyProtectionAsync(
@@ -2149,6 +2213,7 @@ public sealed class GridBotWorker : BackgroundService
             activeOrders,
             currentPrice,
             reason,
+            maxSellQuantity,
             cancellationToken);
 
         return true;
@@ -2190,6 +2255,27 @@ public sealed class GridBotWorker : BackgroundService
         IReadOnlyCollection<GridOrder> activeOrders,
         decimal currentPrice,
         string reason,
+        CancellationToken cancellationToken) =>
+        await ApplyReduceOnlyProtectionAsync(
+            profile,
+            state,
+            levels,
+            instrument,
+            activeOrders,
+            currentPrice,
+            reason,
+            null,
+            cancellationToken);
+
+    private async Task<IReadOnlyList<GridOrder>> ApplyReduceOnlyProtectionAsync(
+        GridBotSettings? profile,
+        BotState state,
+        IReadOnlyList<GridLevel> levels,
+        BybitInstrumentInfo instrument,
+        IReadOnlyCollection<GridOrder> activeOrders,
+        decimal currentPrice,
+        string reason,
+        decimal? maxSellQuantity,
         CancellationToken cancellationToken)
     {
         _logger.LogWarning(
@@ -2210,7 +2296,7 @@ public sealed class GridBotWorker : BackgroundService
         var wallet = _appOptions.TradingMode == TradingMode.Paper
             ? null
             : await _bybitRestClient.GetWalletBalanceAsync(cancellationToken, _quoteAsset, _baseAsset);
-        var createdSellCount = await EnsureReduceOnlySellOrdersAsync(profile, state, levels, instrument, remainingOrders, wallet, currentPrice, cancellationToken);
+        var createdSellCount = await EnsureReduceOnlySellOrdersAsync(profile, state, levels, instrument, remainingOrders, wallet, currentPrice, maxSellQuantity, cancellationToken);
         if (cancelledBuyCount > 0 || createdSellCount > 0)
         {
             await _notifier.NotifyAsync(
@@ -2229,6 +2315,7 @@ public sealed class GridBotWorker : BackgroundService
         IReadOnlyCollection<GridOrder> activeOrders,
         BybitWalletBalance? wallet,
         decimal currentPrice,
+        decimal? maxSellQuantity,
         CancellationToken cancellationToken)
     {
         if (state.BaseAssetQuantity <= 0m)
@@ -2237,6 +2324,11 @@ public sealed class GridBotWorker : BackgroundService
         }
 
         var availableBase = GetAvailableBaseBalance(state, activeOrders, wallet);
+        if (maxSellQuantity is > 0m)
+        {
+            availableBase = decimal.Min(availableBase, maxSellQuantity.Value);
+        }
+
         if (availableBase <= 0m)
         {
             return 0;
@@ -2367,6 +2459,7 @@ public sealed class GridBotWorker : BackgroundService
             if (violations.Count > 0)
             {
                 _logger.LogWarning("Buy order at {Price} skipped: {Violations}", level.Price, string.Join(" | ", violations));
+                await RecordNoTradeReasonForViolationsAsync(profile, violations, cancellationToken);
                 continue;
             }
 
@@ -2562,6 +2655,7 @@ public sealed class GridBotWorker : BackgroundService
         if (violations.Count > 0)
         {
             _logger.LogWarning("{StrategyName} buy order at {Price} skipped: {Violations}", strategyName, limitPrice, string.Join(" | ", violations));
+            await RecordNoTradeReasonForViolationsAsync(profile, violations, cancellationToken);
             return;
         }
 
@@ -2639,6 +2733,7 @@ public sealed class GridBotWorker : BackgroundService
         if (violations.Count > 0)
         {
             _logger.LogWarning("Signal buy order at {Price} skipped: {Violations}", limitPrice, string.Join(" | ", violations));
+            await RecordNoTradeReasonForViolationsAsync(ResolveCurrentProfile(), violations, cancellationToken);
             return;
         }
 
@@ -2769,6 +2864,7 @@ public sealed class GridBotWorker : BackgroundService
         if (violations.Count > 0)
         {
             _logger.LogWarning("Trend-following buy order at {Price} skipped: {Violations}", limitPrice, string.Join(" | ", violations));
+            await RecordNoTradeReasonForViolationsAsync(ResolveCurrentProfile(), violations, cancellationToken);
             return;
         }
 
@@ -3255,6 +3351,7 @@ public sealed class GridBotWorker : BackgroundService
                     "Follow-up buy order at {Price} skipped after fill: {Violations}",
                     nextLevel.Price,
                     string.Join(" | ", violations));
+                await RecordNoTradeReasonForViolationsAsync(ResolveCurrentProfile(), violations, cancellationToken);
                 return;
             }
         }
@@ -3289,7 +3386,7 @@ public sealed class GridBotWorker : BackgroundService
 
         foreach (var intent in decision.OrderIntents)
         {
-            if (!ShouldAllowOrderByExpectedProfit(intent))
+            if (!await ShouldAllowOrderByExpectedProfitAsync(intent, cancellationToken))
             {
                 continue;
             }
@@ -3300,7 +3397,9 @@ public sealed class GridBotWorker : BackgroundService
         return createdOrders;
     }
 
-    private bool ShouldAllowOrderByExpectedProfit(OrderIntent intent)
+    private async Task<bool> ShouldAllowOrderByExpectedProfitAsync(
+        OrderIntent intent,
+        CancellationToken cancellationToken)
     {
         if (intent.SkipExpectedProfitFilter)
         {
@@ -3327,6 +3426,11 @@ public sealed class GridBotWorker : BackgroundService
             intent.Price,
             decision.ExpectedProfitPercent,
             decision.RequiredProfitPercent);
+        await RecordNoTradeReasonAsync(
+            ResolveCurrentProfile(),
+            NoTradeReason.ExpectedProfitTooLow,
+            decision.Reason,
+            cancellationToken);
         return false;
     }
 
@@ -3829,6 +3933,83 @@ public sealed class GridBotWorker : BackgroundService
     {
         return marketRegime.Regime == MarketRegimeType.Range &&
             marketPhase.Phase == MarketPhase.RangeBound;
+    }
+
+    private async Task RecordNoTradeReasonForViolationsAsync(
+        GridBotSettings? profile,
+        IReadOnlyCollection<string> violations,
+        CancellationToken cancellationToken)
+    {
+        if (violations.Count == 0)
+        {
+            return;
+        }
+
+        var reason = string.Join(" | ", violations);
+        await RecordNoTradeReasonAsync(profile, ResolveNoTradeReason(violations), reason, cancellationToken);
+    }
+
+    private async Task RecordNoTradeReasonAsync(
+        GridBotSettings? profile,
+        NoTradeReason reasonCode,
+        string reason,
+        CancellationToken cancellationToken)
+    {
+        if (!_gridOptions.EnableNoTradeReasonTracking ||
+            reasonCode == NoTradeReason.None ||
+            string.IsNullOrWhiteSpace(reason))
+        {
+            return;
+        }
+
+        await _repository.AddNoTradeReasonAsync(
+            new NoTradeReasonRecord
+            {
+                Symbol = _gridOptions.Symbol,
+                StrategyType = profile?.StrategyType.ToString(),
+                ReasonCode = reasonCode,
+                Reason = reason,
+                CreatedAt = DateTimeOffset.UtcNow
+            },
+            cancellationToken);
+    }
+
+    private GridBotSettings? ResolveCurrentProfile()
+    {
+        return _runningSettings.TryGetValue(_gridOptions.Symbol, out var profile) ? profile : null;
+    }
+
+    private static NoTradeReason ResolveNoTradeReason(MarketPhaseResult marketPhase)
+    {
+        return marketPhase.Phase switch
+        {
+            MarketPhase.Unknown => NoTradeReason.UnknownMarketPhase,
+            MarketPhase.HighVolatility => NoTradeReason.HighVolatility,
+            MarketPhase.Dump => NoTradeReason.DumpDetected,
+            MarketPhase.BreakoutDown => NoTradeReason.BtcRiskOff,
+            MarketPhase.Exhaustion => NoTradeReason.ScoreTooLow,
+            _ => NoTradeReason.ScoreTooLow
+        };
+    }
+
+    private static NoTradeReason ResolveNoTradeReason(IReadOnlyCollection<string> violations)
+    {
+        if (violations.Any(violation => violation.Contains("MAX_POSITION_USDT", StringComparison.OrdinalIgnoreCase)))
+        {
+            return NoTradeReason.MaxPositionReached;
+        }
+
+        if (violations.Any(violation => violation.Contains("MAX_DAILY_LOSS", StringComparison.OrdinalIgnoreCase)))
+        {
+            return NoTradeReason.DailyLossLimitReached;
+        }
+
+        if (violations.Any(violation => violation.Contains("outside the configured trading range", StringComparison.OrdinalIgnoreCase)))
+        {
+            return NoTradeReason.PriceOutsideRange;
+        }
+
+        return NoTradeReason.RiskRejected;
     }
 
     private static string ResolveGridSource(GridBotSettings? profile)
