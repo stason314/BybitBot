@@ -211,6 +211,13 @@ public sealed class AutoStrategySelector
     {
         var baseline = Recommend(currentOptions, regime, candles);
         var strategyType = StrategyForPhase(phase, currentOptions.SpotOnly);
+        var aggressiveUnknownFallback = phase.Phase == MarketPhase.Unknown &&
+            baseline.StrategyType is not TradingStrategyType.NoTrade and not TradingStrategyType.Pause;
+        if (aggressiveUnknownFallback)
+        {
+            strategyType = baseline.StrategyType;
+        }
+
         if (phase.Phase != MarketPhase.Dump &&
             phase.Phase != MarketPhase.HighVolatility &&
             phase.Phase != MarketPhase.BreakoutDown &&
@@ -239,7 +246,7 @@ public sealed class AutoStrategySelector
 
         return Build(
             strategyType,
-            BuildPhaseRecommendationReason(phase, strategyType),
+            BuildPhaseRecommendationReason(phase, strategyType, aggressiveUnknownFallback, baseline),
             baseline.LowerPrice,
             baseline.UpperPrice,
             baseline.Step,
@@ -335,8 +342,17 @@ public sealed class AutoStrategySelector
         };
     }
 
-    private static string BuildPhaseRecommendationReason(MarketPhaseResult phase, TradingStrategyType strategyType)
+    private static string BuildPhaseRecommendationReason(
+        MarketPhaseResult phase,
+        TradingStrategyType strategyType,
+        bool aggressiveUnknownFallback,
+        AutoConfigRecommendation baseline)
     {
+        if (aggressiveUnknownFallback)
+        {
+            return $"Aggressive auto fallback: phase is Unknown, using baseline {baseline.StrategyType} from market regime instead of NoTrade. Baseline reason: {baseline.Reason}. Phase confidence: {phase.Confidence:0.####}. {phase.Reason}";
+        }
+
         return strategyType switch
         {
             TradingStrategyType.Grid => $"RangeBound phase. Use Grid while price stays inside the range. Phase confidence: {phase.Confidence:0.####}. {phase.Reason}",
