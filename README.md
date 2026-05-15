@@ -49,6 +49,8 @@ Current scope:
 - MVP strategy action model: `OpenLong`, `CloseLong`, `ReduceOnlyClose`
 - `FuturesBotWorker` runs independently from `GridBotWorker`: it reads `futures_settings`, fetches ticker/candles/position, builds a futures decision, applies `FuturesRiskManager`, and executes via paper simulation or Bybit testnet
 - `FuturesExecutionService` is the dedicated execution layer: `OpenLong` maps to Bybit `Buy` with `reduceOnly=false`; `CloseLong` and `ReduceOnlyClose` map to Bybit `Sell` with `reduceOnly=true`
+- MVP futures strategies are separate implementations: `FuturesPause`, `FuturesReduceOnly`, `FuturesTrendFollowLongOnly`, `FuturesBreakoutLongOnly`, and `FuturesGridLongOnly`
+- `FuturesReconciliationService` syncs Bybit open orders, recent order history, and current position before each testnet strategy decision; locally active managed orders missing from Bybit are marked cancelled after a per-order history check
 - Bybit futures client methods are present for `/v5/position/set-leverage`, `/v5/position/switch-isolated`, `/v5/position/switch-mode`, and `/v5/position/trading-stop`
 - futures accounting is separated from spot accounting through `FuturesAccounting` and `FuturesPositionSnapshot`
 - futures paper simulation is separated through `FuturesPaperSimulator`: leverage, margin, realized/unrealized PnL, fees, funding cost, and liquidation are simulated under a futures-only state key without touching spot paper state

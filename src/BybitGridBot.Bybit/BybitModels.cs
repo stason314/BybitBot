@@ -245,6 +245,10 @@ public sealed class BybitOrderSnapshot
 
     public decimal FeePaid { get; init; }
 
+    public bool ReduceOnly { get; init; }
+
+    public int PositionIdx { get; init; }
+
     public DateTimeOffset CreatedAt { get; init; }
 
     public DateTimeOffset UpdatedAt { get; init; }
@@ -477,6 +481,12 @@ internal sealed class BybitOrderItem
     [JsonPropertyName("cumExecFee")]
     public string CumExecFee { get; init; } = "0";
 
+    [JsonPropertyName("reduceOnly")]
+    public bool ReduceOnly { get; init; }
+
+    [JsonPropertyName("positionIdx")]
+    public int PositionIdx { get; init; }
+
     [JsonPropertyName("createdTime")]
     public string CreatedTime { get; init; } = "0";
 
@@ -575,6 +585,8 @@ internal static class BybitModelMapper
             CumExecValue = ParseDecimal(item.CumExecValue),
             AveragePrice = ParseDecimal(item.AvgPrice),
             FeePaid = fee,
+            ReduceOnly = item.ReduceOnly,
+            PositionIdx = item.PositionIdx,
             CreatedAt = ParseUnixMilliseconds(item.CreatedTime),
             UpdatedAt = ParseUnixMilliseconds(item.UpdatedTime)
         };
