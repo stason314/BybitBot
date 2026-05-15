@@ -108,7 +108,8 @@ public sealed class GridDashboardService : IGridDashboardService
             .ToArray();
         var performanceByStrategy = BuildStrategyPerformance(allOrders, orderSourceLabels);
         var dailyPerformanceByStrategy = BuildDailyStrategyPerformance(allOrders, orderSourceLabels);
-        var lastNoTradeReason = await _repository.GetLatestNoTradeReasonAsync(gridOptions.Symbol, cancellationToken);
+        var noTradeReasonHistory = await _repository.GetNoTradeReasonsAsync(gridOptions.Symbol, 10, cancellationToken);
+        var lastNoTradeReason = noTradeReasonHistory.FirstOrDefault();
 
         decimal? currentPrice = state.LastObservedPrice;
         try
@@ -191,7 +192,8 @@ public sealed class GridDashboardService : IGridDashboardService
             MarketRegime = MapMarketRegime(marketRegime),
             SignalAnalysis = MapSignalAnalysis(signalAnalysis),
             AutoRecommendation = MapAutoRecommendation(autoRecommendation, autoRecommendationSafetyErrors),
-            LastNoTradeReason = MapNoTradeReason(lastNoTradeReason),
+            LastNoTradeReason = lastNoTradeReason is null ? null : MapNoTradeReason(lastNoTradeReason, generatedAt),
+            NoTradeReasonHistory = noTradeReasonHistory.Select(reason => MapNoTradeReason(reason, generatedAt)).ToArray(),
             Orders = orders,
             ActiveOrders = activeOrders,
             PerformanceByStrategy = performanceByStrategy,
@@ -1252,6 +1254,22 @@ public sealed class GridDashboardService : IGridDashboardService
       <div class="badge">Recorded <strong id="noTradeReasonTime">-</strong></div>
     </section>
 
+    <section class="panel section" id="noTradeReasonHistoryCard" style="margin-bottom:20px;" hidden>
+      <div class="section-head">
+        <h2>No-Trade History</h2>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Code</th><th>Strategy</th><th>Reason</th><th>Age</th><th>Time</th>
+            </tr>
+          </thead>
+          <tbody id="noTradeReasonRows"></tbody>
+        </table>
+      </div>
+    </section>
+
     <section class="panel section" style="margin-bottom:20px;">
       <div class="section-head">
         <h2>Strategy Performance</h2>
@@ -1518,6 +1536,13 @@ public sealed class GridDashboardService : IGridDashboardService
       status.textContent = 'Preset applied to the form. Press Apply Settings to save.';
     };
     const formatNumber = (value) => value === null || value === undefined ? "—" : Number(value).toLocaleString(undefined, { maximumFractionDigits: 8 });
+    const formatMinutesAgo = (minutes) => {
+      const value = Math.max(0, Number(minutes ?? 0));
+      if (value < 1) return 'just now';
+      if (value < 60) return `${Math.floor(value)}m ago`;
+      if (value < 1440) return `${Math.floor(value / 60)}h ${Math.floor(value % 60)}m ago`;
+      return `${Math.floor(value / 1440)}d ${Math.floor((value % 1440) / 60)}h ago`;
+    };
     const formatSigned = (value) => {
       const number = Number(value ?? 0);
       const cls = number > 0 ? "positive" : number < 0 ? "negative" : "";
@@ -1634,6 +1659,8 @@ public sealed class GridDashboardService : IGridDashboardService
         autoRecommendation: latestDashboardData.autoRecommendation,
         gridLevels: latestDashboardData.gridLevels,
         activeOrders: latestDashboardData.activeOrders,
+        lastNoTradeReason: latestDashboardData.lastNoTradeReason,
+        noTradeReasonHistory: latestDashboardData.noTradeReasonHistory,
         performanceByStrategy: latestDashboardData.performanceByStrategy,
         dailyPerformanceByStrategy: latestDashboardData.dailyPerformanceByStrategy,
         recentOrdersWindowHours: hours,
@@ -1836,12 +1863,24 @@ public sealed class GridDashboardService : IGridDashboardService
       if (noTradeReason) {
         byId('noTradeReasonCode').textContent = noTradeReason.code;
         byId('noTradeReasonText').textContent = noTradeReason.reason;
-        byId('noTradeReasonTime').textContent = formatDate(noTradeReason.createdAt);
+        byId('noTradeReasonTime').textContent = formatMinutesAgo(noTradeReason.minutesAgo);
         byId('noTradeReasonMeta').innerHTML = [
           ['Strategy', noTradeReason.strategyType || data.settings.strategyType],
           ['Symbol', data.settings.symbol]
         ].map(([label, value]) => `<span class="regime-chip">${label}: ${escapeHtml(value)}</span>`).join('');
       }
+      const noTradeHistory = data.noTradeReasonHistory || [];
+      byId('noTradeReasonHistoryCard').hidden = noTradeHistory.length === 0;
+      byId('noTradeReasonRows').innerHTML = noTradeHistory.length === 0
+        ? `<tr><td colspan="5">No no-trade reasons yet.</td></tr>`
+        : noTradeHistory.map(item => `
+            <tr>
+              <td>${escapeHtml(item.code)}</td>
+              <td>${escapeHtml(item.strategyType || data.settings.strategyType)}</td>
+              <td>${escapeHtml(item.reason)}</td>
+              <td>${formatMinutesAgo(item.minutesAgo)}</td>
+              <td>${formatDate(item.createdAt)}</td>
+            </tr>`).join('');
 
       byId('strategyPerformanceRows').innerHTML = (data.performanceByStrategy || []).length === 0
         ? `<tr><td colspan="8">No strategy performance yet.</td></tr>`
@@ -2236,17 +2275,16 @@ public sealed class GridDashboardService : IGridDashboardService
         };
     }
 
-    private static DashboardNoTradeReason? MapNoTradeReason(NoTradeReasonRecord? reason)
+    private static DashboardNoTradeReason MapNoTradeReason(NoTradeReasonRecord reason, DateTimeOffset now)
     {
-        return reason is null
-            ? null
-            : new DashboardNoTradeReason
-            {
-                Code = reason.ReasonCode.ToString(),
-                StrategyType = reason.StrategyType,
-                Reason = reason.Reason,
-                CreatedAt = reason.CreatedAt
-            };
+        return new DashboardNoTradeReason
+        {
+            Code = reason.ReasonCode.ToString(),
+            StrategyType = reason.StrategyType,
+            Reason = reason.Reason,
+            CreatedAt = reason.CreatedAt,
+            MinutesAgo = Math.Max(0, (int)Math.Floor((now - reason.CreatedAt).TotalMinutes))
+        };
     }
 
     private static IReadOnlyList<DashboardStrategyPerformanceItem> BuildStrategyPerformance(

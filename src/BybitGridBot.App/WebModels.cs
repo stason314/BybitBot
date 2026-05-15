@@ -22,6 +22,8 @@ public sealed class DashboardResponse
 
     public DashboardNoTradeReason? LastNoTradeReason { get; init; }
 
+    public required IReadOnlyList<DashboardNoTradeReason> NoTradeReasonHistory { get; init; }
+
     public required IReadOnlyList<DashboardOrderItem> Orders { get; init; }
 
     public required IReadOnlyList<DashboardOrderItem> ActiveOrders { get; init; }
@@ -212,6 +214,8 @@ public sealed class DashboardNoTradeReason
     public required string Reason { get; init; }
 
     public DateTimeOffset CreatedAt { get; init; }
+
+    public int MinutesAgo { get; init; }
 }
 
 public sealed class DashboardOrderItem

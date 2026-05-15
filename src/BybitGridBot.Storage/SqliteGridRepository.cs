@@ -1127,33 +1127,34 @@ public sealed class SqliteGridRepository : IGridRepository
 
     public async Task<NoTradeReasonRecord?> GetLatestNoTradeReasonAsync(string symbol, CancellationToken cancellationToken)
     {
+        var reasons = await GetNoTradeReasonsAsync(symbol, 1, cancellationToken);
+        return reasons.FirstOrDefault();
+    }
+
+    public async Task<IReadOnlyList<NoTradeReasonRecord>> GetNoTradeReasonsAsync(string symbol, int limit, CancellationToken cancellationToken)
+    {
         const string sql = """
             SELECT symbol, strategy_type, reason_code, reason, created_at
             FROM no_trade_reasons
             WHERE symbol = $symbol
             ORDER BY created_at DESC, reason_id DESC
-            LIMIT 1;
+            LIMIT $limit;
             """;
 
         await using var connection = await OpenConnectionAsync(cancellationToken);
         await using var command = connection.CreateCommand();
         command.CommandText = sql;
         command.Parameters.AddWithValue("$symbol", symbol);
+        command.Parameters.AddWithValue("$limit", Math.Max(1, limit));
 
+        var result = new List<NoTradeReasonRecord>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        if (!await reader.ReadAsync(cancellationToken))
+        while (await reader.ReadAsync(cancellationToken))
         {
-            return null;
+            result.Add(ReadNoTradeReason(reader));
         }
 
-        return new NoTradeReasonRecord
-        {
-            Symbol = reader.GetString(0),
-            StrategyType = reader.IsDBNull(1) ? null : reader.GetString(1),
-            ReasonCode = ParseEnum(reader.GetString(2), NoTradeReason.None),
-            Reason = reader.GetString(3),
-            CreatedAt = DateTimeOffset.Parse(reader.GetString(4), CultureInfo.InvariantCulture)
-        };
+        return result;
     }
 
     public async Task AddNoTradeReasonAsync(NoTradeReasonRecord reason, CancellationToken cancellationToken)
@@ -1163,6 +1164,15 @@ public sealed class SqliteGridRepository : IGridRepository
             VALUES ($symbol, $strategy_type, $reason_code, $reason, $created_at);
             """;
 
+        var latest = await GetLatestNoTradeReasonAsync(reason.Symbol, cancellationToken);
+        if (latest is not null &&
+            string.Equals(latest.StrategyType, reason.StrategyType, StringComparison.OrdinalIgnoreCase) &&
+            latest.ReasonCode == reason.ReasonCode &&
+            string.Equals(latest.Reason, reason.Reason, StringComparison.Ordinal))
+        {
+            return;
+        }
+
         await using var connection = await OpenConnectionAsync(cancellationToken);
         await using var command = connection.CreateCommand();
         command.CommandText = sql;
@@ -1171,6 +1181,31 @@ public sealed class SqliteGridRepository : IGridRepository
         command.Parameters.AddWithValue("$reason_code", reason.ReasonCode.ToString());
         command.Parameters.AddWithValue("$reason", reason.Reason);
         command.Parameters.AddWithValue("$created_at", reason.CreatedAt.ToString("O", CultureInfo.InvariantCulture));
+        await command.ExecuteNonQueryAsync(cancellationToken);
+
+        await PruneNoTradeReasonsAsync(connection, reason.Symbol, 100, cancellationToken);
+    }
+
+    private static async Task PruneNoTradeReasonsAsync(
+        SqliteConnection connection,
+        string symbol,
+        int keepCount,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            DELETE FROM no_trade_reasons
+            WHERE symbol = $symbol
+              AND reason_id NOT IN (
+                  SELECT reason_id
+                  FROM no_trade_reasons
+                  WHERE symbol = $symbol
+                  ORDER BY created_at DESC, reason_id DESC
+                  LIMIT $keep_count
+              );
+            """;
+        command.Parameters.AddWithValue("$symbol", symbol);
+        command.Parameters.AddWithValue("$keep_count", Math.Max(1, keepCount));
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
@@ -1414,6 +1449,15 @@ public sealed class SqliteGridRepository : IGridRepository
         Severity = reader.GetString(7),
         SuggestedAction = reader.GetString(8),
         CreatedAt = DateTimeOffset.Parse(reader.GetString(9), CultureInfo.InvariantCulture)
+    };
+
+    private static NoTradeReasonRecord ReadNoTradeReason(SqliteDataReader reader) => new()
+    {
+        Symbol = reader.GetString(0),
+        StrategyType = reader.IsDBNull(1) ? null : reader.GetString(1),
+        ReasonCode = ParseEnum(reader.GetString(2), NoTradeReason.None),
+        Reason = reader.GetString(3),
+        CreatedAt = DateTimeOffset.Parse(reader.GetString(4), CultureInfo.InvariantCulture)
     };
 
     private static void AddFuturesOrderParameters(SqliteCommand command, FuturesOrderRecord order)
