@@ -20,4 +20,15 @@ public sealed class RiskOptions
     [ConfigurationKeyName("MIN_ORDER_SIZE_USDT")]
     [Range(typeof(decimal), "0.00000001", "999999999")]
     public decimal MinOrderSizeUsdt { get; init; } = 5m;
+
+    [ConfigurationKeyName("MIN_USDT_RESERVE_PERCENT")]
+    [Range(typeof(decimal), "0", "100")]
+    public decimal MinUsdtReservePercent { get; init; } = 20m;
+
+    [ConfigurationKeyName("MAX_TOTAL_EXPOSURE_PERCENT")]
+    [Range(typeof(decimal), "0", "100")]
+    public decimal MaxTotalExposurePercent { get; init; } = 80m;
+
+    [ConfigurationKeyName("ALLOW_HIGH_VOLATILITY_TRADING")]
+    public bool AllowHighVolatilityTrading { get; init; } = false;
 }

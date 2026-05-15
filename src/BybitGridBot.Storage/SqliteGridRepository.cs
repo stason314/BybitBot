@@ -80,6 +80,102 @@ public sealed class SqliteGridRepository : IGridRepository
                 updated_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS strategy_decisions (
+                decision_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                market_regime TEXT NOT NULL,
+                selected_strategy TEXT NOT NULL,
+                scores_json TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS market_regimes (
+                regime_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                regime TEXT NOT NULL,
+                confidence TEXT NOT NULL,
+                metrics_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS signals (
+                signal_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                type TEXT NOT NULL,
+                direction TEXT NULL,
+                strength TEXT NOT NULL,
+                confidence TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS capital_allocations (
+                allocation_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                strategy_type TEXT NOT NULL,
+                requested_usdt TEXT NOT NULL,
+                allocated_usdt TEXT NOT NULL,
+                is_allowed INTEGER NOT NULL,
+                reason TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS trade_intents (
+                intent_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                order_link_id TEXT NULL,
+                symbol TEXT NOT NULL,
+                strategy_type TEXT NOT NULL,
+                side TEXT NOT NULL,
+                order_type TEXT NOT NULL,
+                price TEXT NOT NULL,
+                quantity TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                confidence TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS risk_decisions (
+                risk_decision_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                order_link_id TEXT NULL,
+                is_allowed INTEGER NOT NULL,
+                reason TEXT NOT NULL,
+                severity TEXT NOT NULL,
+                suggested_action TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS orders (
+                order_link_id TEXT NOT NULL PRIMARY KEY,
+                symbol TEXT NOT NULL,
+                strategy_type TEXT NULL,
+                side TEXT NOT NULL,
+                price TEXT NOT NULL,
+                quantity TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS positions (
+                symbol TEXT NOT NULL PRIMARY KEY,
+                base_asset_quantity TEXT NOT NULL,
+                average_entry_price TEXT NOT NULL,
+                quote_asset_balance TEXT NOT NULL,
+                current_price TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS daily_pnl (
+                symbol TEXT NOT NULL,
+                pnl_date TEXT NOT NULL,
+                realized_pnl TEXT NOT NULL,
+                fees_paid TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(symbol, pnl_date)
+            );
+
             UPDATE OR IGNORE runtime_settings
             SET settings_id = symbol
             WHERE settings_id = 'active';

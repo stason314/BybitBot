@@ -8,6 +8,7 @@ using BybitGridBot.Strategy;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using StrategyExecutionDecision = BybitGridBot.Strategy.StrategyDecision;
 
 namespace BybitGridBot.App;
 
@@ -245,9 +246,15 @@ public sealed class GridBotWorker : BackgroundService
         _runningProfiles[_gridOptions.Symbol] = _gridOptions;
         _runningSettings[_gridOptions.Symbol] = profile;
 
+        _logger.LogInformation(
+            "Selected strategy for {Symbol}: {StrategyType}. SelectionMode: {SelectionMode}",
+            _gridOptions.Symbol,
+            profile.StrategyType,
+            profile.StrategySelectionMode);
+
         var instrument = await _bybitRestClient.GetInstrumentInfoAsync(_gridOptions.Category, _gridOptions.Symbol, cancellationToken);
         var state = await EnsureBotStateAsync(cancellationToken);
-        if (profile.StrategyType == TradingStrategyType.NoTrade)
+        if (profile.StrategyType is TradingStrategyType.NoTrade or TradingStrategyType.Pause)
         {
             await _repository.SaveGridLevelsAsync(_gridOptions.Symbol, [], cancellationToken);
             await RunNoTradeCycleAsync(state, cancellationToken);
@@ -275,7 +282,7 @@ public sealed class GridBotWorker : BackgroundService
             return;
         }
 
-        if (profile.StrategyType == TradingStrategyType.TrendFollow)
+        if (profile.StrategyType is TradingStrategyType.TrendFollow or TradingStrategyType.TrendFollowing or TradingStrategyType.Breakout)
         {
             await _repository.SaveGridLevelsAsync(_gridOptions.Symbol, [], cancellationToken);
             await RunTrendFollowCycleAsync(profile, state, instrument, cancellationToken);
@@ -337,8 +344,11 @@ public sealed class GridBotWorker : BackgroundService
         return newProfile.StrategySelectionMode == StrategySelectionMode.Auto &&
             newProfile.StrategyType is TradingStrategyType.Btd
                 or TradingStrategyType.NoTrade
+                or TradingStrategyType.Pause
                 or TradingStrategyType.Signal
-                or TradingStrategyType.TrendFollow;
+                or TradingStrategyType.TrendFollow
+                or TradingStrategyType.TrendFollowing
+                or TradingStrategyType.Breakout;
     }
 
     private async Task<bool> ShouldPreserveProfitableSellOrderAsync(
@@ -389,6 +399,10 @@ public sealed class GridBotWorker : BackgroundService
         }
 
         var regime = _marketRegimeAnalyzer.Analyze(candles);
+        _logger.LogInformation(
+            "Strategy scores for {Symbol}: {StrategyScores}",
+            profile.Symbol,
+            FormatStrategyScoresForLog(regime));
         var recommendation = _autoStrategySelector.Recommend(gridOptions, regime, candles);
         var recommendedSettings = new GridBotSettings
         {
@@ -451,6 +465,17 @@ public sealed class GridBotWorker : BackgroundService
         }
 
         return now - lastCheck >= TimedAutoRecommendationApplyInterval;
+    }
+
+    private static string FormatStrategyScoresForLog(MarketRegimeAnalysis regime)
+    {
+        var grid = regime.Regime is MarketRegimeType.Range or MarketRegimeType.LowVolatility ? 80 : 35;
+        var btd = regime.Regime == MarketRegimeType.Trend && regime.MovePercent < 0m ? 70 : 40;
+        var breakout = regime.Regime == MarketRegimeType.Breakout ? 82 : 25;
+        var trend = regime.Regime == MarketRegimeType.Trend && regime.MovePercent > 0m ? 78 : 30;
+        var pause = regime.Regime == MarketRegimeType.Danger ? 100 : 50;
+
+        return $"Grid={grid}; BTD={btd}; Breakout={breakout}; Trend={trend}; Pause={pause}; regime={regime.Regime}; confidence={regime.Confidence}";
     }
 
     private async Task<BotState> RunNoTradeCycleAsync(
@@ -691,6 +716,26 @@ public sealed class GridBotWorker : BackgroundService
                 null,
                 "Daily loss limit reached. Trading paused.",
                 cancellationToken);
+            await _repository.SaveBotStateAsync(state, cancellationToken);
+            return state;
+        }
+
+        if (!_appOptions.SignalTradingEnabled)
+        {
+            var candles = await _bybitRestClient.GetKlinesAsync(
+                _gridOptions.Category,
+                _gridOptions.Symbol,
+                string.IsNullOrWhiteSpace(config.CandleInterval) ? "1" : config.CandleInterval,
+                Math.Max(30, config.LookbackCandles),
+                cancellationToken);
+            var signal = _signalAnalyzer.Analyze(candles);
+            _logger.LogInformation(
+                "Signal diagnostics only. Signal: {Signal}, Confidence: {Confidence}, Reason: {Reason}. Set SIGNAL_TRADING_ENABLED=true to allow signal-mode trading.",
+                signal.Signal,
+                signal.Confidence,
+                signal.Reason);
+            state.IsInitialized = true;
+            state.UpdatedAt = DateTimeOffset.UtcNow;
             await _repository.SaveBotStateAsync(state, cancellationToken);
             return state;
         }
@@ -1164,6 +1209,16 @@ public sealed class GridBotWorker : BackgroundService
             _gridOptions.CandleInterval,
             50,
             cancellationToken);
+
+        var marketRegime = _marketRegimeAnalyzer.Analyze(symbolCandles);
+        _logger.LogInformation(
+            "MarketRegime for {Symbol}: {MarketRegime}. Confidence: {Confidence}. ADX: {Adx}. VolumeRatio: {VolumeRatio}. Recommendation: {Recommendation}",
+            _gridOptions.Symbol,
+            marketRegime.Regime,
+            marketRegime.Confidence,
+            marketRegime.Adx,
+            marketRegime.VolumeRatio,
+            marketRegime.Recommendation);
 
         var btcCandles = _gridOptions.BtcFilterEnabled
             ? await _bybitRestClient.GetKlinesAsync("spot", "BTCUSDT", _gridOptions.CandleInterval, 20, cancellationToken)
@@ -1715,7 +1770,14 @@ public sealed class GridBotWorker : BackgroundService
                 continue;
             }
 
-            var decision = new StrategyDecision
+            _logger.LogInformation(
+                "Risk decision for {Symbol}: Allow buy at {Price}. Capital allocation requested: {OrderSizeUsdt} USDT, available: {AvailableUsdt} USDT.",
+                _gridOptions.Symbol,
+                level.Price,
+                orderSizeUsdt,
+                availableUsdt);
+
+            var decision = new StrategyExecutionDecision
             {
                 OrderIntents = [new OrderIntent(TradeSide.Buy, level.Price, quantity)]
             };
@@ -1752,7 +1814,13 @@ public sealed class GridBotWorker : BackgroundService
                 continue;
             }
 
-            var decision = new StrategyDecision
+            _logger.LogInformation(
+                "Risk decision for {Symbol}: Allow sell at {Price}. Capital allocation requested: 0 USDT, available base: {AvailableBase}.",
+                _gridOptions.Symbol,
+                level.Price,
+                availableBase);
+
+            var decision = new StrategyExecutionDecision
             {
                 OrderIntents = [new OrderIntent(TradeSide.Sell, level.Price, quantity)]
             };
@@ -1886,7 +1954,7 @@ public sealed class GridBotWorker : BackgroundService
         }
 
         await ExecuteStrategyDecisionAsync(
-            new StrategyDecision
+            new StrategyExecutionDecision
             {
                 OrderIntents = [new OrderIntent(TradeSide.Buy, limitPrice, quantity, entryMarker)]
             },
@@ -1957,7 +2025,7 @@ public sealed class GridBotWorker : BackgroundService
         }
 
         await ExecuteStrategyDecisionAsync(
-            new StrategyDecision
+            new StrategyExecutionDecision
             {
                 OrderIntents = [new OrderIntent(TradeSide.Buy, limitPrice, quantity, SignalEntryMarker)]
             },
@@ -2009,7 +2077,7 @@ public sealed class GridBotWorker : BackgroundService
         }
 
         await ExecuteStrategyDecisionAsync(
-            new StrategyDecision
+            new StrategyExecutionDecision
             {
                 OrderIntents = [new OrderIntent(TradeSide.Sell, limitPrice, quantity, SignalExitMarker)]
             },
@@ -2074,7 +2142,7 @@ public sealed class GridBotWorker : BackgroundService
         }
 
         await ExecuteStrategyDecisionAsync(
-            new StrategyDecision
+            new StrategyExecutionDecision
             {
                 OrderIntents = [new OrderIntent(TradeSide.Buy, limitPrice, quantity, TrendEntryMarker)]
             },
@@ -2121,7 +2189,7 @@ public sealed class GridBotWorker : BackgroundService
         }
 
         await ExecuteStrategyDecisionAsync(
-            new StrategyDecision
+            new StrategyExecutionDecision
             {
                 OrderIntents = [new OrderIntent(TradeSide.Sell, limitPrice, quantity, TrendExitMarker)]
             },
@@ -2252,7 +2320,7 @@ public sealed class GridBotWorker : BackgroundService
         }
 
         await ExecuteStrategyDecisionAsync(
-            new StrategyDecision
+            new StrategyExecutionDecision
             {
                 OrderIntents = [new OrderIntent(TradeSide.Sell, takeProfitPrice, quantity, filledOrder.OrderLinkId)]
             },
@@ -2485,7 +2553,7 @@ public sealed class GridBotWorker : BackgroundService
         }
 
         await ExecuteStrategyDecisionAsync(
-            new StrategyDecision
+            new StrategyExecutionDecision
             {
                 OrderIntents =
                 [
@@ -2500,7 +2568,7 @@ public sealed class GridBotWorker : BackgroundService
     }
 
     private async Task<IReadOnlyList<GridOrder>> ExecuteStrategyDecisionAsync(
-        StrategyDecision decision,
+        StrategyExecutionDecision decision,
         CancellationToken cancellationToken)
     {
         var createdOrders = new List<GridOrder>();
@@ -2978,7 +3046,10 @@ public sealed class GridBotWorker : BackgroundService
         GridBotSettings profile,
         IEnumerable<GridOrder> orders)
     {
-        return profile.StrategyType is TradingStrategyType.TrendFollow or TradingStrategyType.Hybrid
+        return profile.StrategyType is TradingStrategyType.TrendFollow
+                or TradingStrategyType.TrendFollowing
+                or TradingStrategyType.Breakout
+                or TradingStrategyType.Hybrid
             ? orders.Where(IsTrendOrder)
             : orders;
     }
@@ -3109,7 +3180,11 @@ public sealed class GridBotWorker : BackgroundService
 
     private static bool ShouldSkipGridFollowUp(GridBotSettings? profile, GridOrder order)
     {
-        return profile?.StrategyType is (TradingStrategyType.Signal or TradingStrategyType.TrendFollow or TradingStrategyType.Hybrid) &&
+        return profile?.StrategyType is (TradingStrategyType.Signal
+                or TradingStrategyType.TrendFollow
+                or TradingStrategyType.TrendFollowing
+                or TradingStrategyType.Breakout
+                or TradingStrategyType.Hybrid) &&
             (IsSignalOrder(order) || IsTrendOrder(order));
     }
 

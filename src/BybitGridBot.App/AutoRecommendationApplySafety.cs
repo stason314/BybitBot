@@ -118,8 +118,11 @@ internal static class AutoRecommendationApplySafety
         return recommendedSettings.StrategySelectionMode == StrategySelectionMode.Auto &&
             recommendedSettings.StrategyType is TradingStrategyType.Btd
                 or TradingStrategyType.NoTrade
+                or TradingStrategyType.Pause
                 or TradingStrategyType.Signal
-                or TradingStrategyType.TrendFollow;
+                or TradingStrategyType.TrendFollow
+                or TradingStrategyType.TrendFollowing
+                or TradingStrategyType.Breakout;
     }
 
     private static IReadOnlyList<decimal> BuildRecommendedSellPrices(
@@ -153,6 +156,8 @@ internal static class AutoRecommendationApplySafety
             or TradingStrategyType.Hybrid
             or TradingStrategyType.Btd
             or TradingStrategyType.Signal
-            or TradingStrategyType.TrendFollow;
+            or TradingStrategyType.TrendFollow
+            or TradingStrategyType.TrendFollowing
+            or TradingStrategyType.Breakout;
     }
 }

@@ -43,8 +43,16 @@ builder.Services.AddSingleton<ITradingStrategy>(serviceProvider => serviceProvid
 builder.Services.AddSingleton<RiskManager>();
 builder.Services.AddSingleton<MarketRegimeFilter>();
 builder.Services.AddSingleton<MarketRegimeAnalyzer>();
+builder.Services.AddSingleton<MarketRegimeDetector>();
 builder.Services.AddSingleton<SignalAnalyzer>();
+builder.Services.AddSingleton<SignalEngine>();
 builder.Services.AddSingleton<AutoStrategySelector>();
+builder.Services.AddSingleton<StrategyRouter>();
+builder.Services.AddSingleton<CapitalAllocator>();
+builder.Services.AddSingleton<ConflictResolver>();
+builder.Services.AddSingleton<BreakoutStrategy>();
+builder.Services.AddSingleton<TrendFollowingStrategy>();
+builder.Services.AddSingleton<PauseStrategy>();
 builder.Services.AddSingleton<IGridDashboardService, GridDashboardService>();
 
 builder.Services.AddHttpClient<IBybitRestClient, BybitRestClient>(client =>

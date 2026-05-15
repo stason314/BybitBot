@@ -52,4 +52,56 @@ public sealed class GridStrategy : IGridTradingStrategy
     public bool IsBelowStop(GridOptions options, decimal price) => price < options.StopLowerPrice;
 
     public bool IsAboveStop(GridOptions options, decimal price) => price > options.StopUpperPrice;
+
+    public IReadOnlyList<TradeIntent> BuildRebalanceIntents(
+        GridOptions options,
+        IReadOnlyList<GridLevel> levels,
+        decimal currentPrice,
+        IReadOnlyCollection<GridOrder> activeOrders)
+    {
+        if (!IsWithinTradingRange(options, currentPrice) ||
+            IsBelowStop(options, currentPrice) ||
+            IsAboveStop(options, currentPrice))
+        {
+            return [];
+        }
+
+        var intents = new List<TradeIntent>();
+        var lower = GetNextLowerLevel(levels, currentPrice);
+        var upper = GetNextUpperLevel(levels, currentPrice);
+
+        if (lower is not null && !HasActiveOrder(activeOrders, TradeSide.Buy, lower.Price))
+        {
+            intents.Add(BuildIntent(options, TradeSide.Buy, lower.Price, "Grid buy below current price."));
+        }
+
+        if (upper is not null && !HasActiveOrder(activeOrders, TradeSide.Sell, upper.Price))
+        {
+            intents.Add(BuildIntent(options, TradeSide.Sell, upper.Price, "Grid sell above current price."));
+        }
+
+        return intents;
+    }
+
+    private static bool HasActiveOrder(IReadOnlyCollection<GridOrder> activeOrders, TradeSide side, decimal price)
+    {
+        return activeOrders.Any(order => order.IsActive && order.Side == side && order.Price == price);
+    }
+
+    private static TradeIntent BuildIntent(GridOptions options, TradeSide side, decimal price, string reason)
+    {
+        return new TradeIntent
+        {
+            StrategyType = StrategyType.Grid,
+            Symbol = options.Symbol,
+            Side = side,
+            OrderType = OrderType.Limit,
+            Price = price,
+            Quantity = decimal.Round(options.OrderSizeUsdt / price, 8, MidpointRounding.ToZero),
+            Reason = reason,
+            Confidence = 0.7m,
+            ExpectedRisk = options.Step,
+            ExpectedReward = options.Step
+        };
+    }
 }

@@ -8,6 +8,9 @@ public enum TradingStrategyType
     Btd,
     Signal,
     TrendFollow,
+    TrendFollowing,
+    Breakout,
     Hybrid,
+    Pause,
     NoTrade
 }

@@ -1800,9 +1800,10 @@ public sealed class GridDashboardService : IGridDashboardService
             "combo" => TradingStrategyType.Combo,
             "btd" => TradingStrategyType.Btd,
             "signal" or "signalbot" or "signal_bot" or "signal bot" => TradingStrategyType.Signal,
-            "trend" or "trend_follow" or "trendfollow" or "trend following" or "breakout" or "breakout_trend" => TradingStrategyType.TrendFollow,
+            "trend" or "trend_follow" or "trendfollow" or "trend following" => TradingStrategyType.TrendFollowing,
+            "breakout" or "breakout_trend" => TradingStrategyType.Breakout,
             "hybrid" or "multi" or "all" or "combo_signal" or "combo signal" or "hybrid_signal" or "grid_dca_btd_signal" => TradingStrategyType.Hybrid,
-            "notrade" or "no_trade" or "no trade" => TradingStrategyType.NoTrade,
+            "pause" or "notrade" or "no_trade" or "no trade" => TradingStrategyType.Pause,
             _ => null
         };
     }
@@ -1929,8 +1930,8 @@ public sealed class GridDashboardService : IGridDashboardService
             TradingStrategyType.Combo => new OrderSourceContext("Combo-Grid", "Combo-DCA", "Combo-BTD"),
             TradingStrategyType.Hybrid => new OrderSourceContext("Hybrid-Grid", "Hybrid-DCA", "Hybrid-BTD"),
             TradingStrategyType.Signal => new OrderSourceContext("Managed", "DCA", "BTD"),
-            TradingStrategyType.TrendFollow => new OrderSourceContext("Managed", "DCA", "BTD"),
-            TradingStrategyType.NoTrade => new OrderSourceContext("Managed", "DCA", "BTD"),
+            TradingStrategyType.TrendFollow or TradingStrategyType.TrendFollowing or TradingStrategyType.Breakout => new OrderSourceContext("Managed", "DCA", "BTD"),
+            TradingStrategyType.NoTrade or TradingStrategyType.Pause => new OrderSourceContext("Managed", "DCA", "BTD"),
             _ => new OrderSourceContext("Grid", "DCA", "BTD")
         };
     }

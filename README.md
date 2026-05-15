@@ -1,17 +1,100 @@
-# Bybit Grid Bot
+# Bybit Trading Bot
 
-Production-ready MVP grid bot for Bybit V5 on .NET 8 with safe default `paper` mode.
+.NET 8 Bybit bot with safe default `paper` mode, SQLite state, Telegram notifications, Docker deployment, and strategy routing.
 
-## Features
+## Architecture
 
-- `paper`, `testnet`, `mainnet` modes
-- spot grid strategy for `BILLUSDT`
-- built-in web dashboard for live monitoring and runtime grid updates
-- SQLite state storage
-- Serilog logs to console and file
-- Telegram notifications
-- Docker and Docker Compose deploy flow
-- Bybit V5 REST client with HMAC signing and retry
+```text
+MarketDataService
+  -> SignalEngine
+  -> MarketRegimeDetector
+  -> StrategyRouter
+  -> CapitalAllocator
+  -> RiskManager
+  -> ExecutionEngine
+  -> Bybit / Paper broker
+```
+
+The existing worker still owns execution and Bybit synchronization. The new architecture is added as testable routing, risk, signal, allocation, and backtest components so existing `paper`, `testnet`, and `mainnet` flows are not rewritten.
+
+## Bot Types
+
+- `dca`: runs only DCA.
+- `btd`: runs only Buy The Dip.
+- `combo`: preset mode for Grid/DCA/BTD-style overlays; conflicting orders must be resolved before execution.
+- `signal`: diagnostics/signal mode. It does not trade unless `SIGNAL_TRADING_ENABLED=true`.
+- `hybrid`: manual multi-strategy preset/router mode.
+- `auto`: auto-selects a strategy from market regime and strategy scores.
+- `grid`: range-bound grid strategy.
+- `breakout`: confirmed breakout strategy.
+- `trend`: trend-following strategy.
+- `pause`: no new trades.
+
+`signal` is an engine, not a standalone trading strategy by default. `hybrid` uses manual strategy intent/weights, while `auto` uses `MarketRegimeDetector` and score thresholds. Auto-select is a risk-adjusted selector; it does not guarantee profit.
+
+## Safe Defaults
+
+- `TRADING_MODE=paper`
+- `BOT_TYPE=auto`
+- API keys are blank in `.env.example`
+- `mainnet` requires explicit `TRADING_MODE=mainnet` and API keys
+- Docker Compose does not publish inbound ports
+- `.env` should stay untracked and must not contain committed secrets
+
+## Example: TON Grid
+
+```env
+BOT_TYPE=grid
+TRADING_MODE=paper
+SYMBOL=TONUSDT
+CATEGORY=spot
+GRID_LOWER_PRICE=2.30
+GRID_UPPER_PRICE=2.60
+GRID_STEP=0.05
+ORDER_SIZE_USDT=20
+STOP_LOWER_PRICE=2.25
+STOP_UPPER_PRICE=2.65
+```
+
+## Example: Auto Mode
+
+```env
+BOT_TYPE=auto
+TRADING_MODE=paper
+SYMBOL=TONUSDT
+CATEGORY=spot
+SPOT_ONLY=true
+STRATEGY_MIN_SCORE=65
+STRATEGY_MIN_CONFIDENCE=0.6
+STRATEGY_SWITCH_COOLDOWN_MINUTES=30
+ALLOW_HIGH_VOLATILITY_TRADING=false
+```
+
+## Local Commands
+
+```bash
+dotnet test
+docker compose config
+docker compose up -d --build
+docker logs -f bybit-bot
+```
+
+Run without Docker:
+
+```bash
+dotnet restore
+dotnet build
+dotnet run --project src/BybitGridBot.App
+```
+
+## Deploy
+
+```bash
+cd /opt/bybit-bot/BybitBot
+git pull --ff-only
+docker compose up -d --build
+docker logs -f bybit-bot
+```
 
 ## Project Structure
 
@@ -28,114 +111,12 @@ Production-ready MVP grid bot for Bybit V5 on .NET 8 with safe default `paper` m
   /BybitGridBot.Tests
 ```
 
-## Local Run
+## Before Mainnet
 
-1. Use the tracked `.env` as the default paper config, or copy `.env.example` if you want to rebuild it manually.
-2. Restore packages:
-
-```bash
-dotnet restore
-```
-
-3. Build:
-
-```bash
-dotnet build
-```
-
-4. Run:
-
-```bash
-dotnet run --project src/BybitGridBot.App
-```
-
-## Docker
-
-1. The repository already contains a safe default `.env` for `paper` mode. Keep API keys empty in git.
-2. Validate config:
-
-```bash
-docker compose config
-```
-
-3. Build and start:
-
-```bash
-docker compose up -d --build
-```
-
-4. Open the dashboard:
-
-```bash
-http://localhost:8080
-```
-
-5. Read logs:
-
-```bash
-docker logs -f bybit-bot
-```
-
-## Deploy On Server
-
-```bash
-cd /opt/bybit-bot/BybitBot
-git pull --ff-only
-docker compose up -d --build
-docker logs -f bybit-bot
-```
-
-Then open:
-
-```text
-http://SERVER_IP:8080
-```
-
-## Update
-
-```bash
-cd /opt/bybit-bot/BybitBot
-git pull --ff-only
-docker compose up -d --build
-```
-
-## Stop
-
-```bash
-docker compose down
-```
-
-## Tests
-
-```bash
-dotnet test
-```
-
-## Required `.env` Values
-
-- `TRADING_MODE`: keep `paper` by default. Use `testnet` for real testnet orders. Use `mainnet` only intentionally.
-- `BYBIT_API_KEY`, `BYBIT_API_SECRET`: required for `testnet` and `mainnet`.
-- `BYBIT_MARKET_DATA_BASE_URL`: public market data endpoint. Default is mainnet `https://api.bybit.com`, which keeps `paper` mode tied to real prices.
-- `BYBIT_TRADING_BASE_URL`: private trading endpoint. Default testnet value is `https://api-testnet.bybit.com`.
-- `SYMBOL`, `CATEGORY`: default `BILLUSDT` / `spot`.
-- `GRID_LOWER_PRICE`, `GRID_UPPER_PRICE`, `GRID_STEP`, `ORDER_SIZE_USDT`: core grid setup.
-- `STOP_LOWER_PRICE`, `STOP_UPPER_PRICE`: hard stop zone.
-- `MAX_DAILY_LOSS_USDT`, `MAX_OPEN_ORDERS`, `MAX_POSITION_USDT`, `MIN_ORDER_SIZE_USDT`: risk limits.
-- `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`: only when `TELEGRAM_ENABLED=true`.
-- `SQLITE_PATH`: default container path is `/app/data/bybit-grid-bot.db`.
-- `WEB_PORT`: dashboard HTTP port. Default `8080`.
-
-## Notes
-
-- The dashboard exposes one HTTP port for the operator UI. Default is `8080`.
-- `.env` is tracked in git only with safe defaults and blank secrets. Do not commit real API keys or Telegram secrets.
-- `paper` mode uses live Bybit prices but does not send real orders.
-- By default `paper` mode reads public market data from mainnet and keeps private trading disabled.
-- `testnet` mode uses the trading endpoint for both market data and order placement unless you override `BYBIT_MARKET_DATA_BASE_URL`.
-- The default `BILLUSDT` paper grid is intentionally conservative: `0.10-0.15` with stop bounds `0.09/0.16`. Recalibrate before live use.
-- Existing live orders are synchronized from Bybit on startup to avoid duplicates by `orderLinkId`.
-- For spot grids, initial sell levels require base asset inventory. In `paper` mode the bot can bootstrap inventory automatically on first initialization if needed.
-
-## Warning
-
-Use `paper` or `testnet` by default. Enable `mainnet` only consciously and only with properly scoped API keys. Withdraw permissions are not required.
+- Run `dotnet test`.
+- Run in `paper` first and confirm logs show `MarketRegime`, strategy scores/selection, capital allocation, and risk decisions.
+- Run `testnet` with scoped API keys.
+- Verify `MAX_DAILY_LOSS_USDT`, `MAX_POSITION_USDT`, `MAX_TOTAL_EXPOSURE_PERCENT`, and `MIN_USDT_RESERVE_PERCENT`.
+- Confirm `SPOT_ONLY=true` unless futures support has been intentionally implemented and tested.
+- Confirm Telegram notifications and SQLite volume paths.
+- Never use API keys with withdrawal permissions.

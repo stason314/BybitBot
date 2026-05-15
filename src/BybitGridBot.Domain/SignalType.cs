@@ -5,5 +5,15 @@ public enum SignalType
     Buy,
     Sell,
     Hold,
-    Avoid
+    Avoid,
+    EmaCross,
+    RsiOversold,
+    RsiOverbought,
+    RangeSupportBounce,
+    RangeResistanceReject,
+    BreakoutUp,
+    BreakoutDown,
+    VolumeSpike,
+    BtcRiskOff,
+    HighVolatility
 }

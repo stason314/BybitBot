@@ -32,6 +32,12 @@ public sealed class BtdStrategy : ITradingStrategy
         return drawdownPercent >= config.DipPercent;
     }
 
+    public bool IsDipAllowedByRegime(MarketRegime regime, IReadOnlyList<Signal> signals)
+    {
+        return regime == MarketRegime.Uptrend &&
+               signals.All(signal => signal.Type is not SignalType.BtcRiskOff and not SignalType.BreakoutDown);
+    }
+
     public bool CanOpenBuy(
         BtdStrategyConfig config,
         IReadOnlyCollection<GridOrder> orders,

@@ -20,7 +20,7 @@ public sealed class AutoStrategySelector
         var ordered = candles.OrderBy(candle => candle.OpenTime).ToArray();
         if (ordered.Length == 0)
         {
-            return FromCurrent(currentOptions, TradingStrategyType.Grid, "No candles available. Keep current grid.");
+            return FromCurrent(currentOptions, TradingStrategyType.Pause, "No candles available. Pause auto-select until market data is available.");
         }
 
         var lastPrice = ordered[^1].Close > 0m ? ordered[^1].Close : currentOptions.LowerPrice;
@@ -375,6 +375,8 @@ public sealed class AutoStrategySelector
             TradingStrategyType.Btd => BuildBtdConfig(orderSize, minOrderSize, metrics.DrawdownPercent, metrics.LastPrice, stopLower, stopUpper),
             TradingStrategyType.Signal => BuildSignalConfig(orderSize, minOrderSize, stopLower, stopUpper),
             TradingStrategyType.TrendFollow => BuildTrendFollowingConfig(orderSize, minOrderSize, stopLower, stopUpper),
+            TradingStrategyType.TrendFollowing => BuildTrendFollowingConfig(orderSize, minOrderSize, stopLower, stopUpper),
+            TradingStrategyType.Breakout => BuildTrendFollowingConfig(orderSize, minOrderSize, stopLower, stopUpper),
             TradingStrategyType.Hybrid => BuildHybridConfig(orderSize, minOrderSize, lower, metrics.DrawdownPercent, metrics.LastPrice, stopLower, stopUpper),
             _ => "{}"
         };

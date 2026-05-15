@@ -62,4 +62,11 @@ public sealed class DcaStrategy : ITradingStrategy
         var drawdownPercent = (high - currentPrice) / high * 100m;
         return drawdownPercent >= config.DipPercent;
     }
+
+    public bool IsAllocationAllowed(decimal currentPositionUsdt, decimal nextOrderUsdt, decimal maxAllocatedUsdt)
+    {
+        return nextOrderUsdt > 0m &&
+               maxAllocatedUsdt > 0m &&
+               currentPositionUsdt + nextOrderUsdt <= maxAllocatedUsdt;
+    }
 }

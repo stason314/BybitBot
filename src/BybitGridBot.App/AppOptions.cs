@@ -18,4 +18,7 @@ public sealed class AppOptions
 
     [ConfigurationKeyName("WEB_PORT")]
     public int WebPort { get; init; } = 8080;
+
+    [ConfigurationKeyName("SIGNAL_TRADING_ENABLED")]
+    public bool SignalTradingEnabled { get; init; } = false;
 }

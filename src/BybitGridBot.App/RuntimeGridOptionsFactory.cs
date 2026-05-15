@@ -7,12 +7,13 @@ internal static class RuntimeGridOptionsFactory
 {
     public static GridBotSettings ToRuntimeSettings(GridOptions options)
     {
+        var (selectionMode, strategyType) = ResolveInitialStrategy(options.BotType);
         return new GridBotSettings
         {
             Symbol = options.Symbol,
             Category = options.Category,
-            StrategySelectionMode = StrategySelectionMode.Manual,
-            StrategyType = TradingStrategyType.Grid,
+            StrategySelectionMode = selectionMode,
+            StrategyType = strategyType,
             StrategyConfigJson = "{}",
             LowerPrice = options.LowerPrice,
             UpperPrice = options.UpperPrice,
@@ -30,6 +31,8 @@ internal static class RuntimeGridOptionsFactory
         {
             Symbol = settings.Symbol,
             Category = settings.Category,
+            BotType = defaults.BotType,
+            SpotOnly = defaults.SpotOnly,
             LowerPrice = settings.LowerPrice,
             UpperPrice = settings.UpperPrice,
             Step = settings.Step,
@@ -45,10 +48,40 @@ internal static class RuntimeGridOptionsFactory
             StopUpperPrice = settings.StopUpperPrice,
             MarketFilterEnabled = defaults.MarketFilterEnabled,
             AdxMax = defaults.AdxMax,
+            RangeAdxMax = defaults.RangeAdxMax,
+            BreakoutAdxMin = defaults.BreakoutAdxMin,
+            TrendAdxMin = defaults.TrendAdxMin,
+            AdxPeriod = defaults.AdxPeriod,
+            AtrPeriod = defaults.AtrPeriod,
+            VolumeSmaPeriod = defaults.VolumeSmaPeriod,
+            VolumeSpikeMultiplier = defaults.VolumeSpikeMultiplier,
+            AtrSpikeMultiplier = defaults.AtrSpikeMultiplier,
             BtcFilterEnabled = defaults.BtcFilterEnabled,
             BtcMaxMovePercent = defaults.BtcMaxMovePercent,
             BtcLookbackCandles = defaults.BtcLookbackCandles,
+            StrategyMinScore = defaults.StrategyMinScore,
+            StrategyMinConfidence = defaults.StrategyMinConfidence,
+            StrategySwitchCooldownMinutes = defaults.StrategySwitchCooldownMinutes,
+            StrategyConfirmationCandles = defaults.StrategyConfirmationCandles,
+            GridCapitalPercent = defaults.GridCapitalPercent,
+            DcaOrderSizeUsdt = defaults.DcaOrderSizeUsdt,
+            DcaMaxPositionUsdt = defaults.DcaMaxPositionUsdt,
+            DcaAllowDowntrend = defaults.DcaAllowDowntrend,
+            DcaCapitalPercent = defaults.DcaCapitalPercent,
+            BtdDipPercent = defaults.BtdDipPercent,
+            BtdMinTrendScore = defaults.BtdMinTrendScore,
+            BtdCapitalPercent = defaults.BtdCapitalPercent,
+            BreakoutConfirmationCandles = defaults.BreakoutConfirmationCandles,
+            BreakoutVolumeMultiplier = defaults.BreakoutVolumeMultiplier,
+            BreakoutAtrStopMultiplier = defaults.BreakoutAtrStopMultiplier,
+            BreakoutCapitalPercent = defaults.BreakoutCapitalPercent,
+            TrendEmaFast = defaults.TrendEmaFast,
+            TrendEmaSlow = defaults.TrendEmaSlow,
+            TrendCapitalPercent = defaults.TrendCapitalPercent,
+            MinUsdtReservePercent = defaults.MinUsdtReservePercent,
+            MaxTotalExposurePercent = defaults.MaxTotalExposurePercent,
             FeePercent = defaults.FeePercent,
+            SlippagePercent = defaults.SlippagePercent,
             BotLoopIntervalSeconds = defaults.BotLoopIntervalSeconds,
             PaperInitialUsdt = defaults.PaperInitialUsdt,
             PaperInitialBaseAssetQuantity = defaults.PaperInitialBaseAssetQuantity,
@@ -59,6 +92,24 @@ internal static class RuntimeGridOptionsFactory
             AutoRecenterPaddingSteps = defaults.AutoRecenterPaddingSteps,
             AutoRecenterMinShiftSteps = defaults.AutoRecenterMinShiftSteps,
             CandleInterval = defaults.CandleInterval
+        };
+    }
+
+    private static (StrategySelectionMode SelectionMode, TradingStrategyType StrategyType) ResolveInitialStrategy(BotType botType)
+    {
+        return botType switch
+        {
+            BotType.Auto => (StrategySelectionMode.Auto, TradingStrategyType.Pause),
+            BotType.Dca => (StrategySelectionMode.Manual, TradingStrategyType.Dca),
+            BotType.Btd => (StrategySelectionMode.Manual, TradingStrategyType.Btd),
+            BotType.Combo => (StrategySelectionMode.Manual, TradingStrategyType.Combo),
+            BotType.Signal => (StrategySelectionMode.Manual, TradingStrategyType.Signal),
+            BotType.Hybrid => (StrategySelectionMode.Manual, TradingStrategyType.Hybrid),
+            BotType.Grid => (StrategySelectionMode.Manual, TradingStrategyType.Grid),
+            BotType.Breakout => (StrategySelectionMode.Manual, TradingStrategyType.Breakout),
+            BotType.Trend => (StrategySelectionMode.Manual, TradingStrategyType.TrendFollowing),
+            BotType.Pause => (StrategySelectionMode.Manual, TradingStrategyType.Pause),
+            _ => (StrategySelectionMode.Auto, TradingStrategyType.Pause)
         };
     }
 
