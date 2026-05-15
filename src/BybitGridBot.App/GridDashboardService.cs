@@ -104,6 +104,7 @@ public sealed class GridDashboardService : IGridDashboardService
             .Where(order => order.Status is nameof(OrderStatus.New) or nameof(OrderStatus.PartiallyFilled))
             .ToArray();
         var performanceByStrategy = BuildStrategyPerformance(allOrders, orderSourceLabels);
+        var lastNoTradeReason = await _repository.GetLatestNoTradeReasonAsync(gridOptions.Symbol, cancellationToken);
 
         decimal? currentPrice = state.LastObservedPrice;
         try
@@ -185,6 +186,7 @@ public sealed class GridDashboardService : IGridDashboardService
             MarketRegime = MapMarketRegime(marketRegime),
             SignalAnalysis = MapSignalAnalysis(signalAnalysis),
             AutoRecommendation = MapAutoRecommendation(autoRecommendation, autoRecommendationSafetyErrors),
+            LastNoTradeReason = MapNoTradeReason(lastNoTradeReason),
             Orders = orders,
             ActiveOrders = activeOrders,
             PerformanceByStrategy = performanceByStrategy,
@@ -1197,6 +1199,16 @@ public sealed class GridDashboardService : IGridDashboardService
 
     <section class="stats" id="stats"></section>
 
+    <section class="panel section regime-card" id="noTradeReasonCard" hidden>
+      <div>
+        <div class="label">No-Trade Reason</div>
+        <div class="regime-title" id="noTradeReasonCode">-</div>
+        <div class="subtle" id="noTradeReasonText">-</div>
+        <div class="regime-meta" id="noTradeReasonMeta"></div>
+      </div>
+      <div class="badge">Recorded <strong id="noTradeReasonTime">-</strong></div>
+    </section>
+
     <section class="panel section" style="margin-bottom:20px;">
       <div class="section-head">
         <h2>Strategy Performance</h2>
@@ -1759,6 +1771,18 @@ public sealed class GridDashboardService : IGridDashboardService
         ['Average Entry', formatNumber(data.state.averageEntryPrice)]
       ].map(([label, value]) => `<div class="stat"><div class="label">${label}</div><div class="value">${value}</div></div>`).join('');
 
+      const noTradeReason = data.lastNoTradeReason;
+      byId('noTradeReasonCard').hidden = !noTradeReason;
+      if (noTradeReason) {
+        byId('noTradeReasonCode').textContent = noTradeReason.code;
+        byId('noTradeReasonText').textContent = noTradeReason.reason;
+        byId('noTradeReasonTime').textContent = formatDate(noTradeReason.createdAt);
+        byId('noTradeReasonMeta').innerHTML = [
+          ['Strategy', noTradeReason.strategyType || data.settings.strategyType],
+          ['Symbol', data.settings.symbol]
+        ].map(([label, value]) => `<span class="regime-chip">${label}: ${escapeHtml(value)}</span>`).join('');
+      }
+
       byId('strategyPerformanceRows').innerHTML = (data.performanceByStrategy || []).length === 0
         ? `<tr><td colspan="8">No strategy performance yet.</td></tr>`
         : data.performanceByStrategy.map(item => `
@@ -2137,6 +2161,19 @@ public sealed class GridDashboardService : IGridDashboardService
             UpdatedAt = order.UpdatedAt,
             FilledAt = order.FilledAt
         };
+    }
+
+    private static DashboardNoTradeReason? MapNoTradeReason(NoTradeReasonRecord? reason)
+    {
+        return reason is null
+            ? null
+            : new DashboardNoTradeReason
+            {
+                Code = reason.ReasonCode.ToString(),
+                StrategyType = reason.StrategyType,
+                Reason = reason.Reason,
+                CreatedAt = reason.CreatedAt
+            };
     }
 
     private static IReadOnlyList<DashboardStrategyPerformanceItem> BuildStrategyPerformance(

@@ -20,6 +20,8 @@ public sealed class DashboardResponse
 
     public required DashboardAutoRecommendation AutoRecommendation { get; init; }
 
+    public DashboardNoTradeReason? LastNoTradeReason { get; init; }
+
     public required IReadOnlyList<DashboardOrderItem> Orders { get; init; }
 
     public required IReadOnlyList<DashboardOrderItem> ActiveOrders { get; init; }
@@ -197,6 +199,17 @@ public sealed class DashboardAutoRecommendation
     public bool CanApply { get; init; }
 
     public IReadOnlyList<string> ApplySafetyErrors { get; init; } = [];
+}
+
+public sealed class DashboardNoTradeReason
+{
+    public required string Code { get; init; }
+
+    public string? StrategyType { get; init; }
+
+    public required string Reason { get; init; }
+
+    public DateTimeOffset CreatedAt { get; init; }
 }
 
 public sealed class DashboardOrderItem
