@@ -21,4 +21,7 @@ public sealed class AppOptions
 
     [ConfigurationKeyName("SIGNAL_TRADING_ENABLED")]
     public bool SignalTradingEnabled { get; init; } = false;
+
+    [ConfigurationKeyName("SPOT_USER_STREAM_ENABLED")]
+    public bool SpotUserStreamEnabled { get; init; } = true;
 }

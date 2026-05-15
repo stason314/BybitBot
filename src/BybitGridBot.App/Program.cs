@@ -103,6 +103,7 @@ builder.Services.AddSingleton<IGridRepository>(serviceProvider =>
 if (ShouldRunSpotWorker(builder.Configuration))
 {
     builder.Services.AddHostedService<GridBotWorker>();
+    builder.Services.AddHostedService<SpotUserStreamWorker>();
 }
 
 builder.Services.AddHostedService<FuturesBotWorker>();
