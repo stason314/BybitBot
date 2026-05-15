@@ -135,6 +135,11 @@ public sealed class FuturesPreflightService
         {
             throw new InvalidOperationException("Futures pre-flight leverage must be positive.");
         }
+
+        if (settings.Leverage > _futuresOptions.MvpMaxLeverage)
+        {
+            throw new InvalidOperationException("Futures pre-flight leverage exceeds MVP cap.");
+        }
     }
 
     private static void ValidateInstrumentRules(BybitInstrumentInfo instrument)

@@ -62,9 +62,14 @@ public sealed class FuturesBotWorker : BackgroundService
             return;
         }
 
-        if (_appOptions.TradingMode == TradingMode.Mainnet)
+        if (_appOptions.TradingMode == TradingMode.Mainnet && !_futuresOptions.MainnetEnabled)
         {
-            throw new InvalidOperationException("Futures worker refuses mainnet. Use paper/testnet until futures mainnet guard is implemented.");
+            throw new InvalidOperationException("Futures mainnet is blocked. Set FUTURES_MAINNET_ENABLED=true only after the mainnet checklist is complete.");
+        }
+
+        if (_appOptions.TradingMode == TradingMode.Testnet && !_futuresOptions.TestnetEnabled)
+        {
+            throw new InvalidOperationException("Futures worker is paper-only until FUTURES_TESTNET_ENABLED=true.");
         }
 
         _logger.LogInformation("Starting futures worker. Mode: {TradingMode}", _appOptions.TradingMode);
@@ -267,14 +272,15 @@ public sealed class FuturesBotWorker : BackgroundService
         };
     }
 
-    private static void ValidateMvpSettings(FuturesBotSettings settings)
+    private void ValidateMvpSettings(FuturesBotSettings settings)
     {
         if (!string.Equals(settings.Category, "linear", StringComparison.OrdinalIgnoreCase) ||
             settings.MarginMode != FuturesMarginMode.Isolated ||
             settings.PositionMode != FuturesPositionMode.OneWay ||
-            settings.Direction != FuturesDirection.LongOnly)
+            settings.Direction != FuturesDirection.LongOnly ||
+            settings.Leverage > _futuresOptions.MvpMaxLeverage)
         {
-            throw new InvalidOperationException("Futures worker MVP supports only linear, isolated, one-way, long-only profiles.");
+            throw new InvalidOperationException("Futures worker MVP supports only linear, isolated, one-way, long-only profiles within the leverage cap.");
         }
     }
 

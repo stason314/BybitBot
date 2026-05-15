@@ -10,16 +10,19 @@ public sealed class FuturesExecutionService
 {
     private readonly AppOptions _appOptions;
     private readonly IBybitRestClient _bybitRestClient;
+    private readonly FuturesOptions _futuresOptions;
     private readonly FuturesPaperSimulator _paperSimulator;
     private readonly IGridRepository _repository;
 
     public FuturesExecutionService(
         IOptions<AppOptions> appOptions,
+        IOptions<FuturesOptions> futuresOptions,
         IBybitRestClient bybitRestClient,
         FuturesPaperSimulator paperSimulator,
         IGridRepository repository)
     {
         _appOptions = appOptions.Value;
+        _futuresOptions = futuresOptions.Value;
         _bybitRestClient = bybitRestClient;
         _paperSimulator = paperSimulator;
         _repository = repository;
@@ -29,7 +32,9 @@ public sealed class FuturesExecutionService
         FuturesExecutionRequest request,
         CancellationToken cancellationToken)
     {
+        ValidateTradingMode();
         ValidateInstrumentRules(request.Intent, request.Instrument);
+        await ValidateTestnetChecklistAsync(request, cancellationToken);
         var bybitRequest = CreateBybitRequest(request.Settings, request.Intent);
         var now = DateTimeOffset.UtcNow;
         var order = new GridOrder
@@ -122,7 +127,7 @@ public sealed class FuturesExecutionService
 
     public BybitCreateOrderRequest CreateBybitRequest(FuturesBotSettings settings, FuturesTradeIntent intent)
     {
-        ValidateMvpExecution(settings, intent);
+        ValidateMvpExecution(settings, intent, _futuresOptions.MvpMaxLeverage);
         var request = FuturesOrderRequestFactory.Create(intent);
         if (intent.IsReduceOnly && request.ReduceOnly != true)
         {
@@ -147,7 +152,7 @@ public sealed class FuturesExecutionService
         return request;
     }
 
-    private static void ValidateMvpExecution(FuturesBotSettings settings, FuturesTradeIntent intent)
+    private static void ValidateMvpExecution(FuturesBotSettings settings, FuturesTradeIntent intent, decimal maxLeverage)
     {
         if (!string.Equals(settings.Category, "linear", StringComparison.OrdinalIgnoreCase) ||
             !string.Equals(intent.Category, "linear", StringComparison.OrdinalIgnoreCase))
@@ -207,6 +212,59 @@ public sealed class FuturesExecutionService
         {
             throw new InvalidOperationException("Futures order notional is below instrument min notional.");
         }
+    }
+
+    private void ValidateTradingMode()
+    {
+        if (_appOptions.TradingMode == TradingMode.Paper)
+        {
+            return;
+        }
+
+        if (_appOptions.TradingMode == TradingMode.Mainnet && !_futuresOptions.MainnetEnabled)
+        {
+            throw new InvalidOperationException("Futures mainnet is blocked. Set FUTURES_MAINNET_ENABLED=true only after the mainnet checklist is complete.");
+        }
+
+        if (_appOptions.TradingMode == TradingMode.Testnet && !_futuresOptions.TestnetEnabled)
+        {
+            throw new InvalidOperationException("Futures execution is paper-only until FUTURES_TESTNET_ENABLED=true.");
+        }
+    }
+
+    private async Task ValidateTestnetChecklistAsync(FuturesExecutionRequest request, CancellationToken cancellationToken)
+    {
+        if (_appOptions.TradingMode == TradingMode.Paper ||
+            request.Intent.Action != FuturesTradeAction.OpenLong ||
+            _futuresOptions.MinSizeOrderCount <= 0)
+        {
+            return;
+        }
+
+        var previousOpenLongOrders = (await _repository.GetFuturesOrdersAsync(request.Settings.Symbol, cancellationToken))
+            .Count(order => order.Action == FuturesTradeAction.OpenLong);
+        if (previousOpenLongOrders >= _futuresOptions.MinSizeOrderCount)
+        {
+            return;
+        }
+
+        var minQuantity = CalculateMinimumOrderQuantity(request.Intent.Price, request.Instrument);
+        if (request.Intent.Quantity != minQuantity)
+        {
+            throw new InvalidOperationException("First futures testnet orders must use instrument minimum size.");
+        }
+    }
+
+    private static decimal CalculateMinimumOrderQuantity(decimal price, FuturesInstrumentRules instrument)
+    {
+        var minQuantity = instrument.MinOrderQty;
+        if (price > 0m && instrument.MinOrderAmount > 0m)
+        {
+            minQuantity = decimal.Max(minQuantity, instrument.MinOrderAmount / price);
+        }
+
+        var step = instrument.QtyStep > 0m ? instrument.QtyStep : instrument.BasePrecision;
+        return step > 0m ? Math.Ceiling(minQuantity / step) * step : minQuantity;
     }
 
     private static string ResolvePositionSide(FuturesTradeAction action) =>
@@ -273,3 +331,7 @@ public sealed class FuturesExecutionResult
 
     public string Message { get; init; } = string.Empty;
 }
+        if (settings.Leverage > maxLeverage || intent.Leverage > maxLeverage)
+        {
+            throw new InvalidOperationException("Futures leverage exceeds MVP cap.");
+        }

@@ -50,6 +50,8 @@ Current scope:
 - `FuturesBotWorker` runs independently from `GridBotWorker`: it reads `futures_settings`, fetches ticker/candles/position, builds a futures decision, applies `FuturesRiskManager`, and executes via paper simulation or Bybit testnet
 - `FuturesExecutionService` is the dedicated execution layer: `OpenLong` maps to Bybit `Buy` with `reduceOnly=false`; `CloseLong` and `ReduceOnlyClose` map to Bybit `Sell` with `reduceOnly=true`
 - `FuturesPreflightService` validates `FUTURES_ENABLED=true`, `category=linear`, isolated margin, one-way mode, leverage, and instrument min qty/min notional before testnet trading
+- futures runtime guards keep execution paper-only unless `FUTURES_TESTNET_ENABLED=true`; mainnet also requires `FUTURES_MAINNET_ENABLED=true`
+- the first `FUTURES_MIN_SIZE_ORDER_COUNT` futures open-long orders must use instrument minimum size, and leverage is capped by `FUTURES_MVP_MAX_LEVERAGE`
 - every futures `OpenLong` must attach `stopLoss` in Bybit order create; missing stop-loss protection blocks the order before it reaches Bybit
 - futures state now has dedicated SQLite tables: `futures_orders`, `futures_positions`, `futures_fills`, and `futures_risk_decisions`
 - `/futures` includes profile enable/disable, paper/testnet status, active futures orders, reduce-only close, cancel active futures orders, risk decision log, and latest pre-flight result
@@ -69,8 +71,12 @@ Example futures defaults:
 
 ```env
 FUTURES_ENABLED=true
+FUTURES_TESTNET_ENABLED=false
+FUTURES_MAINNET_ENABLED=false
 FUTURES_CATEGORY=linear
 LEVERAGE=2
+FUTURES_MVP_MAX_LEVERAGE=2
+FUTURES_MIN_SIZE_ORDER_COUNT=3
 MARGIN_MODE=isolated
 POSITION_MODE=oneway
 MAX_NOTIONAL_USDT=100

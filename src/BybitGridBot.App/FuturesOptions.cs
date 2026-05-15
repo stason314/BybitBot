@@ -8,12 +8,26 @@ public sealed class FuturesOptions
     [ConfigurationKeyName("FUTURES_ENABLED")]
     public bool Enabled { get; init; } = false;
 
+    [ConfigurationKeyName("FUTURES_TESTNET_ENABLED")]
+    public bool TestnetEnabled { get; init; } = false;
+
+    [ConfigurationKeyName("FUTURES_MAINNET_ENABLED")]
+    public bool MainnetEnabled { get; init; } = false;
+
     [ConfigurationKeyName("FUTURES_CATEGORY")]
     public string Category { get; init; } = "linear";
 
     [ConfigurationKeyName("LEVERAGE")]
     [Range(typeof(decimal), "1", "1000")]
     public decimal Leverage { get; init; } = 2m;
+
+    [ConfigurationKeyName("FUTURES_MVP_MAX_LEVERAGE")]
+    [Range(typeof(decimal), "1", "1000")]
+    public decimal MvpMaxLeverage { get; init; } = 2m;
+
+    [ConfigurationKeyName("FUTURES_MIN_SIZE_ORDER_COUNT")]
+    [Range(0, 1000)]
+    public int MinSizeOrderCount { get; init; } = 3;
 
     [ConfigurationKeyName("MARGIN_MODE")]
     public string MarginMode { get; init; } = "isolated";

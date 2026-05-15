@@ -16,9 +16,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\..\src\BybitGridBot.App\BybitGridBot.App.csproj" />
     <ProjectReference Include="..\..\src\BybitGridBot.Bybit\BybitGridBot.Bybit.csproj" />
     <ProjectReference Include="..\..\src\BybitGridBot.Domain\BybitGridBot.Domain.csproj" />
     <ProjectReference Include="..\..\src\BybitGridBot.Risk\BybitGridBot.Risk.csproj" />
+    <ProjectReference Include="..\..\src\BybitGridBot.Storage\BybitGridBot.Storage.csproj" />
     <ProjectReference Include="..\..\src\BybitGridBot.Strategy\BybitGridBot.Strategy.csproj" />
   </ItemGroup>
 </Project>
