@@ -1035,6 +1035,15 @@ public sealed class GridDashboardService : IGridDashboardService
       gap: 8px;
       align-items: stretch;
     }
+    .top-recommendation {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 16px;
+      align-items: start;
+      margin-top: 22px;
+      padding-top: 18px;
+      border-top: 1px solid rgba(29,35,31,0.08);
+    }
     .history-copy-controls {
       display: flex;
       gap: 8px;
@@ -1236,6 +1245,8 @@ public sealed class GridDashboardService : IGridDashboardService
     }
     @media (max-width: 980px) {
       .hero, .layout { grid-template-columns: 1fr; }
+      .top-recommendation { grid-template-columns: 1fr; }
+      .top-recommendation .auto-actions { flex-direction: row; flex-wrap: wrap; }
       .stats { grid-template-columns: repeat(2, minmax(0,1fr)); }
       form { grid-template-columns: 1fr; }
       th, td { white-space: nowrap; }
@@ -1255,6 +1266,19 @@ public sealed class GridDashboardService : IGridDashboardService
           <div class="badge">Active <strong id="heroActiveTime">-</strong></div>
           <div class="badge">Last sync <strong id="heroUpdated">-</strong></div>
           <a class="profile-tab new" href="/futures">Futures</a>
+        </div>
+        <div class="top-recommendation">
+          <div>
+            <div class="label">Auto Recommendation</div>
+            <div class="regime-title" id="autoStrategyTitle">-</div>
+            <div class="subtle" id="autoStrategyReason">-</div>
+            <div class="regime-meta" id="autoStrategyMeta"></div>
+          </div>
+          <div class="auto-actions">
+            <button type="button" class="secondary-button compact-button" id="refreshAutoRecommendation">Refresh Recommendation</button>
+            <button type="button" class="secondary-button compact-button" id="applyAutoRecommendation">Apply Recommendation</button>
+            <button type="button" class="secondary-button compact-button" id="applySelectedStrategyRecommendation">Apply To Selected Strategy</button>
+          </div>
         </div>
         <div class="pause-box" id="pauseBox" hidden>
           <strong>Trading paused</strong>
@@ -1401,20 +1425,6 @@ public sealed class GridDashboardService : IGridDashboardService
         <div class="regime-meta" id="btdDiagnosticsMeta"></div>
       </div>
       <div class="badge">Allowed <strong id="btdDiagnosticsAllowed">-</strong></div>
-    </section>
-
-    <section class="panel section regime-card">
-      <div>
-        <div class="label">Auto Recommendation</div>
-        <div class="regime-title" id="autoStrategyTitle">-</div>
-        <div class="subtle" id="autoStrategyReason">-</div>
-        <div class="regime-meta" id="autoStrategyMeta"></div>
-      </div>
-      <div class="auto-actions">
-        <button type="button" class="secondary-button compact-button" id="refreshAutoRecommendation">Refresh Recommendation</button>
-        <button type="button" class="secondary-button compact-button" id="applyAutoRecommendation">Apply Recommendation</button>
-        <button type="button" class="secondary-button compact-button" id="applySelectedStrategyRecommendation">Apply To Selected Strategy</button>
-      </div>
     </section>
 
     <div class="layout">
