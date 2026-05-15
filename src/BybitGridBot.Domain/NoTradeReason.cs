@@ -16,7 +16,10 @@ public enum NoTradeReason
     BtcRiskOff,
     PriceOutsideRange,
     DailyLossLimitReached,
-    MaxPositionReached
+    MaxPositionReached,
+    AggressiveCooldown,
+    AggressiveStopLoss,
+    AggressiveReenabled
 }
 
 public sealed class NoTradeReasonRecord

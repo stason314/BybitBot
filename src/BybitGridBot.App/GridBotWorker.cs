@@ -1165,11 +1165,17 @@ public sealed class GridBotWorker : BackgroundService
                 cancellationToken)
             : [];
         var marketPhase = _priceActionPhaseDetector.Detect(_gridOptions, currentPrice, candles, btcCandles);
-        var aggressiveModeActive = IsAggressiveModeActive(_gridOptions, state, DateTimeOffset.UtcNow);
+        var now = DateTimeOffset.UtcNow;
+        var aggressiveModeActive = IsAggressiveModeActive(_gridOptions, state, now);
         if (!_btdStrategy.IsDipAllowedByPhase(_gridOptions, marketPhase, currentPrice, candles, btcCandles, aggressiveModeActive))
         {
-            var reasonCode = ResolveNoTradeReason(marketPhase);
-            var reason = aggressiveModeActive
+            var aggressiveCoolingDown = IsAggressiveModeCoolingDown(_gridOptions, state, now);
+            var reasonCode = aggressiveCoolingDown
+                ? NoTradeReason.AggressiveCooldown
+                : ResolveNoTradeReason(marketPhase);
+            var reason = aggressiveCoolingDown
+                ? $"BTD skipped: aggressive mode cooling down until {state.AggressiveModeDisabledUntil:O}. Reason={state.AggressiveModeDisabledReason}"
+                : aggressiveModeActive
                 ? $"BTD skipped: hard risk filter blocked aggressive mode. Phase={marketPhase.Phase}; Reason={marketPhase.Reason}"
                 : $"BTD skipped: trend not confirmed. Phase={marketPhase.Phase}; Reason={marketPhase.Reason}";
             _logger.LogInformation(reason);
@@ -1649,7 +1655,21 @@ public sealed class GridBotWorker : BackgroundService
         {
             state.TradingMode = _appOptions.TradingMode;
             ResetDailyPnlIfNeeded(state);
-            RefreshAggressiveModeState(state, _gridOptions, DateTimeOffset.UtcNow);
+            var now = DateTimeOffset.UtcNow;
+            var wasAggressiveDisabled = !state.AggressiveModeEnabled;
+            var previousDisabledUntil = state.AggressiveModeDisabledUntil;
+            RefreshAggressiveModeState(state, _gridOptions, now);
+            if (wasAggressiveDisabled &&
+                state.AggressiveModeEnabled &&
+                (previousDisabledUntil is null || previousDisabledUntil <= now))
+            {
+                await RecordNoTradeReasonAsync(
+                    ResolveCurrentProfile(),
+                    NoTradeReason.AggressiveReenabled,
+                    "Aggressive mode reenabled after cooldown.",
+                    cancellationToken);
+            }
+
             await _repository.SaveBotStateAsync(state, cancellationToken);
             return state;
         }
@@ -1734,6 +1754,14 @@ public sealed class GridBotWorker : BackgroundService
               (state.AggressiveModeDisabledUntil is null || state.AggressiveModeDisabledUntil <= now)));
     }
 
+    private static bool IsAggressiveModeCoolingDown(GridOptions gridOptions, BotState state, DateTimeOffset now)
+    {
+        return gridOptions.AggressiveModeEnabled &&
+            !state.AggressiveModeEnabled &&
+            state.AggressiveModeDisabledUntil is not null &&
+            state.AggressiveModeDisabledUntil > now;
+    }
+
     private async Task BootstrapPaperInventoryIfNeededAsync(
         BotState state,
         IReadOnlyList<GridLevel> levels,
@@ -1806,7 +1834,7 @@ public sealed class GridBotWorker : BackgroundService
 
             var fillFee = CalculateFee(order.Price * remainingQuantity);
             var pnlDelta = ApplyFillDelta(state, order.Side, remainingQuantity, order.Price, fillFee);
-            await RecordStrategyCooldownAfterLossAsync(state, order, pnlDelta, cancellationToken);
+            await RecordStrategyCooldownAfterLossAsync(profile, state, order, pnlDelta, cancellationToken);
 
             order.FilledQuantity = order.Quantity;
             order.AverageFillPrice = order.Price;
@@ -1967,7 +1995,7 @@ public sealed class GridBotWorker : BackgroundService
 
             if (result.IsApplied && result.Order is not null)
             {
-                await RecordStrategyCooldownAfterLossAsync(state, result.Order, result.PnlDelta, cancellationToken);
+                await RecordStrategyCooldownAfterLossAsync(profile, state, result.Order, result.PnlDelta, cancellationToken);
             }
         }
 
@@ -3647,6 +3675,7 @@ public sealed class GridBotWorker : BackgroundService
     }
 
     private async Task RecordStrategyCooldownAfterLossAsync(
+        GridBotSettings? profile,
         BotState state,
         GridOrder order,
         decimal pnlDelta,
@@ -3678,14 +3707,15 @@ public sealed class GridBotWorker : BackgroundService
                 pnlDelta);
         }
 
-        await DisableAggressiveModeAfterStopLossAsync(state, order, pnlDelta, source, now, cancellationToken);
+        await DisableAggressiveModeAfterStopLossAsync(profile, state, order, pnlDelta, source, now, cancellationToken);
     }
 
     private async Task DisableAggressiveModeAfterStopLossAsync(
+        GridBotSettings? profile,
         BotState state,
         GridOrder order,
         decimal pnlDelta,
-        StrategySource source,
+        string source,
         DateTimeOffset now,
         CancellationToken cancellationToken)
     {
@@ -3709,6 +3739,11 @@ public sealed class GridBotWorker : BackgroundService
         state.AggressiveModeLastLossAt = now;
         state.UpdatedAt = now;
         await _repository.SaveBotStateAsync(state, cancellationToken);
+        await RecordNoTradeReasonAsync(
+            profile ?? ResolveCurrentProfile(),
+            NoTradeReason.AggressiveStopLoss,
+            state.AggressiveModeDisabledReason ?? "Aggressive mode disabled after stop-loss threshold.",
+            cancellationToken);
 
         _logger.LogWarning(
             "Aggressive mode disabled. Symbol: {Symbol}, Until: {DisabledUntil}, LossPercent: {LossPercent}, PnL: {PnlDelta}",
