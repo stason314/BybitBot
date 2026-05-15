@@ -71,6 +71,8 @@ public sealed class GridBotWorker : BackgroundService
 
     private readonly record struct SignalPositionSnapshot(decimal Quantity, decimal AverageEntryPrice);
 
+    private readonly record struct SpotAccountRiskSnapshot(decimal EquityUsdt, decimal ExposureUsdt, int ActiveBuyOrders);
+
     private readonly record struct TrendFollowingSignal(
         bool ShouldBuy,
         bool ShouldExit,
@@ -2489,15 +2491,17 @@ public sealed class GridBotWorker : BackgroundService
             }
 
             var availableUsdt = GetAvailableQuoteBalance(state, activeOrders, wallet);
-            var violations = _riskManager.ValidateOrderPlacement(
+            var violations = await ValidateSpotOrderPlacementAsync(
                 _riskOptions,
                 _gridOptions,
+                TradeSide.Buy,
                 state,
                 activeOrders,
                 currentPrice,
                 orderSizeUsdt,
                 instrument.MinOrderAmount,
-                availableUsdt);
+                availableUsdt,
+                cancellationToken);
 
             if (violations.Count > 0)
             {
@@ -2667,13 +2671,7 @@ public sealed class GridBotWorker : BackgroundService
         }
 
         var maxPositionUsdt = config.MaxPositionUsdt is > 0m ? config.MaxPositionUsdt.Value : _riskOptions.MaxPositionUsdt;
-        var riskOptions = new RiskOptions
-        {
-            MaxDailyLossUsdt = _riskOptions.MaxDailyLossUsdt,
-            MaxOpenOrders = _riskOptions.MaxOpenOrders,
-            MaxPositionUsdt = maxPositionUsdt,
-            MinOrderSizeUsdt = _riskOptions.MinOrderSizeUsdt
-        };
+        var riskOptions = BuildScopedRiskOptions(maxPositionUsdt);
         var dipRiskGridOptions = new GridOptions
         {
             Symbol = _gridOptions.Symbol,
@@ -2685,15 +2683,17 @@ public sealed class GridBotWorker : BackgroundService
             StopLowerPrice = _gridOptions.StopLowerPrice,
             StopUpperPrice = _gridOptions.StopUpperPrice
         };
-        var violations = _riskManager.ValidateOrderPlacement(
+        var violations = await ValidateSpotOrderPlacementAsync(
             riskOptions,
             dipRiskGridOptions,
+            TradeSide.Buy,
             state,
             activeOrders,
             currentPrice,
             orderSizeUsdt,
             instrument.MinOrderAmount,
-            GetAvailableQuoteBalance(state, activeOrders, wallet));
+            GetAvailableQuoteBalance(state, activeOrders, wallet),
+            cancellationToken);
 
         if (violations.Count > 0)
         {
@@ -2756,22 +2756,18 @@ public sealed class GridBotWorker : BackgroundService
             return;
         }
 
-        var riskOptions = new RiskOptions
-        {
-            MaxDailyLossUsdt = _riskOptions.MaxDailyLossUsdt,
-            MaxOpenOrders = _riskOptions.MaxOpenOrders,
-            MaxPositionUsdt = GetSignalMaxPositionUsdt(config),
-            MinOrderSizeUsdt = _riskOptions.MinOrderSizeUsdt
-        };
-        var violations = _riskManager.ValidateOrderPlacement(
+        var riskOptions = BuildScopedRiskOptions(GetSignalMaxPositionUsdt(config));
+        var violations = await ValidateSpotOrderPlacementAsync(
             riskOptions,
             _gridOptions,
+            TradeSide.Buy,
             state,
             activeOrders,
             currentPrice,
             orderSizeUsdt,
             instrument.MinOrderAmount,
-            GetAvailableQuoteBalance(state, activeOrders, wallet));
+            GetAvailableQuoteBalance(state, activeOrders, wallet),
+            cancellationToken);
 
         if (violations.Count > 0)
         {
@@ -2887,22 +2883,18 @@ public sealed class GridBotWorker : BackgroundService
             return;
         }
 
-        var riskOptions = new RiskOptions
-        {
-            MaxDailyLossUsdt = _riskOptions.MaxDailyLossUsdt,
-            MaxOpenOrders = _riskOptions.MaxOpenOrders,
-            MaxPositionUsdt = config.MaxPositionUsdt is > 0m ? config.MaxPositionUsdt.Value : _riskOptions.MaxPositionUsdt,
-            MinOrderSizeUsdt = _riskOptions.MinOrderSizeUsdt
-        };
-        var violations = _riskManager.ValidateOrderPlacement(
+        var riskOptions = BuildScopedRiskOptions(config.MaxPositionUsdt is > 0m ? config.MaxPositionUsdt.Value : _riskOptions.MaxPositionUsdt);
+        var violations = await ValidateSpotOrderPlacementAsync(
             riskOptions,
             _gridOptions,
+            TradeSide.Buy,
             state,
             activeOrders,
             currentPrice,
             orderSizeUsdt,
             instrument.MinOrderAmount,
-            GetAvailableQuoteBalance(state, activeOrders, wallet));
+            GetAvailableQuoteBalance(state, activeOrders, wallet),
+            cancellationToken);
 
         if (violations.Count > 0)
         {
@@ -3494,15 +3486,17 @@ public sealed class GridBotWorker : BackgroundService
         else
         {
             var orderNotional = quantity * nextLevel.Price;
-            var violations = _riskManager.ValidateOrderPlacement(
+            var violations = await ValidateSpotOrderPlacementAsync(
                 _riskOptions,
                 _gridOptions,
+                TradeSide.Buy,
                 state,
                 activeOrders,
                 state.LastObservedPrice ?? nextLevel.Price,
                 orderNotional,
                 _riskOptions.MinOrderSizeUsdt,
-                GetAvailableQuoteBalance(state, activeOrders, wallet));
+                GetAvailableQuoteBalance(state, activeOrders, wallet),
+                cancellationToken);
 
             if (violations.Count > 0)
             {
@@ -3720,6 +3714,97 @@ public sealed class GridBotWorker : BackgroundService
         state.DailyRealizedPnl += pnlDelta;
         state.UpdatedAt = DateTimeOffset.UtcNow;
         return pnlDelta;
+    }
+
+    private async Task<IReadOnlyList<string>> ValidateSpotOrderPlacementAsync(
+        RiskOptions riskOptions,
+        GridOptions gridOptions,
+        TradeSide side,
+        BotState state,
+        IReadOnlyCollection<GridOrder> activeOrders,
+        decimal currentPrice,
+        decimal orderSizeUsdt,
+        decimal minOrderSizeUsdt,
+        decimal availableUsdt,
+        CancellationToken cancellationToken)
+    {
+        UpdateEquityDrawdown(state, currentPrice);
+        var accountRisk = await BuildSpotAccountRiskSnapshotAsync(currentPrice, cancellationToken);
+        return _riskManager.ValidateOrderPlacement(
+            riskOptions,
+            gridOptions,
+            side,
+            state,
+            activeOrders,
+            currentPrice,
+            orderSizeUsdt,
+            minOrderSizeUsdt,
+            availableUsdt,
+            accountRisk.EquityUsdt,
+            accountRisk.ExposureUsdt,
+            accountRisk.ActiveBuyOrders);
+    }
+
+    private RiskOptions BuildScopedRiskOptions(decimal maxPositionUsdt) => new()
+    {
+        MaxDailyLossUsdt = _riskOptions.MaxDailyLossUsdt,
+        MaxDailyLossEquityPercent = _riskOptions.MaxDailyLossEquityPercent,
+        MaxDrawdownEquityPercent = _riskOptions.MaxDrawdownEquityPercent,
+        EmergencyPause = _riskOptions.EmergencyPause,
+        MaxOpenOrders = _riskOptions.MaxOpenOrders,
+        MaxAccountActiveBuyOrders = _riskOptions.MaxAccountActiveBuyOrders,
+        MaxPositionUsdt = maxPositionUsdt,
+        MaxAccountExposureUsdt = _riskOptions.MaxAccountExposureUsdt,
+        MinOrderSizeUsdt = _riskOptions.MinOrderSizeUsdt,
+        MinUsdtReservePercent = _riskOptions.MinUsdtReservePercent,
+        MaxTotalExposurePercent = _riskOptions.MaxTotalExposurePercent,
+        AllowHighVolatilityTrading = _riskOptions.AllowHighVolatilityTrading
+    };
+
+    private async Task<SpotAccountRiskSnapshot> BuildSpotAccountRiskSnapshotAsync(
+        decimal currentPrice,
+        CancellationToken cancellationToken)
+    {
+        var profiles = await _repository.GetRuntimeSettingsProfilesAsync(cancellationToken);
+        var equity = 0m;
+        var exposure = 0m;
+        var activeBuyOrders = 0;
+
+        foreach (var profile in profiles.Where(profile => string.Equals(profile.Category, "spot", StringComparison.OrdinalIgnoreCase)))
+        {
+            var state = await _repository.GetBotStateAsync(profile.Symbol, cancellationToken);
+            var activeOrders = await _repository.GetActiveOrdersAsync(profile.Symbol, cancellationToken);
+            var markPrice = string.Equals(profile.Symbol, _gridOptions.Symbol, StringComparison.OrdinalIgnoreCase)
+                ? currentPrice
+                : state?.LastObservedPrice ?? 0m;
+
+            if (state is not null)
+            {
+                equity += state.QuoteAssetBalance + (state.BaseAssetQuantity * markPrice);
+                exposure += state.BaseAssetQuantity * markPrice;
+            }
+
+            var activeBuys = activeOrders.Where(order => order.Side == TradeSide.Buy).ToArray();
+            activeBuyOrders += activeBuys.Length;
+            exposure += activeBuys.Sum(order => Math.Max(0m, order.Quantity - order.FilledQuantity) * order.Price);
+        }
+
+        return new SpotAccountRiskSnapshot(equity, exposure, activeBuyOrders);
+    }
+
+    private static void UpdateEquityDrawdown(BotState state, decimal currentPrice)
+    {
+        var equity = state.QuoteAssetBalance + (state.BaseAssetQuantity * currentPrice);
+        if (equity <= 0m)
+        {
+            return;
+        }
+
+        state.PeakEquityUsdt = state.PeakEquityUsdt <= 0m ? equity : decimal.Max(state.PeakEquityUsdt, equity);
+        state.CurrentDrawdownUsdt = decimal.Max(0m, state.PeakEquityUsdt - equity);
+        state.CurrentDrawdownPercent = state.PeakEquityUsdt > 0m
+            ? state.CurrentDrawdownUsdt / state.PeakEquityUsdt * 100m
+            : 0m;
     }
 
     private decimal GetAvailableQuoteBalance(

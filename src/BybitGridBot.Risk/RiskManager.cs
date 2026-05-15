@@ -8,23 +8,53 @@ public sealed class RiskManager
     public IReadOnlyList<string> ValidateOrderPlacement(
         RiskOptions riskOptions,
         GridOptions gridOptions,
+        TradeSide side,
         BotState state,
         IReadOnlyCollection<GridOrder> activeOrders,
         decimal currentPrice,
         decimal orderSizeUsdt,
         decimal minOrderSizeUsdt,
-        decimal availableUsdt)
+        decimal availableUsdt,
+        decimal accountEquityUsdt = 0m,
+        decimal accountExposureUsdt = 0m,
+        int accountActiveBuyOrders = 0)
     {
         var violations = new List<string>();
+
+        if (riskOptions.EmergencyPause)
+        {
+            violations.Add("EMERGENCY_PAUSE is enabled.");
+        }
 
         if (activeOrders.Count >= riskOptions.MaxOpenOrders)
         {
             violations.Add("MAX_OPEN_ORDERS limit reached.");
         }
 
-        if (state.DailyRealizedPnl <= -riskOptions.MaxDailyLossUsdt)
+        if (side == TradeSide.Buy &&
+            riskOptions.MaxAccountActiveBuyOrders > 0 &&
+            accountActiveBuyOrders >= riskOptions.MaxAccountActiveBuyOrders)
+        {
+            violations.Add("MAX_ACCOUNT_ACTIVE_BUY_ORDERS limit reached.");
+        }
+
+        if (riskOptions.MaxDailyLossUsdt > 0m && state.DailyRealizedPnl <= -riskOptions.MaxDailyLossUsdt)
         {
             violations.Add("MAX_DAILY_LOSS_USDT limit reached.");
+        }
+
+        var equityBasedDailyLoss = accountEquityUsdt > 0m && riskOptions.MaxDailyLossEquityPercent > 0m
+            ? accountEquityUsdt * riskOptions.MaxDailyLossEquityPercent / 100m
+            : 0m;
+        if (equityBasedDailyLoss > 0m && state.DailyRealizedPnl <= -equityBasedDailyLoss)
+        {
+            violations.Add("MAX_DAILY_LOSS_EQUITY_PERCENT limit reached.");
+        }
+
+        if (riskOptions.MaxDrawdownEquityPercent > 0m &&
+            state.CurrentDrawdownPercent >= riskOptions.MaxDrawdownEquityPercent)
+        {
+            violations.Add("MAX_DRAWDOWN_EQUITY_PERCENT limit reached.");
         }
 
         if (currentPrice < gridOptions.LowerPrice || currentPrice > gridOptions.UpperPrice)
@@ -37,15 +67,22 @@ public sealed class RiskManager
             violations.Add("Order size is below the minimum allowed notional.");
         }
 
-        if (availableUsdt < orderSizeUsdt)
+        if (side == TradeSide.Buy && availableUsdt < orderSizeUsdt)
         {
             violations.Add("Insufficient USDT balance.");
         }
 
-        var positionValue = (state.BaseAssetQuantity * currentPrice) + orderSizeUsdt;
+        var positionValue = (state.BaseAssetQuantity * currentPrice) + (side == TradeSide.Buy ? orderSizeUsdt : 0m);
         if (positionValue > riskOptions.MaxPositionUsdt)
         {
             violations.Add("MAX_POSITION_USDT limit reached.");
+        }
+
+        if (side == TradeSide.Buy &&
+            riskOptions.MaxAccountExposureUsdt > 0m &&
+            accountExposureUsdt + orderSizeUsdt > riskOptions.MaxAccountExposureUsdt)
+        {
+            violations.Add("MAX_ACCOUNT_EXPOSURE_USDT limit reached.");
         }
 
         return violations;
@@ -53,9 +90,28 @@ public sealed class RiskManager
 
     public RiskDecision EvaluateTradeIntent(RiskEvaluationContext context)
     {
-        if (context.State.DailyRealizedPnl <= -context.RiskOptions.MaxDailyLossUsdt)
+        if (context.RiskOptions.EmergencyPause && context.Intent.Side == TradeSide.Buy)
+        {
+            return Block("EMERGENCY_PAUSE is enabled.", RiskSeverity.Critical, RiskSuggestedAction.PauseBot);
+        }
+
+        if (context.RiskOptions.MaxDailyLossUsdt > 0m && context.State.DailyRealizedPnl <= -context.RiskOptions.MaxDailyLossUsdt)
         {
             return Block("MAX_DAILY_LOSS_USDT limit reached.", RiskSeverity.Critical, RiskSuggestedAction.PauseBot);
+        }
+
+        var equityBasedDailyLoss = context.TotalEquityUsdt > 0m && context.RiskOptions.MaxDailyLossEquityPercent > 0m
+            ? context.TotalEquityUsdt * context.RiskOptions.MaxDailyLossEquityPercent / 100m
+            : 0m;
+        if (equityBasedDailyLoss > 0m && context.State.DailyRealizedPnl <= -equityBasedDailyLoss)
+        {
+            return Block("MAX_DAILY_LOSS_EQUITY_PERCENT limit reached.", RiskSeverity.Critical, RiskSuggestedAction.PauseBot);
+        }
+
+        if (context.RiskOptions.MaxDrawdownEquityPercent > 0m &&
+            context.State.CurrentDrawdownPercent >= context.RiskOptions.MaxDrawdownEquityPercent)
+        {
+            return Block("MAX_DRAWDOWN_EQUITY_PERCENT limit reached.", RiskSeverity.Critical, RiskSuggestedAction.PauseBot);
         }
 
         if (context.ActiveOrders.Count >= context.RiskOptions.MaxOpenOrders)
