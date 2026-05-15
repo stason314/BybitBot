@@ -731,6 +731,7 @@ public sealed class GridBotWorker : BackgroundService
 
             await CleanDcaActiveOrdersAsync(state, activeOrders, cancellationToken);
             await SimulatePaperFillsAsync(state, [], profile, currentPrice, cancellationToken);
+            await EnsureProtectiveSellLifecycleAsync(profile, state, [], instrument, currentPrice, cancellationToken);
         }
         else
         {
@@ -743,6 +744,7 @@ public sealed class GridBotWorker : BackgroundService
             }
 
             await CleanDcaActiveOrdersAsync(state, activeOrders, cancellationToken);
+            await EnsureProtectiveSellLifecycleAsync(profile, state, [], instrument, currentPrice, cancellationToken);
         }
 
         if (state.IsPaused)
@@ -819,6 +821,7 @@ public sealed class GridBotWorker : BackgroundService
 
             await CleanDcaActiveOrdersAsync(state, activeOrders, cancellationToken);
             await SimulatePaperFillsAsync(state, [], profile, currentPrice, cancellationToken);
+            await EnsureProtectiveSellLifecycleAsync(profile, state, [], instrument, currentPrice, cancellationToken);
         }
         else
         {
@@ -831,6 +834,7 @@ public sealed class GridBotWorker : BackgroundService
             }
 
             await CleanDcaActiveOrdersAsync(state, activeOrders, cancellationToken);
+            await EnsureProtectiveSellLifecycleAsync(profile, state, [], instrument, currentPrice, cancellationToken);
         }
 
         if (state.IsPaused)
@@ -1183,7 +1187,7 @@ public sealed class GridBotWorker : BackgroundService
             return;
         }
 
-        if (!_btdStrategy.IsDipTriggered(config, currentPrice, candles))
+        if (!_btdStrategy.IsDipTriggered(config, currentPrice, candles) && !aggressiveModeActive)
         {
             _logger.LogInformation("BTD entry skipped because dip trigger has not fired.");
             return;
@@ -3191,7 +3195,12 @@ public sealed class GridBotWorker : BackgroundService
             return;
         }
 
-        var quantity = instrument.RoundQuantity(filledOrder.FilledQuantity);
+        var activeOrders = await _repository.GetActiveOrdersAsync(_gridOptions.Symbol, cancellationToken);
+        var wallet = _appOptions.TradingMode == TradingMode.Paper
+            ? null
+            : await _bybitRestClient.GetWalletBalanceAsync(cancellationToken, _quoteAsset, _baseAsset);
+        var availableBase = GetAvailableBaseBalance(state, activeOrders, wallet);
+        var quantity = instrument.RoundQuantity(decimal.Min(filledOrder.FilledQuantity, availableBase));
         if (quantity <= 0m || quantity < instrument.MinOrderQty)
         {
             return;
@@ -3205,17 +3214,13 @@ public sealed class GridBotWorker : BackgroundService
             return;
         }
 
-        var activeOrders = await _repository.GetActiveOrdersAsync(_gridOptions.Symbol, cancellationToken);
         if (HasActiveOrderAtLevel(activeOrders, takeProfitPrice) ||
             await _repository.GetActiveOrderAtLevelAsync(_gridOptions.Symbol, TradeSide.Sell, takeProfitPrice, cancellationToken) is not null)
         {
             return;
         }
 
-        var wallet = _appOptions.TradingMode == TradingMode.Paper
-            ? null
-            : await _bybitRestClient.GetWalletBalanceAsync(cancellationToken, _quoteAsset, _baseAsset);
-        if (GetAvailableBaseBalance(state, activeOrders, wallet) < quantity)
+        if (availableBase < quantity)
         {
             _logger.LogInformation("DCA take-profit sell at {Price} skipped because base asset inventory is insufficient.", takeProfitPrice);
             return;
@@ -4627,7 +4632,12 @@ public sealed class GridBotWorker : BackgroundService
 
     private static bool ShouldUseBtdFollowUp(GridBotSettings? profile, GridOrder order)
     {
-        return profile?.StrategyType is (TradingStrategyType.Btd or TradingStrategyType.Hybrid) &&
+        if (profile?.StrategyType == TradingStrategyType.Btd)
+        {
+            return order.Side == TradeSide.Buy;
+        }
+
+        return profile?.StrategyType == TradingStrategyType.Hybrid &&
             string.Equals(order.ParentOrderLinkId, BtdEntryMarker, StringComparison.Ordinal);
     }
 

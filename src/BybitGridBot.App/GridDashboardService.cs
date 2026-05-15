@@ -2895,7 +2895,7 @@ public sealed class GridDashboardService : IGridDashboardService
             isAllowed = false;
             reason = $"BTD silent: pullback is {pullbackPercent:F2}%, min {options.BtdMinPullbackPercent:F2}%.";
         }
-        else if (!dipTriggered)
+        else if (!dipTriggered && !aggressiveModeActive)
         {
             isAllowed = false;
             reason = $"BTD silent: dip trigger is {dipDrawdownPercent:F2}%, min {config.DipPercent:F2}%.";
