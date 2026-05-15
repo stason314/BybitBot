@@ -858,6 +858,8 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
     let creating = false;
     let dirty = false;
     let latest = null;
+    let controlStatusSymbol = null;
+    let controlStatusKind = null;
 
     const escapeHtml = (value) => String(value)
       .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
@@ -878,6 +880,13 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
       }
       window.history.replaceState({}, '', url);
     };
+    const setControlStatus = (kind, text, symbol) => {
+      byId('controlStatus').className = `status ${kind || ''}`.trim();
+      byId('controlStatus').textContent = text || '';
+      controlStatusSymbol = symbol ? symbol.toUpperCase() : null;
+      controlStatusKind = kind || null;
+    };
+    const clearControlStatus = () => setControlStatus('', '', null);
     const updateForm = (settings) => {
       byId('symbol').value = settings.symbol;
       byId('category').value = settings.category;
@@ -986,8 +995,12 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         `<span class="chip">${preflight ? escapeHtml(preflight.isAllowed ? 'Preflight ok' : 'Preflight blocked') : 'No preflight'}</span>`
       ].join('');
       if (preflight) {
-        byId('controlStatus').textContent = `${new Date(preflight.createdAt).toLocaleString()} - ${preflight.reason}`;
-        byId('controlStatus').className = `status ${preflight.isAllowed ? 'ok' : 'error'}`;
+        setControlStatus(
+          preflight.isAllowed ? 'ok' : 'error',
+          `${new Date(preflight.createdAt).toLocaleString()} - ${preflight.reason}`,
+          data.settings.symbol);
+      } else if ((controlStatusSymbol && controlStatusSymbol !== data.settings.symbol) || (!data.settings.enabled && controlStatusKind === 'error')) {
+        clearControlStatus();
       }
     };
     const renderOrders = (orders) => {
@@ -1241,8 +1254,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
       const enabled = !(latest?.settings?.enabled ?? true);
       const response = await fetch(`/api/futures/settings/${encodeURIComponent(symbol)}/enabled?enabled=${enabled}`, { method: 'POST' });
       const result = await response.json();
-      byId('controlStatus').className = `status ${response.ok ? 'ok' : 'error'}`;
-      byId('controlStatus').textContent = response.ok ? result.message : (result.errors?.join(' | ') || result.message);
+      setControlStatus(response.ok ? 'ok' : 'error', response.ok ? result.message : (result.errors?.join(' | ') || result.message), symbol);
       await load(true);
     });
     byId('closePosition').addEventListener('click', async () => {
@@ -1250,8 +1262,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
       if (!symbol) return;
       const response = await fetch(`/api/futures/position/${encodeURIComponent(symbol)}/close`, { method: 'POST' });
       const result = await response.json();
-      byId('controlStatus').className = `status ${response.ok ? 'ok' : 'error'}`;
-      byId('controlStatus').textContent = response.ok ? result.message : (result.errors?.join(' | ') || result.message);
+      setControlStatus(response.ok ? 'ok' : 'error', response.ok ? result.message : (result.errors?.join(' | ') || result.message), symbol);
       await load(true);
     });
     byId('paperTestEntry').addEventListener('click', async () => {
@@ -1260,8 +1271,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
       if (!symbol) return;
       const response = await fetch(`/api/futures/position/${encodeURIComponent(symbol)}/paper-test-entry`, { method: 'POST' });
       const result = await response.json();
-      byId('controlStatus').className = `status ${response.ok ? 'ok' : 'error'}`;
-      byId('controlStatus').textContent = response.ok ? result.message : (result.errors?.join(' | ') || result.message);
+      setControlStatus(response.ok ? 'ok' : 'error', response.ok ? result.message : (result.errors?.join(' | ') || result.message), symbol);
       await load(true);
     });
     byId('cancelFuturesOrders').addEventListener('click', async () => {
@@ -1269,8 +1279,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
       if (!symbol) return;
       const response = await fetch(`/api/futures/orders/${encodeURIComponent(symbol)}/cancel-active`, { method: 'POST' });
       const result = await response.json();
-      byId('controlStatus').className = `status ${response.ok ? 'ok' : 'error'}`;
-      byId('controlStatus').textContent = response.ok ? result.message : (result.errors?.join(' | ') || result.message);
+      setControlStatus(response.ok ? 'ok' : 'error', response.ok ? result.message : (result.errors?.join(' | ') || result.message), symbol);
       await load(true);
     });
     byId('copyLastHistory').addEventListener('click', () => {
