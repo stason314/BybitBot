@@ -2773,14 +2773,14 @@ public sealed class GridBotWorker : BackgroundService
             return;
         }
 
-        var signalPositionQuantity = await GetSignalPositionQuantityAsync(cancellationToken);
+        var signalPosition = await GetSignalPositionSnapshotAsync(cancellationToken);
         var availableBase = GetAvailableBaseBalance(state, activeOrders, wallet);
-        var quantity = instrument.RoundQuantity(decimal.Min(availableBase, signalPositionQuantity));
+        var quantity = instrument.RoundQuantity(decimal.Min(availableBase, signalPosition.Quantity));
         if (quantity <= 0m || quantity < instrument.MinOrderQty)
         {
             _logger.LogInformation(
                 "Signal sell skipped because signal-owned base inventory is insufficient. Signal quantity: {SignalQuantity}, available base: {AvailableBase}.",
-                signalPositionQuantity,
+                signalPosition.Quantity,
                 availableBase);
             return;
         }
