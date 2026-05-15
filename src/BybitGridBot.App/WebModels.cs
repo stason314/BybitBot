@@ -532,6 +532,8 @@ public sealed class FuturesPnlStatsView
 
     public decimal FeesPaid { get; init; }
 
+    public decimal FundingPaid { get; init; }
+
     public int FilledTradesCount { get; init; }
 
     public int WinningTradesCount { get; init; }

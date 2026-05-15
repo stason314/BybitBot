@@ -100,7 +100,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         var activeOrders = await _repository.GetActiveFuturesOrdersAsync(selectedSettings.Symbol, cancellationToken);
         var riskDecisions = await _repository.GetFuturesRiskDecisionsAsync(selectedSettings.Symbol, 20, cancellationToken);
         var lastPreflight = riskDecisions.FirstOrDefault(decision => string.Equals(decision.Source, "Preflight", StringComparison.OrdinalIgnoreCase));
-        var recentFills = await _repository.GetFuturesFillsAsync(selectedSettings.Symbol, 100, cancellationToken);
+        var recentFills = await _repository.GetFuturesFillsAsync(selectedSettings.Symbol, 1000, cancellationToken);
 
         return new FuturesDashboardResponse
         {
@@ -131,7 +131,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             Settings = MapSettings(selectedSettings),
             Position = position,
             PaperAccount = BuildPaperAccount(state, position, _futuresOptions.PaperInitialEquityUsdt),
-            PnlStats = BuildPnlStats(recentOrders),
+            PnlStats = BuildPnlStats(recentFills),
             TestnetSoak = BuildTestnetSoakStatus(position, activeOrders, recentOrders, recentFills, riskDecisions),
             AutoRecommendation = MapAutoRecommendation(recommendation),
             StrategyActions = StrategyActions,
@@ -1083,6 +1083,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         ['Gross Loss', formatPnl(stats.grossLoss)],
         ['Net PnL', formatPnl(stats.netPnl)],
         ['Fees', formatPnl(-Math.abs(Number(stats.feesPaid || 0)))],
+        ['Funding', formatPnl(stats.fundingPaid)],
         ['Fills', formatNumber(stats.filledTradesCount)],
         ['Win Rate %', formatNumber(stats.winRate)],
         ['Profit Factor', formatNumber(stats.profitFactor)],
@@ -1563,17 +1564,18 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         };
     }
 
-    private static FuturesPnlStatsView BuildPnlStats(IReadOnlyCollection<FuturesOrderRecord> orders)
+    private static FuturesPnlStatsView BuildPnlStats(IReadOnlyCollection<FuturesFillRecord> fills)
     {
-        var filled = orders
-            .Where(order => order.Status == OrderStatus.Filled || order.FilledQuantity > 0m)
+        var filled = fills
+            .Where(fill => fill.Quantity > 0m)
             .ToArray();
-        var realized = filled.Select(order => order.RealizedPnl).ToArray();
+        var realized = filled.Select(fill => fill.RealizedPnl).ToArray();
         var wins = realized.Where(pnl => pnl > 0m).ToArray();
         var losses = realized.Where(pnl => pnl < 0m).ToArray();
         var grossProfit = wins.Sum();
         var grossLoss = losses.Sum();
-        var fees = filled.Sum(order => order.FeePaid);
+        var fees = filled.Sum(fill => fill.Fee);
+        var funding = filled.Sum(fill => fill.Funding);
 
         return new FuturesPnlStatsView
         {
@@ -1581,6 +1583,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             GrossLoss = grossLoss,
             NetPnl = realized.Sum(),
             FeesPaid = fees,
+            FundingPaid = funding,
             FilledTradesCount = filled.Length,
             WinningTradesCount = wins.Length,
             LosingTradesCount = losses.Length,
