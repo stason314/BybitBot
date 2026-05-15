@@ -1105,6 +1105,28 @@ public sealed class GridDashboardService : IGridDashboardService
     .token { font-family: "IBM Plex Mono", monospace; font-size: 12px; }
     .table-wrap { overflow: auto; }
     .config-summary-panel { margin-bottom: 20px; }
+    .config-profit-totals {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      justify-content: flex-end;
+    }
+    .config-profit-total {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 9px 12px;
+      border-radius: 999px;
+      background: rgba(29,35,31,0.06);
+      font-size: 13px;
+      white-space: nowrap;
+    }
+    .config-profit-total span {
+      color: var(--muted);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: .08em;
+    }
     .config-table tbody tr {
       cursor: pointer;
       transition: background .18s ease;
@@ -1174,6 +1196,13 @@ public sealed class GridDashboardService : IGridDashboardService
       font-size: 28px;
       font-weight: 900;
       text-transform: capitalize;
+    }
+    .no-trade-title {
+      font-size: clamp(22px, 3vw, 28px);
+      line-height: 1.12;
+      letter-spacing: 0;
+      text-transform: none;
+      overflow-wrap: anywhere;
     }
     .regime-meta {
       display: flex;
@@ -1253,6 +1282,10 @@ public sealed class GridDashboardService : IGridDashboardService
     <section class="panel section config-summary-panel">
       <div class="section-head">
         <h2>Configs</h2>
+        <div class="config-profit-totals">
+          <div class="config-profit-total"><span>All Daily</span><strong id="allConfigsDailyProfit">-</strong></div>
+          <div class="config-profit-total"><span>All Total</span><strong id="allConfigsTotalProfit">-</strong></div>
+        </div>
       </div>
       <div class="table-wrap">
         <table class="config-table">
@@ -1271,7 +1304,7 @@ public sealed class GridDashboardService : IGridDashboardService
     <section class="panel section regime-card" id="noTradeReasonCard" hidden>
       <div>
         <div class="label">No-Trade Reason</div>
-        <div class="regime-title" id="noTradeReasonCode">-</div>
+        <div class="regime-title no-trade-title" id="noTradeReasonCode">-</div>
         <div class="subtle" id="noTradeReasonText">-</div>
         <div class="regime-meta" id="noTradeReasonMeta"></div>
       </div>
@@ -1493,7 +1526,19 @@ public sealed class GridDashboardService : IGridDashboardService
       ].join('');
     };
     const formatStatus = (status) => status === 'paused' ? 'Paused' : 'In progress';
+    const formatEnumLabel = (value) => String(value || 'Unknown')
+      .replaceAll('_', ' ')
+      .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+      .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
+      .trim();
+    const renderConfigTotals = (configs) => {
+      const dailyTotal = configs.reduce((sum, config) => sum + Number(config.dailyRealizedPnl || 0), 0);
+      const total = configs.reduce((sum, config) => sum + Number(config.totalRealizedPnl || 0), 0);
+      byId('allConfigsDailyProfit').innerHTML = formatPnl(dailyTotal);
+      byId('allConfigsTotalProfit').innerHTML = formatPnl(total);
+    };
     const renderConfigSummaries = (configs) => {
+      renderConfigTotals(configs);
       byId('configSummaryRows').innerHTML = configs.length === 0
         ? `<tr><td colspan="7">No configs yet.</td></tr>`
         : configs.map(config => `
@@ -1910,7 +1955,7 @@ public sealed class GridDashboardService : IGridDashboardService
       const noTradeReason = data.lastNoTradeReason;
       byId('noTradeReasonCard').hidden = !noTradeReason;
       if (noTradeReason) {
-        byId('noTradeReasonCode').textContent = noTradeReason.code;
+        byId('noTradeReasonCode').textContent = formatEnumLabel(noTradeReason.code);
         byId('noTradeReasonText').textContent = noTradeReason.reason;
         byId('noTradeReasonTime').textContent = formatMinutesAgo(noTradeReason.minutesAgo);
         byId('noTradeReasonMeta').innerHTML = [
@@ -1924,7 +1969,7 @@ public sealed class GridDashboardService : IGridDashboardService
         ? `<tr><td colspan="5">No no-trade reasons yet.</td></tr>`
         : noTradeHistory.map(item => `
             <tr>
-              <td>${escapeHtml(item.code)}</td>
+              <td>${escapeHtml(formatEnumLabel(item.code))}</td>
               <td>${escapeHtml(item.strategyType || data.settings.strategyType)}</td>
               <td>${escapeHtml(item.reason)}</td>
               <td>${formatMinutesAgo(item.minutesAgo)}</td>

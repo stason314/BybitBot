@@ -267,14 +267,14 @@ public sealed class GridOptions
 
     [ConfigurationKeyName("PAPER_INITIAL_USDT")]
     [Range(typeof(decimal), "0", "999999999")]
-    public decimal PaperInitialUsdt { get; init; } = 1000m;
+    public decimal PaperInitialUsdt { get; init; } = 100m;
 
     [ConfigurationKeyName("PAPER_INITIAL_BASE_ASSET_QUANTITY")]
     [Range(typeof(decimal), "0", "999999999")]
     public decimal PaperInitialBaseAssetQuantity { get; init; } = 0m;
 
     [ConfigurationKeyName("PAPER_BOOTSTRAP_INVENTORY_ENABLED")]
-    public bool PaperBootstrapInventoryEnabled { get; init; } = true;
+    public bool PaperBootstrapInventoryEnabled { get; init; } = false;
 
     [ConfigurationKeyName("CANDLE_INTERVAL")]
     public string CandleInterval { get; init; } = "60";
