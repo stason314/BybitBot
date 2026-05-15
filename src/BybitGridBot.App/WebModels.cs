@@ -24,6 +24,8 @@ public sealed class DashboardResponse
 
     public required IReadOnlyList<DashboardOrderItem> ActiveOrders { get; init; }
 
+    public required IReadOnlyList<DashboardStrategyPerformanceItem> PerformanceByStrategy { get; init; }
+
     public required IReadOnlyList<decimal> GridLevels { get; init; }
 
     public DateTimeOffset GeneratedAt { get; init; }
@@ -228,6 +230,29 @@ public sealed class DashboardOrderItem
     public DateTimeOffset UpdatedAt { get; init; }
 
     public DateTimeOffset? FilledAt { get; init; }
+}
+
+public sealed class DashboardStrategyPerformanceItem
+{
+    public required string Strategy { get; init; }
+
+    public decimal GrossPnl { get; init; }
+
+    public decimal FeesPaid { get; init; }
+
+    public decimal NetPnl { get; init; }
+
+    public int FilledTradesCount { get; init; }
+
+    public int ClosedTradesCount { get; init; }
+
+    public int ActiveOrdersCount { get; init; }
+
+    public decimal WinRate { get; init; }
+
+    public decimal AverageWin { get; init; }
+
+    public decimal AverageLoss { get; init; }
 }
 
 public sealed class UpdateSettingsRequest
