@@ -1148,7 +1148,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         Leverage = position.Leverage,
         UnrealizedPnl = position.UnrealizedPnl,
         RealizedPnl = position.RealizedPnl,
-        Funding = position.Funding,
+        Funding = 0m,
         PositionIdx = position.PositionIdx,
         UpdatedAt = position.UpdatedAt
     };
