@@ -43,6 +43,38 @@ public sealed class FuturesAutoConfigRecommenderTests
         Assert.Equal(FuturesStrategyType.ReduceOnly, recommendation.StrategyType);
     }
 
+    [Fact]
+    public void Recommend_DoesNotCompoundProfileLimits_AfterApply()
+    {
+        var recommender = new FuturesAutoConfigRecommender();
+        var candles = Candles(start: 50000m, step: 0m, count: 80);
+        var first = recommender.Recommend(Settings(), candles, hasOpenPosition: false);
+
+        var appliedSettings = new FuturesBotSettings
+        {
+            Symbol = "BTCUSDT",
+            Category = "linear",
+            StrategyType = first.StrategyType,
+            StrategyConfigJson = first.StrategyConfigJson,
+            Leverage = first.Leverage,
+            MarginMode = FuturesMarginMode.Isolated,
+            PositionMode = FuturesPositionMode.OneWay,
+            Direction = FuturesDirection.LongOnly,
+            MaxNotionalUsdt = first.MaxNotionalUsdt,
+            MaxMarginUsdt = first.MaxMarginUsdt,
+            StopLossPercent = first.StopLossPercent,
+            TakeProfitPercent = first.TakeProfitPercent,
+            LiquidationBufferPercent = 15m,
+            ReduceOnlyEnabled = true
+        };
+
+        var second = recommender.Recommend(appliedSettings, candles, hasOpenPosition: false);
+
+        Assert.Equal(FuturesStrategyType.GridLongOnly, first.StrategyType);
+        Assert.Equal(first.MaxNotionalUsdt, second.MaxNotionalUsdt);
+        Assert.Equal(first.MaxMarginUsdt, second.MaxMarginUsdt);
+    }
+
     private static FuturesBotSettings Settings() => new()
     {
         Symbol = "BTCUSDT",

@@ -44,8 +44,11 @@ public sealed class FuturesAutoConfigRecommender
         var recommendedLeverage = RecommendLeverage(currentSettings.Leverage, atrPercent);
         var stopLossPercent = RecommendStopLoss(currentSettings.StopLossPercent, atrPercent);
         var takeProfitPercent = decimal.Max(stopLossPercent * 1.8m, currentSettings.TakeProfitPercent);
-        var maxNotional = RecommendNotional(currentSettings, atrPercent);
-        var maxMargin = recommendedLeverage > 0m ? decimal.Min(currentSettings.MaxMarginUsdt, maxNotional / recommendedLeverage) : currentSettings.MaxMarginUsdt;
+        var exposureMultiplier = RecommendExposureMultiplier(atrPercent);
+        var maxNotional = decimal.Max(1m, currentSettings.MaxNotionalUsdt);
+        var maxMargin = recommendedLeverage > 0m
+            ? decimal.Min(currentSettings.MaxMarginUsdt, maxNotional / recommendedLeverage)
+            : currentSettings.MaxMarginUsdt;
 
         if (IsDanger(movePercent, drawdownPercent, atrPercent))
         {
@@ -58,7 +61,8 @@ public sealed class FuturesAutoConfigRecommender
                 maxNotional,
                 maxMargin,
                 stopLossPercent,
-                takeProfitPercent);
+                takeProfitPercent,
+                entryNotionalMultiplier: 0.25m * exposureMultiplier);
         }
 
         if (movePercent >= 1.2m && drawdownPercent <= 2m)
@@ -72,7 +76,8 @@ public sealed class FuturesAutoConfigRecommender
                 maxNotional,
                 maxMargin,
                 stopLossPercent,
-                takeProfitPercent);
+                takeProfitPercent,
+                entryNotionalMultiplier: 0.25m * exposureMultiplier);
         }
 
         if (lastPrice > high - (atr * 0.5m) && movePercent > 0.4m)
@@ -83,10 +88,11 @@ public sealed class FuturesAutoConfigRecommender
                 "Potential upside breakout. Use long-only Breakout with reduced notional and stop-loss.",
                 metrics,
                 recommendedLeverage,
-                maxNotional * 0.75m,
-                maxMargin * 0.75m,
+                maxNotional,
+                maxMargin,
                 stopLossPercent,
-                takeProfitPercent);
+                takeProfitPercent,
+                entryNotionalMultiplier: 0.1875m * exposureMultiplier);
         }
 
         return Build(
@@ -95,10 +101,11 @@ public sealed class FuturesAutoConfigRecommender
             "Range-like futures market. Use long-only grid with conservative leverage.",
             metrics,
             decimal.Min(recommendedLeverage, 2m),
-            maxNotional * 0.75m,
-            maxMargin * 0.75m,
+            maxNotional,
+            maxMargin,
             stopLossPercent,
-            takeProfitPercent);
+            takeProfitPercent,
+            entryNotionalMultiplier: 0.1875m * exposureMultiplier);
     }
 
     private static FuturesAutoConfigRecommendation Build(
@@ -110,7 +117,8 @@ public sealed class FuturesAutoConfigRecommender
         decimal? maxNotionalUsdt = null,
         decimal? maxMarginUsdt = null,
         decimal? stopLossPercent = null,
-        decimal? takeProfitPercent = null)
+        decimal? takeProfitPercent = null,
+        decimal entryNotionalMultiplier = 0.25m)
     {
         var resolvedLeverage = decimal.Max(1m, leverage ?? currentSettings.Leverage);
         var resolvedMaxNotional = decimal.Max(1m, maxNotionalUsdt ?? currentSettings.MaxNotionalUsdt);
@@ -132,7 +140,13 @@ public sealed class FuturesAutoConfigRecommender
             TakeProfitPercent = decimal.Round(resolvedTakeProfit, 4, MidpointRounding.AwayFromZero),
             LiquidationBufferPercent = currentSettings.LiquidationBufferPercent,
             ReduceOnlyEnabled = true,
-            StrategyConfigJson = BuildStrategyConfig(strategyType, resolvedMaxNotional, resolvedStopLoss, resolvedTakeProfit, metrics),
+            StrategyConfigJson = BuildStrategyConfig(
+                strategyType,
+                resolvedMaxNotional,
+                resolvedStopLoss,
+                resolvedTakeProfit,
+                metrics,
+                entryNotionalMultiplier),
             Metrics = metrics
         };
     }
@@ -142,12 +156,13 @@ public sealed class FuturesAutoConfigRecommender
         decimal maxNotionalUsdt,
         decimal stopLossPercent,
         decimal takeProfitPercent,
-        FuturesAutoConfigMetrics metrics)
+        FuturesAutoConfigMetrics metrics,
+        decimal entryNotionalMultiplier)
     {
         var config = new
         {
             strategyType = strategyType.ToString(),
-            entryNotionalUsdt = decimal.Round(maxNotionalUsdt * 0.25m, 4, MidpointRounding.AwayFromZero),
+            entryNotionalUsdt = decimal.Round(maxNotionalUsdt * entryNotionalMultiplier, 4, MidpointRounding.AwayFromZero),
             stopLossPercent = decimal.Round(stopLossPercent, 4, MidpointRounding.AwayFromZero),
             takeProfitPercent = decimal.Round(takeProfitPercent, 4, MidpointRounding.AwayFromZero),
             support = metrics.Support,
@@ -178,17 +193,13 @@ public sealed class FuturesAutoConfigRecommender
         return decimal.Max(currentStopLossPercent <= 0m ? 2m : currentStopLossPercent, atrStop);
     }
 
-    private static decimal RecommendNotional(FuturesBotSettings currentSettings, decimal atrPercent)
-    {
-        var multiplier = atrPercent switch
+    private static decimal RecommendExposureMultiplier(decimal atrPercent) =>
+        atrPercent switch
         {
             >= 4m => 0.4m,
             >= 2m => 0.65m,
             _ => 1m
         };
-
-        return decimal.Max(1m, currentSettings.MaxNotionalUsdt * multiplier);
-    }
 
     private static bool IsDanger(decimal movePercent, decimal drawdownPercent, decimal atrPercent) =>
         movePercent <= -1.5m || drawdownPercent >= 5m || atrPercent >= 6m;
