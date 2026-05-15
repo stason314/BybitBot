@@ -125,6 +125,7 @@ public sealed class SqliteGridRepository : IGridRepository
                 take_profit_percent TEXT NOT NULL,
                 liquidation_buffer_percent TEXT NOT NULL,
                 reduce_only_enabled INTEGER NOT NULL,
+                aggressive_mode_enabled INTEGER NOT NULL DEFAULT 0,
                 updated_at TEXT NOT NULL
             );
 
@@ -421,6 +422,7 @@ public sealed class SqliteGridRepository : IGridRepository
         await EnsureFuturesStateColumnsAsync(connection, "bot_state", cancellationToken);
         await EnsureAggressiveModeStateColumnsAsync(connection, "bot_state", cancellationToken);
         await EnsureColumnAsync(connection, "futures_settings", "enabled", "INTEGER NOT NULL DEFAULT 1", cancellationToken);
+        await EnsureColumnAsync(connection, "futures_settings", "aggressive_mode_enabled", "INTEGER NOT NULL DEFAULT 0", cancellationToken);
         await EnsureColumnAsync(connection, "futures_fills", "exec_id", "TEXT NULL", cancellationToken);
         await EnsureColumnAsync(connection, "futures_fills", "exec_type", "TEXT NOT NULL DEFAULT 'Trade'", cancellationToken);
         await EnsureColumnAsync(connection, "futures_positions", "funding", "TEXT NOT NULL DEFAULT '0'", cancellationToken);
@@ -555,7 +557,7 @@ public sealed class SqliteGridRepository : IGridRepository
         const string sql = """
             SELECT enabled, symbol, category, strategy_type, strategy_config_json, leverage, margin_mode, position_mode,
                    direction, max_notional_usdt, max_margin_usdt, stop_loss_percent, take_profit_percent,
-                   liquidation_buffer_percent, reduce_only_enabled, updated_at
+                   liquidation_buffer_percent, reduce_only_enabled, aggressive_mode_enabled, updated_at
             FROM futures_settings
             WHERE settings_id = $settings_id
             LIMIT 1;
@@ -580,7 +582,7 @@ public sealed class SqliteGridRepository : IGridRepository
         const string sql = """
             SELECT enabled, symbol, category, strategy_type, strategy_config_json, leverage, margin_mode, position_mode,
                    direction, max_notional_usdt, max_margin_usdt, stop_loss_percent, take_profit_percent,
-                   liquidation_buffer_percent, reduce_only_enabled, updated_at
+                   liquidation_buffer_percent, reduce_only_enabled, aggressive_mode_enabled, updated_at
             FROM futures_settings
             ORDER BY symbol;
             """;
@@ -605,12 +607,12 @@ public sealed class SqliteGridRepository : IGridRepository
             INSERT INTO futures_settings (
                 settings_id, enabled, symbol, category, strategy_type, strategy_config_json, leverage, margin_mode, position_mode,
                 direction, max_notional_usdt, max_margin_usdt, stop_loss_percent, take_profit_percent,
-                liquidation_buffer_percent, reduce_only_enabled, updated_at
+                liquidation_buffer_percent, reduce_only_enabled, aggressive_mode_enabled, updated_at
             )
             VALUES (
                 $settings_id, $enabled, $symbol, $category, $strategy_type, $strategy_config_json, $leverage, $margin_mode, $position_mode,
                 $direction, $max_notional_usdt, $max_margin_usdt, $stop_loss_percent, $take_profit_percent,
-                $liquidation_buffer_percent, $reduce_only_enabled, $updated_at
+                $liquidation_buffer_percent, $reduce_only_enabled, $aggressive_mode_enabled, $updated_at
             )
             ON CONFLICT(settings_id) DO UPDATE SET
                 enabled = excluded.enabled,
@@ -628,6 +630,7 @@ public sealed class SqliteGridRepository : IGridRepository
                 take_profit_percent = excluded.take_profit_percent,
                 liquidation_buffer_percent = excluded.liquidation_buffer_percent,
                 reduce_only_enabled = excluded.reduce_only_enabled,
+                aggressive_mode_enabled = excluded.aggressive_mode_enabled,
                 updated_at = excluded.updated_at;
             """;
 
@@ -650,6 +653,7 @@ public sealed class SqliteGridRepository : IGridRepository
         command.Parameters.AddWithValue("$take_profit_percent", FormatDecimal(settings.TakeProfitPercent));
         command.Parameters.AddWithValue("$liquidation_buffer_percent", FormatDecimal(settings.LiquidationBufferPercent));
         command.Parameters.AddWithValue("$reduce_only_enabled", settings.ReduceOnlyEnabled);
+        command.Parameters.AddWithValue("$aggressive_mode_enabled", settings.AggressiveModeEnabled);
         command.Parameters.AddWithValue("$updated_at", settings.UpdatedAt.ToString("O", CultureInfo.InvariantCulture));
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
@@ -1635,7 +1639,8 @@ public sealed class SqliteGridRepository : IGridRepository
             TakeProfitPercent = ParseDecimal(reader.GetString(12)),
             LiquidationBufferPercent = ParseDecimal(reader.GetString(13)),
             ReduceOnlyEnabled = reader.GetBoolean(14),
-            UpdatedAt = DateTimeOffset.Parse(reader.GetString(15), CultureInfo.InvariantCulture)
+            AggressiveModeEnabled = reader.GetBoolean(15),
+            UpdatedAt = DateTimeOffset.Parse(reader.GetString(16), CultureInfo.InvariantCulture)
         };
     }
 

@@ -1,3 +1,4 @@
+using System.Text.Json;
 using BybitGridBot.Domain;
 
 namespace BybitGridBot.Strategy;
@@ -10,7 +11,7 @@ internal static class FuturesStrategyIntentFactory
         FuturesInstrumentRules instrument)
     {
         var price = instrument.RoundPrice(currentPrice);
-        var notional = settings.MaxNotionalUsdt * 0.25m;
+        var notional = ResolveEntryNotional(settings);
         var quantity = instrument.RoundQuantity(notional / price);
         var stopLossPrice = instrument.RoundPrice(price * (1m - settings.StopLossPercent / 100m));
         var takeProfitPrice = instrument.RoundPrice(price * (1m + settings.TakeProfitPercent / 100m));
@@ -51,4 +52,32 @@ internal static class FuturesStrategyIntentFactory
 
     private static decimal EstimateLongLiquidationPrice(decimal entryPrice, decimal leverage) =>
         leverage > 0m ? decimal.Max(0m, entryPrice * (1m - (1m / leverage))) : 0m;
+
+    private static decimal ResolveEntryNotional(FuturesBotSettings settings)
+    {
+        var fallbackMultiplier = settings.AggressiveModeEnabled ? 0.375m : 0.25m;
+        var fallback = settings.MaxNotionalUsdt * fallbackMultiplier;
+        if (string.IsNullOrWhiteSpace(settings.StrategyConfigJson))
+        {
+            return fallback;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(settings.StrategyConfigJson);
+            if (document.RootElement.TryGetProperty("entryNotionalUsdt", out var property) &&
+                property.ValueKind == JsonValueKind.Number &&
+                property.TryGetDecimal(out var configured) &&
+                configured > 0m)
+            {
+                return decimal.Min(settings.MaxNotionalUsdt, configured);
+            }
+        }
+        catch (JsonException)
+        {
+            return fallback;
+        }
+
+        return fallback;
+    }
 }

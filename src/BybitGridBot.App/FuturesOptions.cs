@@ -36,6 +36,9 @@ public sealed class FuturesOptions
     [Range(typeof(decimal), "0.00000001", "999999999")]
     public decimal PaperInitialEquityUsdt { get; init; } = 1000m;
 
+    [ConfigurationKeyName("FUTURES_AGGRESSIVE_MODE_ENABLED")]
+    public bool AggressiveModeEnabled { get; init; } = false;
+
     [ConfigurationKeyName("MARGIN_MODE")]
     public string MarginMode { get; init; } = "isolated";
 

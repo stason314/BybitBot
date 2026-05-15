@@ -137,6 +137,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             PnlStats = BuildPnlStats(recentFills),
             TestnetSoak = BuildTestnetSoakStatus(position, activeOrders, recentOrders, recentFills, riskDecisions),
             UserStreamStatus = BuildUserStreamStatus(),
+            AggressiveMode = BuildAggressiveModeStatus(selectedSettings, recentFills, riskDecisions),
             AutoRecommendation = MapAutoRecommendation(recommendation),
             StrategyActions = StrategyActions,
             ActiveOrders = activeOrders.Select(MapOrder).ToArray(),
@@ -270,6 +271,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             TakeProfitPercent = request.TakeProfitPercent,
             LiquidationBufferPercent = request.LiquidationBufferPercent,
             ReduceOnlyEnabled = request.ReduceOnlyEnabled,
+            AggressiveModeEnabled = request.AggressiveModeEnabled,
             UpdatedAt = DateTimeOffset.UtcNow
         };
 
@@ -334,6 +336,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             TakeProfitPercent = current.TakeProfitPercent,
             LiquidationBufferPercent = current.LiquidationBufferPercent,
             ReduceOnlyEnabled = current.ReduceOnlyEnabled,
+            AggressiveModeEnabled = current.AggressiveModeEnabled,
             UpdatedAt = DateTimeOffset.UtcNow
         };
     }
@@ -461,7 +464,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         }
 
         var position = await ResolvePositionSnapshotAsync(settings, cancellationToken);
-        if (position.Size > 0m)
+        if (position.Size > 0m && !settings.AggressiveModeEnabled)
         {
             return new UpdateSettingsResponse
             {
@@ -518,10 +521,34 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         };
 
         var state = await EnsurePaperStateAsync(settings, price, cancellationToken);
+        var aggressiveBlockReason = await GetAggressiveEntryBlockReasonAsync(settings, position, cancellationToken);
+        if (aggressiveBlockReason is not null)
+        {
+            await _repository.AddFuturesRiskDecisionAsync(new FuturesRiskDecisionRecord
+            {
+                Symbol = settings.Symbol,
+                Source = "AggressiveGuard",
+                OrderLinkId = intent.OrderLinkId,
+                Action = intent.Action,
+                IsAllowed = false,
+                Reason = aggressiveBlockReason,
+                Severity = RiskSeverity.Warning.ToString(),
+                SuggestedAction = RiskSuggestedAction.BlockNewOrders.ToString(),
+                CreatedAt = DateTimeOffset.UtcNow
+            }, cancellationToken);
+            return new UpdateSettingsResponse
+            {
+                Success = false,
+                Symbol = normalizedSymbol,
+                Message = "Paper aggressive entry blocked.",
+                Errors = [aggressiveBlockReason]
+            };
+        }
+
         var openPositionCount = await CountOpenFuturesPositionsAsync(cancellationToken);
         var riskDecision = _riskManager.Evaluate(new FuturesRiskEvaluationContext
         {
-            RiskOptions = _riskOptions,
+            RiskOptions = ResolveProfileRiskOptions(settings),
             Intent = intent,
             Position = position,
             MarkPrice = price,
@@ -536,7 +563,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         await _repository.AddFuturesRiskDecisionAsync(new FuturesRiskDecisionRecord
         {
             Symbol = settings.Symbol,
-            Source = "PaperTestEntry",
+            Source = position.Size > 0m ? "AggressiveScaleIn" : "PaperTestEntry",
             OrderLinkId = intent.OrderLinkId,
             Action = intent.Action,
             IsAllowed = riskDecision.IsAllowed,
@@ -573,7 +600,9 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         {
             Success = true,
             Symbol = normalizedSymbol,
-            Message = $"Paper test long opened. Notional: {intent.NotionalUsdt:F4} USDT, qty: {intent.Quantity:F8}."
+            Message = position.Size > 0m
+                ? $"Paper aggressive scale-in opened. Notional: {intent.NotionalUsdt:F4} USDT, qty: {intent.Quantity:F8}."
+                : $"Paper test long opened. Notional: {intent.NotionalUsdt:F4} USDT, qty: {intent.Quantity:F8}."
         };
     }
 
@@ -846,6 +875,20 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
 
     <section class="panel" style="margin-bottom:18px;">
       <div class="actions" style="justify-content:space-between;">
+        <h2 style="margin:0;">Aggressive Mode</h2>
+        <div class="actions">
+          <select id="aggressiveModeEnabled" name="aggressiveModeEnabled">
+            <option value="false">Conservative</option>
+            <option value="true">Aggressive</option>
+          </select>
+        </div>
+      </div>
+      <div class="stats" id="aggressiveModeStats" style="margin-bottom:0;"></div>
+      <div class="subtle" id="aggressiveModeReason" style="margin-top:12px;"></div>
+    </section>
+
+    <section class="panel" style="margin-bottom:18px;">
+      <div class="actions" style="justify-content:space-between;">
         <h2 style="margin:0;">Testnet Soak</h2>
         <span class="subtle">Real-fill readiness and reconciliation signals</span>
       </div>
@@ -944,7 +987,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
 
   <script>
     const byId = (id) => document.getElementById(id);
-    const fields = ['symbol','category','enabled','strategyType','strategyConfigJson','leverage','marginMode','positionMode','direction','maxNotionalUsdt','maxMarginUsdt','stopLossPercent','takeProfitPercent','liquidationBufferPercent','reduceOnlyEnabled'];
+    const fields = ['symbol','category','enabled','strategyType','strategyConfigJson','leverage','marginMode','positionMode','direction','maxNotionalUsdt','maxMarginUsdt','stopLossPercent','takeProfitPercent','liquidationBufferPercent','reduceOnlyEnabled','aggressiveModeEnabled'];
     const defaults = {
       symbol: 'BTCUSDT',
       category: 'linear',
@@ -960,7 +1003,8 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
       stopLossPercent: 2,
       takeProfitPercent: 4,
       liquidationBufferPercent: 15,
-      reduceOnlyEnabled: true
+      reduceOnlyEnabled: true,
+      aggressiveModeEnabled: false
     };
     let selectedSymbol = new URLSearchParams(window.location.search).get('symbol')?.toUpperCase() || null;
     let creating = false;
@@ -1021,6 +1065,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
       byId('takeProfitPercent').value = settings.takeProfitPercent;
       byId('liquidationBufferPercent').value = settings.liquidationBufferPercent;
       byId('reduceOnlyEnabled').value = String(settings.reduceOnlyEnabled);
+      byId('aggressiveModeEnabled').value = String(settings.aggressiveModeEnabled);
     };
     const readPayload = () => ({
       symbol: byId('symbol').value,
@@ -1037,7 +1082,8 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
       stopLossPercent: Number(byId('stopLossPercent').value),
       takeProfitPercent: Number(byId('takeProfitPercent').value),
       liquidationBufferPercent: Number(byId('liquidationBufferPercent').value),
-      reduceOnlyEnabled: byId('reduceOnlyEnabled').value === 'true'
+      reduceOnlyEnabled: byId('reduceOnlyEnabled').value === 'true',
+      aggressiveModeEnabled: byId('aggressiveModeEnabled').value === 'true'
     });
     const renderTabs = (profiles) => {
       byId('profileTabs').innerHTML = profiles.length === 0 && !creating
@@ -1189,6 +1235,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
       pnlStats: latest?.pnlStats,
       testnetSoak: latest?.testnetSoak,
       userStreamStatus: latest?.userStreamStatus,
+      aggressiveMode: latest?.aggressiveMode,
       position: latest?.position,
       activeOrders: latest?.activeOrders || [],
       recentOrders: recentOrdersForHours(hours),
@@ -1293,6 +1340,18 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         ['Last Error', stream.lastError || '-']
       ].map(([label, value]) => `<div class="stat"><div class="label">${label}</div><div class="value">${escapeHtml(value)}</div></div>`).join('');
     };
+    const renderAggressiveMode = (mode) => {
+      byId('aggressiveModeStats').innerHTML = [
+        ['Mode', mode.enabled ? 'aggressive' : 'conservative'],
+        ['Effective', mode.effective ? 'yes' : 'no'],
+        ['Entries 1h', `${formatNumber(mode.entriesLastHour)} / ${formatNumber(mode.maxEntriesPerHour)}`],
+        ['Min Gap Sec', formatNumber(mode.minSecondsBetweenEntries)],
+        ['Loss Streak', `${formatNumber(mode.consecutiveLosses)} / ${formatNumber(mode.maxConsecutiveLosses)}`],
+        ['Guard', mode.guardStatus || '-']
+      ].map(([label, value]) => `<div class="stat"><div class="label">${label}</div><div class="value">${escapeHtml(value)}</div></div>`).join('');
+      byId('aggressiveModeReason').textContent = mode.lastBlockReason || '-';
+      byId('aggressiveModeEnabled').value = String(Boolean(latest?.settings?.aggressiveModeEnabled));
+    };
     const renderAutoRecommendation = (recommendation) => {
       byId('autoRecommendationReason').textContent = recommendation.reason || '-';
       byId('autoRecommendationStats').innerHTML = [
@@ -1322,6 +1381,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
       renderPosition(data);
       renderPaperAccount(data.paperAccount || {}, data.pnlStats || {});
       renderRuntime(data);
+      renderAggressiveMode(data.aggressiveMode || {});
       renderOrders(data.activeOrders || []);
       renderRecentOrders(data.recentOrders || []);
       renderRiskDecisions(data.riskDecisions || []);
@@ -1335,6 +1395,21 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
     };
 
     fields.forEach(id => byId(id).addEventListener('input', () => { dirty = true; }));
+    byId('aggressiveModeEnabled').addEventListener('change', async () => {
+      if (!latest?.settings) return;
+      const payload = { ...latest.settings, aggressiveModeEnabled: byId('aggressiveModeEnabled').value === 'true' };
+      const response = await fetch('/api/futures/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const result = await response.json();
+      setControlStatus(response.ok ? 'ok' : 'error', response.ok ? result.message : (result.errors?.join(' | ') || result.message), payload.symbol);
+      if (response.ok) {
+        dirty = false;
+        await load(true);
+      }
+    });
     byId('newProfile').addEventListener('click', () => {
       creating = true;
       selectedSymbol = null;
@@ -1519,7 +1594,8 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         StopLossPercent = settings.StopLossPercent,
         TakeProfitPercent = settings.TakeProfitPercent,
         LiquidationBufferPercent = settings.LiquidationBufferPercent,
-        ReduceOnlyEnabled = settings.ReduceOnlyEnabled
+        ReduceOnlyEnabled = settings.ReduceOnlyEnabled,
+        AggressiveModeEnabled = settings.AggressiveModeEnabled
     };
 
     private static FuturesPositionView MapPosition(FuturesBotSettings settings, BybitPositionSnapshot position) => new()
@@ -1651,6 +1727,56 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             LastRiskSource = lastRisk?.Source ?? "-",
             LastRiskReason = lastRisk?.Reason ?? "-"
         };
+    }
+
+    private FuturesAggressiveModeView BuildAggressiveModeStatus(
+        FuturesBotSettings settings,
+        IReadOnlyCollection<FuturesFillRecord> fills,
+        IReadOnlyCollection<FuturesRiskDecisionRecord> riskDecisions)
+    {
+        var cutoff = DateTimeOffset.UtcNow.AddHours(-1);
+        var entriesLastHour = fills.Count(fill =>
+            fill.Action == FuturesTradeAction.OpenLong &&
+            fill.CreatedAt >= cutoff);
+        var consecutiveLosses = CountConsecutiveLosingExits(fills);
+        var lastBlock = riskDecisions
+            .Where(decision => !decision.IsAllowed)
+            .OrderByDescending(decision => decision.CreatedAt)
+            .FirstOrDefault();
+        return new FuturesAggressiveModeView
+        {
+            Enabled = settings.AggressiveModeEnabled,
+            Effective = settings.AggressiveModeEnabled && _appOptions.TradingMode == TradingMode.Paper,
+            PaperOnly = true,
+            EntriesLastHour = entriesLastHour,
+            MaxEntriesPerHour = _riskOptions.AggressiveMaxOrdersPerHour,
+            MinSecondsBetweenEntries = _riskOptions.AggressiveMinSecondsBetweenEntries,
+            ConsecutiveLosses = consecutiveLosses,
+            MaxConsecutiveLosses = _riskOptions.AggressiveMaxConsecutiveLosses,
+            GuardStatus = lastBlock is null ? "allowed" : "blocked",
+            LastBlockReason = lastBlock?.Reason ?? "-"
+        };
+    }
+
+    private static int CountConsecutiveLosingExits(IReadOnlyCollection<FuturesFillRecord> fills)
+    {
+        var count = 0;
+        foreach (var fill in fills.OrderByDescending(fill => fill.CreatedAt))
+        {
+            if (fill.Action is not (FuturesTradeAction.CloseLong or FuturesTradeAction.ReduceOnlyClose))
+            {
+                continue;
+            }
+
+            if (fill.RealizedPnl >= 0m)
+            {
+                break;
+            }
+
+            count++;
+        }
+
+        return count;
     }
 
     private FuturesUserStreamStatusView BuildUserStreamStatus()
@@ -1843,6 +1969,95 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         return count;
     }
 
+    private async Task<string?> GetAggressiveEntryBlockReasonAsync(
+        FuturesBotSettings settings,
+        FuturesPositionSnapshot position,
+        CancellationToken cancellationToken)
+    {
+        if (position.Size <= 0m)
+        {
+            return null;
+        }
+
+        if (!settings.AggressiveModeEnabled)
+        {
+            return "Futures scale-in requires aggressive mode.";
+        }
+
+        if (_appOptions.TradingMode != TradingMode.Paper)
+        {
+            return "Futures aggressive scale-in is paper-only until testnet soak validates the lifecycle.";
+        }
+
+        var fills = await _repository.GetFuturesFillsAsync(settings.Symbol, 1000, cancellationToken);
+        var now = DateTimeOffset.UtcNow;
+        if (_riskOptions.AggressiveMaxOrdersPerHour > 0)
+        {
+            var cutoff = now.AddHours(-1);
+            var entriesLastHour = fills.Count(fill =>
+                fill.Action == FuturesTradeAction.OpenLong &&
+                fill.CreatedAt >= cutoff);
+            if (entriesLastHour >= _riskOptions.AggressiveMaxOrdersPerHour)
+            {
+                return "FUTURES_AGGRESSIVE_MAX_ORDERS_PER_HOUR limit reached.";
+            }
+        }
+
+        if (_riskOptions.AggressiveMinSecondsBetweenEntries > 0)
+        {
+            var lastEntry = fills
+                .Where(fill => fill.Action == FuturesTradeAction.OpenLong)
+                .OrderByDescending(fill => fill.CreatedAt)
+                .FirstOrDefault();
+            if (lastEntry is not null &&
+                now - lastEntry.CreatedAt < TimeSpan.FromSeconds(_riskOptions.AggressiveMinSecondsBetweenEntries))
+            {
+                return "FUTURES_AGGRESSIVE_MIN_SECONDS_BETWEEN_ENTRIES is active.";
+            }
+        }
+
+        if (_riskOptions.AggressiveMaxConsecutiveLosses > 0 &&
+            CountConsecutiveLosingExits(fills) >= _riskOptions.AggressiveMaxConsecutiveLosses)
+        {
+            return "FUTURES_AGGRESSIVE_MAX_CONSECUTIVE_LOSSES limit reached.";
+        }
+
+        return null;
+    }
+
+    private FuturesRiskOptions ResolveProfileRiskOptions(FuturesBotSettings settings) => new()
+    {
+        MaxNotionalUsdt = MinPositive(_riskOptions.MaxNotionalUsdt, settings.MaxNotionalUsdt),
+        MaxMarginUsdt = MinPositive(_riskOptions.MaxMarginUsdt, settings.MaxMarginUsdt),
+        MaxLeverage = _riskOptions.MaxLeverage,
+        MinLiquidationBufferPercent = _riskOptions.MinLiquidationBufferPercent,
+        MaxFundingCostUsdt = _riskOptions.MaxFundingCostUsdt,
+        MaxDailyLossUsdt = _riskOptions.MaxDailyLossUsdt,
+        MaxDailyLossEquityPercent = _riskOptions.MaxDailyLossEquityPercent,
+        MaxDrawdownEquityPercent = _riskOptions.MaxDrawdownEquityPercent,
+        MaxOpenPositions = _riskOptions.MaxOpenPositions,
+        AggressiveMaxOrdersPerHour = _riskOptions.AggressiveMaxOrdersPerHour,
+        AggressiveMinSecondsBetweenEntries = _riskOptions.AggressiveMinSecondsBetweenEntries,
+        AggressiveMaxConsecutiveLosses = _riskOptions.AggressiveMaxConsecutiveLosses,
+        EmergencyPause = _riskOptions.EmergencyPause,
+        StopLossRequired = _riskOptions.StopLossRequired
+    };
+
+    private static decimal MinPositive(decimal left, decimal right)
+    {
+        if (left <= 0m)
+        {
+            return Math.Max(0m, right);
+        }
+
+        if (right <= 0m)
+        {
+            return left;
+        }
+
+        return Math.Min(left, right);
+    }
+
     private static FuturesPositionSnapshot MapStateToSnapshot(FuturesBotSettings settings, BotState? state)
     {
         if (state is null)
@@ -1956,6 +2171,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         TakeProfitPercent = recommendation.TakeProfitPercent,
         LiquidationBufferPercent = recommendation.LiquidationBufferPercent,
         ReduceOnlyEnabled = recommendation.ReduceOnlyEnabled,
+        AggressiveModeEnabled = currentSettings.AggressiveModeEnabled,
         UpdatedAt = DateTimeOffset.UtcNow
     };
 
@@ -1975,6 +2191,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         LiquidationBufferPercent = options.MinLiquidationBufferPercent,
         StopLossPercent = options.StopLossRequired ? 2m : 0m,
         ReduceOnlyEnabled = true,
+        AggressiveModeEnabled = options.AggressiveModeEnabled,
         UpdatedAt = DateTimeOffset.UtcNow
     };
 

@@ -193,9 +193,21 @@ public sealed class FuturesBotWorker : BackgroundService
                 continue;
             }
 
+            var aggressiveBlockReason = await GetAggressiveEntryBlockReasonAsync(settings, position, intent, cancellationToken);
+            if (aggressiveBlockReason is not null)
+            {
+                await RecordAggressiveGuardDecisionAsync(settings.Symbol, intent, aggressiveBlockReason, cancellationToken);
+                _logger.LogInformation(
+                    "Futures aggressive guard blocked intent for {Symbol}. Action: {Action}. Reason: {Reason}",
+                    settings.Symbol,
+                    intent.Action,
+                    aggressiveBlockReason);
+                continue;
+            }
+
             var riskDecision = _riskManager.Evaluate(new FuturesRiskEvaluationContext
             {
-                RiskOptions = _riskOptions,
+                RiskOptions = ResolveProfileRiskOptions(settings),
                 Intent = intent,
                 Position = position,
                 MarkPrice = currentPrice,
@@ -270,7 +282,7 @@ public sealed class FuturesBotWorker : BackgroundService
         IReadOnlyList<Candle> candles,
         CancellationToken cancellationToken)
     {
-        if (!intent.IsPositionIncreasing || position.Size > 0m)
+        if (!intent.IsPositionIncreasing)
         {
             return null;
         }
@@ -296,6 +308,63 @@ public sealed class FuturesBotWorker : BackgroundService
             {
                 return btcRiskOffReason;
             }
+        }
+
+        return null;
+    }
+
+    private async Task<string?> GetAggressiveEntryBlockReasonAsync(
+        FuturesBotSettings settings,
+        FuturesPositionSnapshot position,
+        FuturesTradeIntent intent,
+        CancellationToken cancellationToken)
+    {
+        if (!intent.IsPositionIncreasing || position.Size <= 0m)
+        {
+            return null;
+        }
+
+        if (!settings.AggressiveModeEnabled)
+        {
+            return "Futures scale-in requires aggressive mode.";
+        }
+
+        if (_appOptions.TradingMode != TradingMode.Paper)
+        {
+            return "Futures aggressive scale-in is paper-only until testnet soak validates the lifecycle.";
+        }
+
+        var fills = await _repository.GetFuturesFillsAsync(settings.Symbol, 1000, cancellationToken);
+        var now = DateTimeOffset.UtcNow;
+        if (_riskOptions.AggressiveMaxOrdersPerHour > 0)
+        {
+            var cutoff = now.AddHours(-1);
+            var entriesLastHour = fills.Count(fill =>
+                fill.Action == FuturesTradeAction.OpenLong &&
+                fill.CreatedAt >= cutoff);
+            if (entriesLastHour >= _riskOptions.AggressiveMaxOrdersPerHour)
+            {
+                return "FUTURES_AGGRESSIVE_MAX_ORDERS_PER_HOUR limit reached.";
+            }
+        }
+
+        if (_riskOptions.AggressiveMinSecondsBetweenEntries > 0)
+        {
+            var lastEntry = fills
+                .Where(fill => fill.Action == FuturesTradeAction.OpenLong)
+                .OrderByDescending(fill => fill.CreatedAt)
+                .FirstOrDefault();
+            if (lastEntry is not null &&
+                now - lastEntry.CreatedAt < TimeSpan.FromSeconds(_riskOptions.AggressiveMinSecondsBetweenEntries))
+            {
+                return "FUTURES_AGGRESSIVE_MIN_SECONDS_BETWEEN_ENTRIES is active.";
+            }
+        }
+
+        if (_riskOptions.AggressiveMaxConsecutiveLosses > 0 &&
+            CountConsecutiveLosingExits(fills) >= _riskOptions.AggressiveMaxConsecutiveLosses)
+        {
+            return "FUTURES_AGGRESSIVE_MAX_CONSECUTIVE_LOSSES limit reached.";
         }
 
         return null;
@@ -359,6 +428,78 @@ public sealed class FuturesBotWorker : BackgroundService
             SuggestedAction = RiskSuggestedAction.BlockNewOrders.ToString(),
             CreatedAt = DateTimeOffset.UtcNow
         }, cancellationToken);
+
+    private Task RecordAggressiveGuardDecisionAsync(
+        string symbol,
+        FuturesTradeIntent intent,
+        string reason,
+        CancellationToken cancellationToken) =>
+        _repository.AddFuturesRiskDecisionAsync(new FuturesRiskDecisionRecord
+        {
+            Symbol = symbol,
+            Source = "AggressiveGuard",
+            OrderLinkId = intent.OrderLinkId,
+            Action = intent.Action,
+            IsAllowed = false,
+            Reason = reason,
+            Severity = RiskSeverity.Warning.ToString(),
+            SuggestedAction = RiskSuggestedAction.BlockNewOrders.ToString(),
+            CreatedAt = DateTimeOffset.UtcNow
+        }, cancellationToken);
+
+    private static int CountConsecutiveLosingExits(IReadOnlyCollection<FuturesFillRecord> fills)
+    {
+        var count = 0;
+        foreach (var fill in fills.OrderByDescending(fill => fill.CreatedAt))
+        {
+            if (fill.Action is not (FuturesTradeAction.CloseLong or FuturesTradeAction.ReduceOnlyClose))
+            {
+                continue;
+            }
+
+            if (fill.RealizedPnl >= 0m)
+            {
+                break;
+            }
+
+            count++;
+        }
+
+        return count;
+    }
+
+    private FuturesRiskOptions ResolveProfileRiskOptions(FuturesBotSettings settings) => new()
+    {
+        MaxNotionalUsdt = MinPositive(_riskOptions.MaxNotionalUsdt, settings.MaxNotionalUsdt),
+        MaxMarginUsdt = MinPositive(_riskOptions.MaxMarginUsdt, settings.MaxMarginUsdt),
+        MaxLeverage = _riskOptions.MaxLeverage,
+        MinLiquidationBufferPercent = _riskOptions.MinLiquidationBufferPercent,
+        MaxFundingCostUsdt = _riskOptions.MaxFundingCostUsdt,
+        MaxDailyLossUsdt = _riskOptions.MaxDailyLossUsdt,
+        MaxDailyLossEquityPercent = _riskOptions.MaxDailyLossEquityPercent,
+        MaxDrawdownEquityPercent = _riskOptions.MaxDrawdownEquityPercent,
+        MaxOpenPositions = _riskOptions.MaxOpenPositions,
+        AggressiveMaxOrdersPerHour = _riskOptions.AggressiveMaxOrdersPerHour,
+        AggressiveMinSecondsBetweenEntries = _riskOptions.AggressiveMinSecondsBetweenEntries,
+        AggressiveMaxConsecutiveLosses = _riskOptions.AggressiveMaxConsecutiveLosses,
+        EmergencyPause = _riskOptions.EmergencyPause,
+        StopLossRequired = _riskOptions.StopLossRequired
+    };
+
+    private static decimal MinPositive(decimal left, decimal right)
+    {
+        if (left <= 0m)
+        {
+            return Math.Max(0m, right);
+        }
+
+        if (right <= 0m)
+        {
+            return left;
+        }
+
+        return Math.Min(left, right);
+    }
 
     private async Task<int> CountOpenFuturesPositionsAsync(
         IReadOnlyCollection<FuturesBotSettings> profiles,
