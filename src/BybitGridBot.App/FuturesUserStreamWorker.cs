@@ -13,6 +13,7 @@ public sealed class FuturesUserStreamWorker : BackgroundService
 {
     private readonly AppOptions _appOptions;
     private readonly IBybitUserStreamClient _userStreamClient;
+    private readonly BybitUserStreamTelemetry _userStreamTelemetry;
     private readonly FuturesOptions _futuresOptions;
     private readonly FuturesProtectionService _protectionService;
     private readonly FuturesRiskOptions _riskOptions;
@@ -26,6 +27,7 @@ public sealed class FuturesUserStreamWorker : BackgroundService
         IOptions<FuturesRiskOptions> riskOptions,
         FuturesProtectionService protectionService,
         IBybitUserStreamClient userStreamClient,
+        BybitUserStreamTelemetry userStreamTelemetry,
         IGridRepository repository,
         ITelegramNotifier notifier,
         ILogger<FuturesUserStreamWorker> logger)
@@ -35,6 +37,7 @@ public sealed class FuturesUserStreamWorker : BackgroundService
         _riskOptions = riskOptions.Value;
         _protectionService = protectionService;
         _userStreamClient = userStreamClient;
+        _userStreamTelemetry = userStreamTelemetry;
         _repository = repository;
         _notifier = notifier;
         _logger = logger;
@@ -60,6 +63,7 @@ public sealed class FuturesUserStreamWorker : BackgroundService
 
     private async Task HandleMessageAsync(BybitUserStreamMessage message, CancellationToken cancellationToken)
     {
+        _userStreamTelemetry.MarkHandled(message.Type, message.Topic);
         switch (message.Type)
         {
             case BybitUserStreamMessageType.Order:

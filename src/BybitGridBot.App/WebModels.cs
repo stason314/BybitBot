@@ -374,6 +374,8 @@ public sealed class FuturesDashboardResponse
 
     public required FuturesSoakStatusView TestnetSoak { get; init; }
 
+    public required FuturesUserStreamStatusView UserStreamStatus { get; init; }
+
     public required FuturesAutoRecommendationView AutoRecommendation { get; init; }
 
     public required IReadOnlyList<string> StrategyActions { get; init; }
@@ -570,6 +572,29 @@ public sealed class FuturesSoakStatusView
     public string LastRiskSource { get; init; } = "-";
 
     public string LastRiskReason { get; init; } = "-";
+}
+
+public sealed class FuturesUserStreamStatusView
+{
+    public bool Enabled { get; init; }
+
+    public bool Connected { get; init; }
+
+    public bool Stale { get; init; }
+
+    public DateTimeOffset? ConnectedAt { get; init; }
+
+    public DateTimeOffset? LastMessageAt { get; init; }
+
+    public DateTimeOffset? LastEventAt { get; init; }
+
+    public string LastEventType { get; init; } = "-";
+
+    public string LastTopic { get; init; } = "-";
+
+    public int DisconnectCount { get; init; }
+
+    public string LastError { get; init; } = "-";
 }
 
 public sealed class FuturesRiskDecisionView

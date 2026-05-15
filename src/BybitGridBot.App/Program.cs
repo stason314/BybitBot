@@ -39,6 +39,7 @@ builder.Services.AddOptions<FuturesRiskOptions>().Bind(builder.Configuration);
 builder.Services.AddOptions<TelegramOptions>().Bind(builder.Configuration);
 
 builder.Services.AddSingleton<BybitSigner>();
+builder.Services.AddSingleton<BybitUserStreamTelemetry>();
 builder.Services.AddSingleton<IBybitUserStreamClient, BybitUserStreamClient>();
 builder.Services.AddSingleton<IGridTradingStrategy, GridStrategy>();
 builder.Services.AddSingleton<DcaStrategy>();

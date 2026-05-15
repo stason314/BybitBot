@@ -33,6 +33,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
     ];
 
     private readonly IBybitRestClient _bybitRestClient;
+    private readonly BybitUserStreamTelemetry _userStreamTelemetry;
     private readonly AppOptions _appOptions;
     private readonly FuturesExecutionService _executionService;
     private readonly FuturesOptions _futuresOptions;
@@ -43,6 +44,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
 
     public FuturesDashboardService(
         IBybitRestClient bybitRestClient,
+        BybitUserStreamTelemetry userStreamTelemetry,
         IOptions<AppOptions> appOptions,
         FuturesExecutionService executionService,
         IOptions<FuturesOptions> futuresOptions,
@@ -52,6 +54,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         IGridRepository repository)
     {
         _bybitRestClient = bybitRestClient;
+        _userStreamTelemetry = userStreamTelemetry;
         _appOptions = appOptions.Value;
         _executionService = executionService;
         _futuresOptions = futuresOptions.Value;
@@ -133,6 +136,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             PaperAccount = BuildPaperAccount(state, position, _futuresOptions.PaperInitialEquityUsdt),
             PnlStats = BuildPnlStats(recentFills),
             TestnetSoak = BuildTestnetSoakStatus(position, activeOrders, recentOrders, recentFills, riskDecisions),
+            UserStreamStatus = BuildUserStreamStatus(),
             AutoRecommendation = MapAutoRecommendation(recommendation),
             StrategyActions = StrategyActions,
             ActiveOrders = activeOrders.Select(MapOrder).ToArray(),
@@ -853,6 +857,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
       </div>
       <div class="stats" id="testnetSoakStats" style="margin-bottom:0;"></div>
       <div class="subtle" id="testnetSoakRisk" style="margin-top:12px;"></div>
+      <div class="stats" id="userStreamStats" style="margin-bottom:0;margin-top:12px;"></div>
     </section>
 
     <section class="panel" style="margin-bottom:18px;">
@@ -1165,6 +1170,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
       paperAccount: latest?.paperAccount,
       pnlStats: latest?.pnlStats,
       testnetSoak: latest?.testnetSoak,
+      userStreamStatus: latest?.userStreamStatus,
       position: latest?.position,
       activeOrders: latest?.activeOrders || [],
       recentOrders: recentOrdersForHours(hours),
@@ -1257,6 +1263,17 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         ['Risk Events', formatNumber(soak.riskDecisionCount)]
       ].map(([label, value]) => `<div class="stat"><div class="label">${label}</div><div class="value">${escapeHtml(value)}</div></div>`).join('');
       byId('testnetSoakRisk').textContent = `${soak.lastRiskSource || '-'}: ${soak.lastRiskReason || '-'}`;
+      const stream = latest?.userStreamStatus || {};
+      byId('userStreamStats').innerHTML = [
+        ['WS Enabled', stream.enabled ? 'yes' : 'no'],
+        ['WS Connected', stream.connected ? 'yes' : 'no'],
+        ['WS Stale', stream.stale ? 'yes' : 'no'],
+        ['Disconnects', formatNumber(stream.disconnectCount)],
+        ['Last Event', stream.lastEventAt ? formatDate(stream.lastEventAt) : '-'],
+        ['Event Type', stream.lastEventType || '-'],
+        ['Topic', stream.lastTopic || '-'],
+        ['Last Error', stream.lastError || '-']
+      ].map(([label, value]) => `<div class="stat"><div class="label">${label}</div><div class="value">${escapeHtml(value)}</div></div>`).join('');
     };
     const renderAutoRecommendation = (recommendation) => {
       byId('autoRecommendationReason').textContent = recommendation.reason || '-';
@@ -1614,6 +1631,30 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             RiskDecisionCount = riskDecisions.Count,
             LastRiskSource = lastRisk?.Source ?? "-",
             LastRiskReason = lastRisk?.Reason ?? "-"
+        };
+    }
+
+    private FuturesUserStreamStatusView BuildUserStreamStatus()
+    {
+        var snapshot = _userStreamTelemetry.GetSnapshot();
+        var enabled = _futuresOptions.Enabled &&
+            _futuresOptions.UserStreamEnabled &&
+            _appOptions.TradingMode != TradingMode.Paper;
+        var lastEventAge = snapshot.LastEventAt is null
+            ? (TimeSpan?)null
+            : DateTimeOffset.UtcNow - snapshot.LastEventAt.Value;
+        return new FuturesUserStreamStatusView
+        {
+            Enabled = enabled,
+            Connected = snapshot.IsConnected,
+            Stale = enabled && (snapshot.LastEventAt is null || lastEventAge > TimeSpan.FromMinutes(2)),
+            ConnectedAt = snapshot.ConnectedAt,
+            LastMessageAt = snapshot.LastMessageAt,
+            LastEventAt = snapshot.LastEventAt,
+            LastEventType = snapshot.LastEventType ?? "-",
+            LastTopic = snapshot.LastTopic ?? "-",
+            DisconnectCount = snapshot.DisconnectCount,
+            LastError = snapshot.LastError ?? "-"
         };
     }
 

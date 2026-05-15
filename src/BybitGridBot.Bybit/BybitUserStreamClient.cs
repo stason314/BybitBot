@@ -26,15 +26,18 @@ public sealed class BybitUserStreamClient : IBybitUserStreamClient
 
     private readonly BybitOptions _options;
     private readonly BybitSigner _signer;
+    private readonly BybitUserStreamTelemetry _telemetry;
     private readonly ILogger<BybitUserStreamClient> _logger;
 
     public BybitUserStreamClient(
         IOptions<BybitOptions> options,
         BybitSigner signer,
+        BybitUserStreamTelemetry telemetry,
         ILogger<BybitUserStreamClient> logger)
     {
         _options = options.Value;
         _signer = signer;
+        _telemetry = telemetry;
         _logger = logger;
     }
 
@@ -49,6 +52,7 @@ public sealed class BybitUserStreamClient : IBybitUserStreamClient
                 using var socket = new ClientWebSocket();
                 var endpoint = new Uri(_options.ResolvePrivateWebSocketUrl());
                 await socket.ConnectAsync(endpoint, cancellationToken);
+                _telemetry.MarkConnected(endpoint.ToString());
                 _logger.LogInformation("Connected to Bybit private WebSocket: {Endpoint}", endpoint);
 
                 await AuthenticateAsync(socket, cancellationToken);
@@ -57,8 +61,15 @@ public sealed class BybitUserStreamClient : IBybitUserStreamClient
                 using var heartbeatCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                 var heartbeat = SendHeartbeatAsync(socket, heartbeatCts.Token);
                 await ReceiveLoopAsync(socket, onMessage, cancellationToken);
+                _telemetry.MarkDisconnected(null);
                 await heartbeatCts.CancelAsync();
-                await heartbeat;
+                try
+                {
+                    await heartbeat;
+                }
+                catch (OperationCanceledException)
+                {
+                }
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -66,6 +77,7 @@ public sealed class BybitUserStreamClient : IBybitUserStreamClient
             }
             catch (Exception exception)
             {
+                _telemetry.MarkDisconnected(exception);
                 _logger.LogWarning(exception, "Bybit private WebSocket disconnected. Reconnecting in {DelaySeconds}s.", ReconnectDelay.TotalSeconds);
                 await Task.Delay(ReconnectDelay, cancellationToken);
             }
@@ -122,6 +134,7 @@ public sealed class BybitUserStreamClient : IBybitUserStreamClient
             var streamMessage = ParseMessage(message);
             if (streamMessage is not null)
             {
+                _telemetry.MarkMessage(streamMessage.Topic);
                 await onMessage(streamMessage, cancellationToken);
             }
         }
