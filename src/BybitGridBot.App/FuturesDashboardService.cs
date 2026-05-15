@@ -2,6 +2,7 @@ using System.Text.Json;
 using BybitGridBot.Bybit;
 using BybitGridBot.Domain;
 using BybitGridBot.Storage;
+using BybitGridBot.Strategy;
 using Microsoft.Extensions.Options;
 
 namespace BybitGridBot.App;
@@ -9,6 +10,7 @@ namespace BybitGridBot.App;
 public interface IFuturesDashboardService
 {
     Task<FuturesDashboardResponse> GetDashboardAsync(string? symbol, CancellationToken cancellationToken);
+    Task<UpdateSettingsResponse> ApplyAutoRecommendationAsync(string? symbol, CancellationToken cancellationToken);
     Task<UpdateSettingsResponse> UpdateSettingsAsync(UpdateFuturesSettingsRequest request, CancellationToken cancellationToken);
     Task<UpdateSettingsResponse> DeleteSettingsAsync(string symbol, CancellationToken cancellationToken);
     string RenderDashboardPage();
@@ -26,15 +28,18 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
 
     private readonly IBybitRestClient _bybitRestClient;
     private readonly FuturesOptions _futuresOptions;
+    private readonly FuturesAutoConfigRecommender _recommender;
     private readonly IGridRepository _repository;
 
     public FuturesDashboardService(
         IBybitRestClient bybitRestClient,
         IOptions<FuturesOptions> futuresOptions,
+        FuturesAutoConfigRecommender recommender,
         IGridRepository repository)
     {
         _bybitRestClient = bybitRestClient;
         _futuresOptions = futuresOptions.Value;
+        _recommender = recommender;
         _repository = repository;
     }
 
@@ -62,6 +67,9 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             positionError = exception.Message;
         }
 
+        var candles = await GetAnalysisCandlesAsync(selectedSettings, cancellationToken);
+        var recommendation = _recommender.Recommend(selectedSettings, candles, position.Size > 0m);
+
         return new FuturesDashboardResponse
         {
             Profiles = profiles
@@ -88,9 +96,64 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
                 .ToArray(),
             Settings = MapSettings(selectedSettings),
             Position = position,
+            AutoRecommendation = MapAutoRecommendation(recommendation),
             StrategyActions = StrategyActions,
             PositionError = positionError,
             GeneratedAt = DateTimeOffset.UtcNow
+        };
+    }
+
+    public async Task<UpdateSettingsResponse> ApplyAutoRecommendationAsync(string? symbol, CancellationToken cancellationToken)
+    {
+        var profiles = await _repository.GetFuturesSettingsProfilesAsync(cancellationToken);
+        var selectedSymbol = NormalizeOptionalSymbol(symbol);
+        var settings = selectedSymbol is null
+            ? profiles.FirstOrDefault()
+            : profiles.FirstOrDefault(profile => string.Equals(profile.Symbol, selectedSymbol, StringComparison.OrdinalIgnoreCase));
+        if (settings is null)
+        {
+            return new UpdateSettingsResponse
+            {
+                Success = false,
+                Symbol = selectedSymbol,
+                Message = "Cannot apply futures auto recommendation.",
+                Errors = selectedSymbol is null
+                    ? ["No futures profile exists."]
+                    : [$"Futures profile {selectedSymbol} does not exist."]
+            };
+        }
+
+        var candles = await GetAnalysisCandlesAsync(settings, cancellationToken);
+        if (candles.Count == 0)
+        {
+            return new UpdateSettingsResponse
+            {
+                Success = false,
+                Symbol = settings.Symbol,
+                Message = "Cannot apply futures auto recommendation.",
+                Errors = ["Futures market data is unavailable."]
+            };
+        }
+
+        var hasOpenPosition = false;
+        try
+        {
+            hasOpenPosition = (await _bybitRestClient.GetPositionAsync(settings.Category, settings.Symbol, cancellationToken))?.Size > 0m;
+        }
+        catch
+        {
+            hasOpenPosition = false;
+        }
+
+        var recommendation = _recommender.Recommend(settings, candles, hasOpenPosition);
+        var recommendedSettings = BuildRecommendedSettings(settings, recommendation);
+        await _repository.SaveFuturesSettingsAsync(recommendedSettings, cancellationToken);
+
+        return new UpdateSettingsResponse
+        {
+            Success = true,
+            Symbol = settings.Symbol,
+            Message = $"Futures auto recommendation applied: {recommendation.StrategyType}. {recommendation.Reason}"
         };
     }
 
@@ -290,6 +353,18 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
 
     <section class="stats" id="positionStats"></section>
 
+    <section class="panel" style="margin-bottom:18px;">
+      <div class="actions" style="justify-content:space-between;">
+        <h2 style="margin:0;">Auto Recommendation</h2>
+        <div class="actions">
+          <button type="button" id="refreshAutoRecommendation">Refresh</button>
+          <button type="button" class="primary" id="applyAutoRecommendation">Apply</button>
+        </div>
+      </div>
+      <div class="stats" id="autoRecommendationStats" style="margin-bottom:0;"></div>
+      <div class="subtle" id="autoRecommendationReason" style="margin-top:12px;"></div>
+    </section>
+
     <div class="layout">
       <section class="panel">
         <h2>Futures Profiles</h2>
@@ -447,6 +522,19 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
       ].map(([label, value]) => `<div class="stat"><div class="label">${label}</div><div class="value">${value}</div></div>`).join('');
       byId('positionStats').insertAdjacentHTML('beforebegin', error);
     };
+    const renderAutoRecommendation = (recommendation) => {
+      byId('autoRecommendationReason').textContent = recommendation.reason || '-';
+      byId('autoRecommendationStats').innerHTML = [
+        ['Strategy', escapeHtml(recommendation.strategyType)],
+        ['Leverage', `${formatNumber(recommendation.leverage)}x`],
+        ['Max Notional', formatNumber(recommendation.maxNotionalUsdt)],
+        ['Max Margin', formatNumber(recommendation.maxMarginUsdt)],
+        ['Stop Loss %', formatNumber(recommendation.stopLossPercent)],
+        ['Take Profit %', formatNumber(recommendation.takeProfitPercent)],
+        ['ATR %', formatNumber(recommendation.atrPercent)],
+        ['Move %', formatNumber(recommendation.movePercent)]
+      ].map(([label, value]) => `<div class="stat"><div class="label">${label}</div><div class="value">${value}</div></div>`).join('');
+    };
     const load = async (force = false) => {
       document.querySelectorAll('.notice').forEach(item => item.remove());
       const url = selectedSymbol && !creating ? `/api/futures/dashboard?symbol=${encodeURIComponent(selectedSymbol)}` : '/api/futures/dashboard';
@@ -460,6 +548,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
       renderTabs(data.profiles);
       renderConfigs(data.configSummaries || []);
       renderPosition(data);
+      renderAutoRecommendation(data.autoRecommendation);
       byId('strategyActions').innerHTML = data.strategyActions.map(action => `<span class="chip">${escapeHtml(action)}</span>`).join('');
       if (force || !dirty) {
         updateForm(creating ? defaults : data.settings);
@@ -477,6 +566,30 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
       renderTabs(latest?.profiles || []);
       byId('formStatus').className = 'status';
       byId('formStatus').textContent = 'Draft config created.';
+    });
+    byId('refreshAutoRecommendation').addEventListener('click', async () => {
+      const status = byId('formStatus');
+      status.className = 'status';
+      status.textContent = 'Refreshing futures auto recommendation...';
+      await load(false);
+      status.className = 'status ok';
+      status.textContent = 'Futures auto recommendation refreshed.';
+    });
+    byId('applyAutoRecommendation').addEventListener('click', async () => {
+      const status = byId('formStatus');
+      const symbol = selectedSymbol || latest?.settings?.symbol;
+      const url = symbol ? `/api/futures/settings/apply-auto?symbol=${encodeURIComponent(symbol)}` : '/api/futures/settings/apply-auto';
+      const response = await fetch(url, { method: 'POST' });
+      const result = await response.json();
+      status.className = `status ${response.ok ? 'ok' : 'error'}`;
+      status.textContent = response.ok ? result.message : (result.errors?.join(' | ') || result.message || 'Failed to apply futures auto recommendation.');
+      if (response.ok) {
+        selectedSymbol = (result.symbol || symbol || '').toUpperCase();
+        creating = false;
+        dirty = false;
+        setUrl();
+        await load(true);
+      }
     });
     byId('profileTabs').addEventListener('click', async (event) => {
       const deleteSymbol = event.target.dataset.delete;
@@ -595,6 +708,68 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         Symbol = settings.Symbol,
         Category = settings.Category,
         Side = "None",
+        UpdatedAt = DateTimeOffset.UtcNow
+    };
+
+    private async Task<IReadOnlyList<Candle>> GetAnalysisCandlesAsync(
+        FuturesBotSettings settings,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await _bybitRestClient.GetKlinesAsync(
+                settings.Category,
+                settings.Symbol,
+                AnalysisDefaults.AutoRecommendationCandleInterval,
+                AnalysisDefaults.AutoRecommendationLookbackCandles,
+                cancellationToken);
+        }
+        catch
+        {
+            return [];
+        }
+    }
+
+    private static FuturesAutoRecommendationView MapAutoRecommendation(FuturesAutoConfigRecommendation recommendation) => new()
+    {
+        StrategyType = FormatEnum(recommendation.StrategyType),
+        Reason = recommendation.Reason,
+        Leverage = recommendation.Leverage,
+        MarginMode = FormatEnum(recommendation.MarginMode),
+        PositionMode = FormatEnum(recommendation.PositionMode),
+        Direction = FormatEnum(recommendation.Direction),
+        MaxNotionalUsdt = recommendation.MaxNotionalUsdt,
+        MaxMarginUsdt = recommendation.MaxMarginUsdt,
+        StopLossPercent = recommendation.StopLossPercent,
+        TakeProfitPercent = recommendation.TakeProfitPercent,
+        LiquidationBufferPercent = recommendation.LiquidationBufferPercent,
+        StrategyConfigJson = recommendation.StrategyConfigJson,
+        LastPrice = recommendation.Metrics.LastPrice,
+        MovePercent = recommendation.Metrics.MovePercent,
+        AtrPercent = recommendation.Metrics.AtrPercent,
+        DrawdownPercent = recommendation.Metrics.DrawdownPercent,
+        Support = recommendation.Metrics.Support,
+        Resistance = recommendation.Metrics.Resistance
+    };
+
+    private static FuturesBotSettings BuildRecommendedSettings(
+        FuturesBotSettings currentSettings,
+        FuturesAutoConfigRecommendation recommendation) => new()
+    {
+        Symbol = currentSettings.Symbol,
+        Category = currentSettings.Category,
+        StrategyType = recommendation.StrategyType,
+        StrategyConfigJson = recommendation.StrategyConfigJson,
+        Leverage = recommendation.Leverage,
+        MarginMode = recommendation.MarginMode,
+        PositionMode = recommendation.PositionMode,
+        Direction = recommendation.Direction,
+        MaxNotionalUsdt = recommendation.MaxNotionalUsdt,
+        MaxMarginUsdt = recommendation.MaxMarginUsdt,
+        StopLossPercent = recommendation.StopLossPercent,
+        TakeProfitPercent = recommendation.TakeProfitPercent,
+        LiquidationBufferPercent = recommendation.LiquidationBufferPercent,
+        ReduceOnlyEnabled = recommendation.ReduceOnlyEnabled,
         UpdatedAt = DateTimeOffset.UtcNow
     };
 

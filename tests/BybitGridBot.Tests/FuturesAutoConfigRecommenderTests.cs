@@ -1,0 +1,79 @@
+using BybitGridBot.Domain;
+using BybitGridBot.Strategy;
+
+namespace BybitGridBot.Tests;
+
+public sealed class FuturesAutoConfigRecommenderTests
+{
+    [Fact]
+    public void Recommend_SelectsTrendFollow_ForPositiveTrend()
+    {
+        var recommendation = new FuturesAutoConfigRecommender().Recommend(
+            Settings(),
+            Candles(start: 50000m, step: 30m, count: 80),
+            hasOpenPosition: false);
+
+        Assert.Equal(FuturesStrategyType.TrendFollow, recommendation.StrategyType);
+        Assert.Equal(FuturesDirection.LongOnly, recommendation.Direction);
+        Assert.Equal(FuturesMarginMode.Isolated, recommendation.MarginMode);
+        Assert.Equal(FuturesPositionMode.OneWay, recommendation.PositionMode);
+        Assert.True(recommendation.ReduceOnlyEnabled);
+        Assert.Contains("reduceOnlyOnExit", recommendation.StrategyConfigJson, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Recommend_SelectsPause_WhenDangerAndNoPosition()
+    {
+        var recommendation = new FuturesAutoConfigRecommender().Recommend(
+            Settings(),
+            Candles(start: 50000m, step: -60m, count: 80),
+            hasOpenPosition: false);
+
+        Assert.Equal(FuturesStrategyType.Pause, recommendation.StrategyType);
+    }
+
+    [Fact]
+    public void Recommend_SelectsReduceOnly_WhenDangerAndPositionOpen()
+    {
+        var recommendation = new FuturesAutoConfigRecommender().Recommend(
+            Settings(),
+            Candles(start: 50000m, step: -60m, count: 80),
+            hasOpenPosition: true);
+
+        Assert.Equal(FuturesStrategyType.ReduceOnly, recommendation.StrategyType);
+    }
+
+    private static FuturesBotSettings Settings() => new()
+    {
+        Symbol = "BTCUSDT",
+        Category = "linear",
+        StrategyType = FuturesStrategyType.Pause,
+        Leverage = 2m,
+        MarginMode = FuturesMarginMode.Isolated,
+        PositionMode = FuturesPositionMode.OneWay,
+        Direction = FuturesDirection.LongOnly,
+        MaxNotionalUsdt = 100m,
+        MaxMarginUsdt = 50m,
+        StopLossPercent = 2m,
+        TakeProfitPercent = 4m,
+        LiquidationBufferPercent = 15m,
+        ReduceOnlyEnabled = true
+    };
+
+    private static IReadOnlyList<Candle> Candles(decimal start, decimal step, int count)
+    {
+        var candles = new List<Candle>();
+        var price = start;
+        for (var index = 0; index < count; index++)
+        {
+            var open = price;
+            var close = price + step;
+            var high = decimal.Max(open, close) + 20m;
+            var low = decimal.Min(open, close) - 20m;
+            candles.Add(new Candle(DateTimeOffset.UtcNow.AddMinutes(index), open, high, low, close, 1m, close));
+            price = close;
+        }
+
+        return candles;
+    }
+}

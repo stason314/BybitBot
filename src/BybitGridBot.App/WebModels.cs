@@ -276,6 +276,8 @@ public sealed class FuturesDashboardResponse
 
     public required FuturesPositionView Position { get; init; }
 
+    public required FuturesAutoRecommendationView AutoRecommendation { get; init; }
+
     public required IReadOnlyList<string> StrategyActions { get; init; }
 
     public string? PositionError { get; init; }
@@ -375,6 +377,45 @@ public sealed class FuturesPositionView
     public int PositionIdx { get; init; }
 
     public DateTimeOffset UpdatedAt { get; init; }
+}
+
+public sealed class FuturesAutoRecommendationView
+{
+    public required string StrategyType { get; init; }
+
+    public required string Reason { get; init; }
+
+    public decimal Leverage { get; init; }
+
+    public required string MarginMode { get; init; }
+
+    public required string PositionMode { get; init; }
+
+    public required string Direction { get; init; }
+
+    public decimal MaxNotionalUsdt { get; init; }
+
+    public decimal MaxMarginUsdt { get; init; }
+
+    public decimal StopLossPercent { get; init; }
+
+    public decimal TakeProfitPercent { get; init; }
+
+    public decimal LiquidationBufferPercent { get; init; }
+
+    public required string StrategyConfigJson { get; init; }
+
+    public decimal LastPrice { get; init; }
+
+    public decimal MovePercent { get; init; }
+
+    public decimal AtrPercent { get; init; }
+
+    public decimal DrawdownPercent { get; init; }
+
+    public decimal Support { get; init; }
+
+    public decimal Resistance { get; init; }
 }
 
 public sealed class UpdateFuturesSettingsRequest

@@ -54,6 +54,7 @@ builder.Services.AddSingleton<ProfitProtectionManager>();
 builder.Services.AddSingleton<SignalAnalyzer>();
 builder.Services.AddSingleton<SignalEngine>();
 builder.Services.AddSingleton<AutoStrategySelector>();
+builder.Services.AddSingleton<FuturesAutoConfigRecommender>();
 builder.Services.AddSingleton<FuturesAccounting>();
 builder.Services.AddSingleton<FuturesPaperSimulator>();
 builder.Services.AddSingleton<StrategyRouter>();
@@ -128,6 +129,12 @@ app.MapGet("/api/futures/dashboard", async (string? symbol, IFuturesDashboardSer
 app.MapPost("/api/futures/settings", async (UpdateFuturesSettingsRequest request, IFuturesDashboardService dashboardService, CancellationToken cancellationToken) =>
 {
     var response = await dashboardService.UpdateSettingsAsync(request, cancellationToken);
+    return response.Success ? Results.Ok(response) : Results.BadRequest(response);
+});
+
+app.MapPost("/api/futures/settings/apply-auto", async (string? symbol, IFuturesDashboardService dashboardService, CancellationToken cancellationToken) =>
+{
+    var response = await dashboardService.ApplyAutoRecommendationAsync(symbol, cancellationToken);
     return response.Success ? Results.Ok(response) : Results.BadRequest(response);
 });
 

@@ -42,6 +42,7 @@ The futures UI is available at `/futures`. It is intentionally separate from the
 Current scope:
 
 - futures profile list and editor
+- futures auto-configuration on `/futures`, with refresh/apply actions based on recent `linear` candles
 - MVP is locked to USDT linear perpetuals: `CATEGORY=linear`, isolated margin, one-way mode, long-only
 - leverage, max notional, max margin, stop loss, take profit, liquidation buffer, reduce-only flag
 - read-only Bybit position sync through `/v5/position/list`
