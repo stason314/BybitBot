@@ -49,6 +49,11 @@ public sealed class FuturesTrendFollowLongOnly : IFuturesStrategy
             return FuturesLongOnlySignals.CloseLong(context, "exit-signal");
         }
 
+        if (FuturesLongOnlySignals.ShouldOpenAggressiveTestLong(context, signal))
+        {
+            return FuturesLongOnlySignals.OpenLong(context);
+        }
+
         if (context.Position.Size > 0m && !context.Settings.AggressiveModeEnabled)
         {
             return FuturesStrategyDecision.Empty("Existing futures long remains open.");
@@ -76,6 +81,11 @@ public sealed class FuturesBreakoutLongOnly : IFuturesStrategy
             return FuturesLongOnlySignals.CloseLong(context, "exit-signal");
         }
 
+        if (FuturesLongOnlySignals.ShouldOpenAggressiveTestLong(context, signal))
+        {
+            return FuturesLongOnlySignals.OpenLong(context);
+        }
+
         if (context.Position.Size > 0m && !context.Settings.AggressiveModeEnabled)
         {
             return FuturesStrategyDecision.Empty("Existing futures long remains open.");
@@ -101,6 +111,11 @@ public sealed class FuturesGridLongOnly : IFuturesStrategy
         if (FuturesLongOnlySignals.ShouldCloseOpenLong(context, signal))
         {
             return FuturesLongOnlySignals.CloseLong(context, "exit-signal");
+        }
+
+        if (FuturesLongOnlySignals.ShouldOpenAggressiveTestLong(context, signal))
+        {
+            return FuturesLongOnlySignals.OpenLong(context);
         }
 
         if (context.Position.Size > 0m && !context.Settings.AggressiveModeEnabled)
@@ -149,6 +164,11 @@ internal static class FuturesLongOnlySignals
             context.CurrentPrice >= takeProfitPrice ||
             signal.MovePercent < -1m;
     }
+
+    public static bool ShouldOpenAggressiveTestLong(FuturesStrategyContext context, FuturesLongOnlySignal signal) =>
+        context.Settings.AggressiveModeEnabled &&
+        context.Settings.AggressiveModeKind == FuturesAggressiveModeKind.Test &&
+        signal.MovePercent > -1.2m;
 
     public static FuturesStrategyDecision OpenLong(FuturesStrategyContext context)
     {

@@ -215,6 +215,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         var marginMode = ParseMarginMode(request.MarginMode);
         var positionMode = ParsePositionMode(request.PositionMode);
         var direction = ParseDirection(request.Direction);
+        var aggressiveModeKind = ParseAggressiveModeKind(request.AggressiveModeKind);
         var strategyConfigJson = NormalizeStrategyConfigJson(request.StrategyConfigJson);
 
         var errors = ValidateRequest(symbol, category, request);
@@ -236,6 +237,11 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         if (direction is null)
         {
             errors.Add("Direction must be long-only for the MVP.");
+        }
+
+        if (aggressiveModeKind is null)
+        {
+            errors.Add("Aggressive mode kind must be normal or test.");
         }
 
         if (strategyConfigJson is null)
@@ -272,6 +278,11 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             LiquidationBufferPercent = request.LiquidationBufferPercent,
             ReduceOnlyEnabled = request.ReduceOnlyEnabled,
             AggressiveModeEnabled = request.AggressiveModeEnabled,
+            AggressiveModeKind = aggressiveModeKind!.Value,
+            AggressiveEntryMultiplier = request.AggressiveEntryMultiplier,
+            AggressiveMaxOrdersPerHour = request.AggressiveMaxOrdersPerHour,
+            AggressiveMinSecondsBetweenEntries = request.AggressiveMinSecondsBetweenEntries,
+            AggressiveMaxConsecutiveLosses = request.AggressiveMaxConsecutiveLosses,
             UpdatedAt = DateTimeOffset.UtcNow
         };
 
@@ -337,6 +348,11 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             LiquidationBufferPercent = current.LiquidationBufferPercent,
             ReduceOnlyEnabled = current.ReduceOnlyEnabled,
             AggressiveModeEnabled = current.AggressiveModeEnabled,
+            AggressiveModeKind = current.AggressiveModeKind,
+            AggressiveEntryMultiplier = current.AggressiveEntryMultiplier,
+            AggressiveMaxOrdersPerHour = current.AggressiveMaxOrdersPerHour,
+            AggressiveMinSecondsBetweenEntries = current.AggressiveMinSecondsBetweenEntries,
+            AggressiveMaxConsecutiveLosses = current.AggressiveMaxConsecutiveLosses,
             UpdatedAt = DateTimeOffset.UtcNow
         };
     }
@@ -881,8 +897,18 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             <option value="false">Conservative</option>
             <option value="true">Aggressive</option>
           </select>
+          <select id="aggressiveModeKind" name="aggressiveModeKind">
+            <option value="normal">Normal</option>
+            <option value="test">Test</option>
+          </select>
         </div>
       </div>
+      <form id="aggressiveSettingsForm" style="margin-top:12px;">
+        <div><label for="aggressiveEntryMultiplier">Entry Multiplier</label><input id="aggressiveEntryMultiplier" name="aggressiveEntryMultiplier" type="number" min="0.01" step="0.01" /></div>
+        <div><label for="aggressiveMaxOrdersPerHour">Max Orders / Hour</label><input id="aggressiveMaxOrdersPerHour" name="aggressiveMaxOrdersPerHour" type="number" min="0" step="1" /></div>
+        <div><label for="aggressiveMinSecondsBetweenEntries">Min Seconds Between Entries</label><input id="aggressiveMinSecondsBetweenEntries" name="aggressiveMinSecondsBetweenEntries" type="number" min="0" step="1" /></div>
+        <div><label for="aggressiveMaxConsecutiveLosses">Max Consecutive Losses</label><input id="aggressiveMaxConsecutiveLosses" name="aggressiveMaxConsecutiveLosses" type="number" min="0" step="1" /></div>
+      </form>
       <div class="stats" id="aggressiveModeStats" style="margin-bottom:0;"></div>
       <div class="subtle" id="aggressiveModeReason" style="margin-top:12px;"></div>
     </section>
@@ -987,7 +1013,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
 
   <script>
     const byId = (id) => document.getElementById(id);
-    const fields = ['symbol','category','enabled','strategyType','strategyConfigJson','leverage','marginMode','positionMode','direction','maxNotionalUsdt','maxMarginUsdt','stopLossPercent','takeProfitPercent','liquidationBufferPercent','reduceOnlyEnabled','aggressiveModeEnabled'];
+    const fields = ['symbol','category','enabled','strategyType','strategyConfigJson','leverage','marginMode','positionMode','direction','maxNotionalUsdt','maxMarginUsdt','stopLossPercent','takeProfitPercent','liquidationBufferPercent','reduceOnlyEnabled','aggressiveModeEnabled','aggressiveModeKind','aggressiveEntryMultiplier','aggressiveMaxOrdersPerHour','aggressiveMinSecondsBetweenEntries','aggressiveMaxConsecutiveLosses'];
     const defaults = {
       symbol: 'BTCUSDT',
       category: 'linear',
@@ -1004,7 +1030,12 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
       takeProfitPercent: 4,
       liquidationBufferPercent: 15,
       reduceOnlyEnabled: true,
-      aggressiveModeEnabled: false
+      aggressiveModeEnabled: false,
+      aggressiveModeKind: 'normal',
+      aggressiveEntryMultiplier: 1.5,
+      aggressiveMaxOrdersPerHour: 6,
+      aggressiveMinSecondsBetweenEntries: 60,
+      aggressiveMaxConsecutiveLosses: 2
     };
     let selectedSymbol = new URLSearchParams(window.location.search).get('symbol')?.toUpperCase() || null;
     let creating = false;
@@ -1066,6 +1097,11 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
       byId('liquidationBufferPercent').value = settings.liquidationBufferPercent;
       byId('reduceOnlyEnabled').value = String(settings.reduceOnlyEnabled);
       byId('aggressiveModeEnabled').value = String(settings.aggressiveModeEnabled);
+      byId('aggressiveModeKind').value = settings.aggressiveModeKind || 'normal';
+      byId('aggressiveEntryMultiplier').value = settings.aggressiveEntryMultiplier;
+      byId('aggressiveMaxOrdersPerHour').value = settings.aggressiveMaxOrdersPerHour;
+      byId('aggressiveMinSecondsBetweenEntries').value = settings.aggressiveMinSecondsBetweenEntries;
+      byId('aggressiveMaxConsecutiveLosses').value = settings.aggressiveMaxConsecutiveLosses;
     };
     const readPayload = () => ({
       symbol: byId('symbol').value,
@@ -1083,7 +1119,12 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
       takeProfitPercent: Number(byId('takeProfitPercent').value),
       liquidationBufferPercent: Number(byId('liquidationBufferPercent').value),
       reduceOnlyEnabled: byId('reduceOnlyEnabled').value === 'true',
-      aggressiveModeEnabled: byId('aggressiveModeEnabled').value === 'true'
+      aggressiveModeEnabled: byId('aggressiveModeEnabled').value === 'true',
+      aggressiveModeKind: byId('aggressiveModeKind').value,
+      aggressiveEntryMultiplier: Number(byId('aggressiveEntryMultiplier').value),
+      aggressiveMaxOrdersPerHour: Number(byId('aggressiveMaxOrdersPerHour').value),
+      aggressiveMinSecondsBetweenEntries: Number(byId('aggressiveMinSecondsBetweenEntries').value),
+      aggressiveMaxConsecutiveLosses: Number(byId('aggressiveMaxConsecutiveLosses').value)
     });
     const renderTabs = (profiles) => {
       byId('profileTabs').innerHTML = profiles.length === 0 && !creating
@@ -1343,14 +1384,21 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
     const renderAggressiveMode = (mode) => {
       byId('aggressiveModeStats').innerHTML = [
         ['Mode', mode.enabled ? 'aggressive' : 'conservative'],
+        ['Kind', mode.modeKind || '-'],
         ['Effective', mode.effective ? 'yes' : 'no'],
+        ['Entry Mult', formatNumber(mode.entryMultiplier)],
         ['Entries 1h', `${formatNumber(mode.entriesLastHour)} / ${formatNumber(mode.maxEntriesPerHour)}`],
         ['Min Gap Sec', formatNumber(mode.minSecondsBetweenEntries)],
         ['Loss Streak', `${formatNumber(mode.consecutiveLosses)} / ${formatNumber(mode.maxConsecutiveLosses)}`],
         ['Guard', mode.guardStatus || '-']
       ].map(([label, value]) => `<div class="stat"><div class="label">${label}</div><div class="value">${escapeHtml(value)}</div></div>`).join('');
-      byId('aggressiveModeReason').textContent = mode.lastBlockReason || '-';
+      byId('aggressiveModeReason').textContent = `Block: ${mode.lastBlockReason || '-'} | No trade: ${mode.lastNoTradeReason || '-'}`;
       byId('aggressiveModeEnabled').value = String(Boolean(latest?.settings?.aggressiveModeEnabled));
+      byId('aggressiveModeKind').value = latest?.settings?.aggressiveModeKind || 'normal';
+      byId('aggressiveEntryMultiplier').value = latest?.settings?.aggressiveEntryMultiplier ?? 1.5;
+      byId('aggressiveMaxOrdersPerHour').value = latest?.settings?.aggressiveMaxOrdersPerHour ?? 6;
+      byId('aggressiveMinSecondsBetweenEntries').value = latest?.settings?.aggressiveMinSecondsBetweenEntries ?? 60;
+      byId('aggressiveMaxConsecutiveLosses').value = latest?.settings?.aggressiveMaxConsecutiveLosses ?? 2;
     };
     const renderAutoRecommendation = (recommendation) => {
       byId('autoRecommendationReason').textContent = recommendation.reason || '-';
@@ -1395,9 +1443,17 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
     };
 
     fields.forEach(id => byId(id).addEventListener('input', () => { dirty = true; }));
-    byId('aggressiveModeEnabled').addEventListener('change', async () => {
+    const saveAggressiveSettings = async () => {
       if (!latest?.settings) return;
-      const payload = { ...latest.settings, aggressiveModeEnabled: byId('aggressiveModeEnabled').value === 'true' };
+      const payload = {
+        ...latest.settings,
+        aggressiveModeEnabled: byId('aggressiveModeEnabled').value === 'true',
+        aggressiveModeKind: byId('aggressiveModeKind').value,
+        aggressiveEntryMultiplier: Number(byId('aggressiveEntryMultiplier').value),
+        aggressiveMaxOrdersPerHour: Number(byId('aggressiveMaxOrdersPerHour').value),
+        aggressiveMinSecondsBetweenEntries: Number(byId('aggressiveMinSecondsBetweenEntries').value),
+        aggressiveMaxConsecutiveLosses: Number(byId('aggressiveMaxConsecutiveLosses').value)
+      };
       const response = await fetch('/api/futures/settings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1409,7 +1465,11 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         dirty = false;
         await load(true);
       }
-    });
+    };
+    ['aggressiveModeEnabled','aggressiveModeKind','aggressiveEntryMultiplier','aggressiveMaxOrdersPerHour','aggressiveMinSecondsBetweenEntries','aggressiveMaxConsecutiveLosses']
+      .forEach(id => byId(id).addEventListener('change', () => {
+        saveAggressiveSettings().catch((error) => setControlStatus('error', error.message, latest?.settings?.symbol));
+      }));
     byId('newProfile').addEventListener('click', () => {
       creating = true;
       selectedSymbol = null;
@@ -1595,7 +1655,12 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         TakeProfitPercent = settings.TakeProfitPercent,
         LiquidationBufferPercent = settings.LiquidationBufferPercent,
         ReduceOnlyEnabled = settings.ReduceOnlyEnabled,
-        AggressiveModeEnabled = settings.AggressiveModeEnabled
+        AggressiveModeEnabled = settings.AggressiveModeEnabled,
+        AggressiveModeKind = FormatEnum(settings.AggressiveModeKind),
+        AggressiveEntryMultiplier = settings.AggressiveEntryMultiplier,
+        AggressiveMaxOrdersPerHour = settings.AggressiveMaxOrdersPerHour,
+        AggressiveMinSecondsBetweenEntries = settings.AggressiveMinSecondsBetweenEntries,
+        AggressiveMaxConsecutiveLosses = settings.AggressiveMaxConsecutiveLosses
     };
 
     private static FuturesPositionView MapPosition(FuturesBotSettings settings, BybitPositionSnapshot position) => new()
@@ -1740,21 +1805,29 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             fill.CreatedAt >= cutoff);
         var consecutiveLosses = CountConsecutiveLosingExits(fills);
         var lastBlock = riskDecisions
-            .Where(decision => !decision.IsAllowed)
+            .Where(decision => !decision.IsAllowed &&
+                !string.Equals(decision.Source, "AggressiveNoTrade", StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(decision => decision.CreatedAt)
+            .FirstOrDefault();
+        var lastNoTrade = riskDecisions
+            .Where(decision => string.Equals(decision.Source, "AggressiveNoTrade", StringComparison.OrdinalIgnoreCase))
             .OrderByDescending(decision => decision.CreatedAt)
             .FirstOrDefault();
         return new FuturesAggressiveModeView
         {
             Enabled = settings.AggressiveModeEnabled,
             Effective = settings.AggressiveModeEnabled && _appOptions.TradingMode == TradingMode.Paper,
+            ModeKind = FormatEnum(settings.AggressiveModeKind),
             PaperOnly = true,
+            EntryMultiplier = ResolveAggressiveEntryMultiplier(settings),
             EntriesLastHour = entriesLastHour,
-            MaxEntriesPerHour = _riskOptions.AggressiveMaxOrdersPerHour,
-            MinSecondsBetweenEntries = _riskOptions.AggressiveMinSecondsBetweenEntries,
+            MaxEntriesPerHour = ResolveAggressiveMaxOrdersPerHour(settings),
+            MinSecondsBetweenEntries = ResolveAggressiveMinSecondsBetweenEntries(settings),
             ConsecutiveLosses = consecutiveLosses,
-            MaxConsecutiveLosses = _riskOptions.AggressiveMaxConsecutiveLosses,
+            MaxConsecutiveLosses = ResolveAggressiveMaxConsecutiveLosses(settings),
             GuardStatus = lastBlock is null ? "allowed" : "blocked",
-            LastBlockReason = lastBlock?.Reason ?? "-"
+            LastBlockReason = lastBlock?.Reason ?? "-",
+            LastNoTradeReason = lastNoTrade?.Reason ?? "-"
         };
     }
 
@@ -1974,50 +2047,48 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         FuturesPositionSnapshot position,
         CancellationToken cancellationToken)
     {
-        if (position.Size <= 0m)
-        {
-            return null;
-        }
-
         if (!settings.AggressiveModeEnabled)
         {
-            return "Futures scale-in requires aggressive mode.";
+            return position.Size > 0m ? "Futures scale-in requires aggressive mode." : null;
         }
 
-        if (_appOptions.TradingMode != TradingMode.Paper)
+        if (position.Size > 0m && _appOptions.TradingMode != TradingMode.Paper)
         {
             return "Futures aggressive scale-in is paper-only until testnet soak validates the lifecycle.";
         }
 
         var fills = await _repository.GetFuturesFillsAsync(settings.Symbol, 1000, cancellationToken);
         var now = DateTimeOffset.UtcNow;
-        if (_riskOptions.AggressiveMaxOrdersPerHour > 0)
+        var maxOrdersPerHour = ResolveAggressiveMaxOrdersPerHour(settings);
+        if (maxOrdersPerHour > 0)
         {
             var cutoff = now.AddHours(-1);
             var entriesLastHour = fills.Count(fill =>
                 fill.Action == FuturesTradeAction.OpenLong &&
                 fill.CreatedAt >= cutoff);
-            if (entriesLastHour >= _riskOptions.AggressiveMaxOrdersPerHour)
+            if (entriesLastHour >= maxOrdersPerHour)
             {
                 return "FUTURES_AGGRESSIVE_MAX_ORDERS_PER_HOUR limit reached.";
             }
         }
 
-        if (_riskOptions.AggressiveMinSecondsBetweenEntries > 0)
+        var minSecondsBetweenEntries = ResolveAggressiveMinSecondsBetweenEntries(settings);
+        if (minSecondsBetweenEntries > 0)
         {
             var lastEntry = fills
                 .Where(fill => fill.Action == FuturesTradeAction.OpenLong)
                 .OrderByDescending(fill => fill.CreatedAt)
                 .FirstOrDefault();
             if (lastEntry is not null &&
-                now - lastEntry.CreatedAt < TimeSpan.FromSeconds(_riskOptions.AggressiveMinSecondsBetweenEntries))
+                now - lastEntry.CreatedAt < TimeSpan.FromSeconds(minSecondsBetweenEntries))
             {
                 return "FUTURES_AGGRESSIVE_MIN_SECONDS_BETWEEN_ENTRIES is active.";
             }
         }
 
-        if (_riskOptions.AggressiveMaxConsecutiveLosses > 0 &&
-            CountConsecutiveLosingExits(fills) >= _riskOptions.AggressiveMaxConsecutiveLosses)
+        var maxConsecutiveLosses = ResolveAggressiveMaxConsecutiveLosses(settings);
+        if (maxConsecutiveLosses > 0 &&
+            CountConsecutiveLosingExits(fills) >= maxConsecutiveLosses)
         {
             return "FUTURES_AGGRESSIVE_MAX_CONSECUTIVE_LOSSES limit reached.";
         }
@@ -2036,12 +2107,24 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         MaxDailyLossEquityPercent = _riskOptions.MaxDailyLossEquityPercent,
         MaxDrawdownEquityPercent = _riskOptions.MaxDrawdownEquityPercent,
         MaxOpenPositions = _riskOptions.MaxOpenPositions,
-        AggressiveMaxOrdersPerHour = _riskOptions.AggressiveMaxOrdersPerHour,
-        AggressiveMinSecondsBetweenEntries = _riskOptions.AggressiveMinSecondsBetweenEntries,
-        AggressiveMaxConsecutiveLosses = _riskOptions.AggressiveMaxConsecutiveLosses,
+        AggressiveMaxOrdersPerHour = ResolveAggressiveMaxOrdersPerHour(settings),
+        AggressiveMinSecondsBetweenEntries = ResolveAggressiveMinSecondsBetweenEntries(settings),
+        AggressiveMaxConsecutiveLosses = ResolveAggressiveMaxConsecutiveLosses(settings),
         EmergencyPause = _riskOptions.EmergencyPause,
         StopLossRequired = _riskOptions.StopLossRequired
     };
+
+    private decimal ResolveAggressiveEntryMultiplier(FuturesBotSettings settings) =>
+        settings.AggressiveEntryMultiplier > 0m ? settings.AggressiveEntryMultiplier : _futuresOptions.AggressiveEntryMultiplier;
+
+    private int ResolveAggressiveMaxOrdersPerHour(FuturesBotSettings settings) =>
+        settings.AggressiveMaxOrdersPerHour >= 0 ? settings.AggressiveMaxOrdersPerHour : _riskOptions.AggressiveMaxOrdersPerHour;
+
+    private int ResolveAggressiveMinSecondsBetweenEntries(FuturesBotSettings settings) =>
+        settings.AggressiveMinSecondsBetweenEntries >= 0 ? settings.AggressiveMinSecondsBetweenEntries : _riskOptions.AggressiveMinSecondsBetweenEntries;
+
+    private int ResolveAggressiveMaxConsecutiveLosses(FuturesBotSettings settings) =>
+        settings.AggressiveMaxConsecutiveLosses >= 0 ? settings.AggressiveMaxConsecutiveLosses : _riskOptions.AggressiveMaxConsecutiveLosses;
 
     private static decimal MinPositive(decimal left, decimal right)
     {
@@ -2172,6 +2255,11 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         LiquidationBufferPercent = recommendation.LiquidationBufferPercent,
         ReduceOnlyEnabled = recommendation.ReduceOnlyEnabled,
         AggressiveModeEnabled = currentSettings.AggressiveModeEnabled,
+        AggressiveModeKind = currentSettings.AggressiveModeKind,
+        AggressiveEntryMultiplier = currentSettings.AggressiveEntryMultiplier,
+        AggressiveMaxOrdersPerHour = currentSettings.AggressiveMaxOrdersPerHour,
+        AggressiveMinSecondsBetweenEntries = currentSettings.AggressiveMinSecondsBetweenEntries,
+        AggressiveMaxConsecutiveLosses = currentSettings.AggressiveMaxConsecutiveLosses,
         UpdatedAt = DateTimeOffset.UtcNow
     };
 
@@ -2192,6 +2280,8 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         StopLossPercent = options.StopLossRequired ? 2m : 0m,
         ReduceOnlyEnabled = true,
         AggressiveModeEnabled = options.AggressiveModeEnabled,
+        AggressiveModeKind = ParseAggressiveModeKind(options.AggressiveModeKind) ?? FuturesAggressiveModeKind.Normal,
+        AggressiveEntryMultiplier = options.AggressiveEntryMultiplier,
         UpdatedAt = DateTimeOffset.UtcNow
     };
 
@@ -2253,6 +2343,26 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             errors.Add("Liquidation buffer percent cannot be negative.");
         }
 
+        if (request.AggressiveEntryMultiplier <= 0m)
+        {
+            errors.Add("Aggressive entry multiplier must be positive.");
+        }
+
+        if (request.AggressiveMaxOrdersPerHour < 0)
+        {
+            errors.Add("Aggressive max orders per hour cannot be negative.");
+        }
+
+        if (request.AggressiveMinSecondsBetweenEntries < 0)
+        {
+            errors.Add("Aggressive min seconds between entries cannot be negative.");
+        }
+
+        if (request.AggressiveMaxConsecutiveLosses < 0)
+        {
+            errors.Add("Aggressive max consecutive losses cannot be negative.");
+        }
+
         return errors;
     }
 
@@ -2292,6 +2402,14 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             _ => null
         };
 
+    private static FuturesAggressiveModeKind? ParseAggressiveModeKind(string? value) =>
+        NormalizeToken(value) switch
+        {
+            "" or "normal" => FuturesAggressiveModeKind.Normal,
+            "test" => FuturesAggressiveModeKind.Test,
+            _ => null
+        };
+
     private static string? NormalizeStrategyConfigJson(string? value)
     {
         if (string.IsNullOrWhiteSpace(value))
@@ -2326,6 +2444,8 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             FuturesMarginMode.Cross => "cross",
             FuturesPositionMode.OneWay => "oneway",
             FuturesPositionMode.Hedge => "hedge",
+            FuturesAggressiveModeKind.Normal => "normal",
+            FuturesAggressiveModeKind.Test => "test",
             _ => value.ToString().ToLowerInvariant()
         };
     }

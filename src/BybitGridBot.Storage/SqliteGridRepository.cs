@@ -126,6 +126,11 @@ public sealed class SqliteGridRepository : IGridRepository
                 liquidation_buffer_percent TEXT NOT NULL,
                 reduce_only_enabled INTEGER NOT NULL,
                 aggressive_mode_enabled INTEGER NOT NULL DEFAULT 0,
+                aggressive_mode_kind TEXT NOT NULL DEFAULT 'Normal',
+                aggressive_entry_multiplier TEXT NOT NULL DEFAULT '1.5',
+                aggressive_max_orders_per_hour INTEGER NOT NULL DEFAULT 6,
+                aggressive_min_seconds_between_entries INTEGER NOT NULL DEFAULT 60,
+                aggressive_max_consecutive_losses INTEGER NOT NULL DEFAULT 2,
                 updated_at TEXT NOT NULL
             );
 
@@ -423,6 +428,11 @@ public sealed class SqliteGridRepository : IGridRepository
         await EnsureAggressiveModeStateColumnsAsync(connection, "bot_state", cancellationToken);
         await EnsureColumnAsync(connection, "futures_settings", "enabled", "INTEGER NOT NULL DEFAULT 1", cancellationToken);
         await EnsureColumnAsync(connection, "futures_settings", "aggressive_mode_enabled", "INTEGER NOT NULL DEFAULT 0", cancellationToken);
+        await EnsureColumnAsync(connection, "futures_settings", "aggressive_mode_kind", "TEXT NOT NULL DEFAULT 'Normal'", cancellationToken);
+        await EnsureColumnAsync(connection, "futures_settings", "aggressive_entry_multiplier", "TEXT NOT NULL DEFAULT '1.5'", cancellationToken);
+        await EnsureColumnAsync(connection, "futures_settings", "aggressive_max_orders_per_hour", "INTEGER NOT NULL DEFAULT 6", cancellationToken);
+        await EnsureColumnAsync(connection, "futures_settings", "aggressive_min_seconds_between_entries", "INTEGER NOT NULL DEFAULT 60", cancellationToken);
+        await EnsureColumnAsync(connection, "futures_settings", "aggressive_max_consecutive_losses", "INTEGER NOT NULL DEFAULT 2", cancellationToken);
         await EnsureColumnAsync(connection, "futures_fills", "exec_id", "TEXT NULL", cancellationToken);
         await EnsureColumnAsync(connection, "futures_fills", "exec_type", "TEXT NOT NULL DEFAULT 'Trade'", cancellationToken);
         await EnsureColumnAsync(connection, "futures_positions", "funding", "TEXT NOT NULL DEFAULT '0'", cancellationToken);
@@ -557,7 +567,9 @@ public sealed class SqliteGridRepository : IGridRepository
         const string sql = """
             SELECT enabled, symbol, category, strategy_type, strategy_config_json, leverage, margin_mode, position_mode,
                    direction, max_notional_usdt, max_margin_usdt, stop_loss_percent, take_profit_percent,
-                   liquidation_buffer_percent, reduce_only_enabled, aggressive_mode_enabled, updated_at
+                   liquidation_buffer_percent, reduce_only_enabled, aggressive_mode_enabled, aggressive_mode_kind,
+                   aggressive_entry_multiplier, aggressive_max_orders_per_hour, aggressive_min_seconds_between_entries,
+                   aggressive_max_consecutive_losses, updated_at
             FROM futures_settings
             WHERE settings_id = $settings_id
             LIMIT 1;
@@ -582,7 +594,9 @@ public sealed class SqliteGridRepository : IGridRepository
         const string sql = """
             SELECT enabled, symbol, category, strategy_type, strategy_config_json, leverage, margin_mode, position_mode,
                    direction, max_notional_usdt, max_margin_usdt, stop_loss_percent, take_profit_percent,
-                   liquidation_buffer_percent, reduce_only_enabled, aggressive_mode_enabled, updated_at
+                   liquidation_buffer_percent, reduce_only_enabled, aggressive_mode_enabled, aggressive_mode_kind,
+                   aggressive_entry_multiplier, aggressive_max_orders_per_hour, aggressive_min_seconds_between_entries,
+                   aggressive_max_consecutive_losses, updated_at
             FROM futures_settings
             ORDER BY symbol;
             """;
@@ -607,12 +621,16 @@ public sealed class SqliteGridRepository : IGridRepository
             INSERT INTO futures_settings (
                 settings_id, enabled, symbol, category, strategy_type, strategy_config_json, leverage, margin_mode, position_mode,
                 direction, max_notional_usdt, max_margin_usdt, stop_loss_percent, take_profit_percent,
-                liquidation_buffer_percent, reduce_only_enabled, aggressive_mode_enabled, updated_at
+                liquidation_buffer_percent, reduce_only_enabled, aggressive_mode_enabled, aggressive_mode_kind,
+                aggressive_entry_multiplier, aggressive_max_orders_per_hour, aggressive_min_seconds_between_entries,
+                aggressive_max_consecutive_losses, updated_at
             )
             VALUES (
                 $settings_id, $enabled, $symbol, $category, $strategy_type, $strategy_config_json, $leverage, $margin_mode, $position_mode,
                 $direction, $max_notional_usdt, $max_margin_usdt, $stop_loss_percent, $take_profit_percent,
-                $liquidation_buffer_percent, $reduce_only_enabled, $aggressive_mode_enabled, $updated_at
+                $liquidation_buffer_percent, $reduce_only_enabled, $aggressive_mode_enabled, $aggressive_mode_kind,
+                $aggressive_entry_multiplier, $aggressive_max_orders_per_hour, $aggressive_min_seconds_between_entries,
+                $aggressive_max_consecutive_losses, $updated_at
             )
             ON CONFLICT(settings_id) DO UPDATE SET
                 enabled = excluded.enabled,
@@ -631,6 +649,11 @@ public sealed class SqliteGridRepository : IGridRepository
                 liquidation_buffer_percent = excluded.liquidation_buffer_percent,
                 reduce_only_enabled = excluded.reduce_only_enabled,
                 aggressive_mode_enabled = excluded.aggressive_mode_enabled,
+                aggressive_mode_kind = excluded.aggressive_mode_kind,
+                aggressive_entry_multiplier = excluded.aggressive_entry_multiplier,
+                aggressive_max_orders_per_hour = excluded.aggressive_max_orders_per_hour,
+                aggressive_min_seconds_between_entries = excluded.aggressive_min_seconds_between_entries,
+                aggressive_max_consecutive_losses = excluded.aggressive_max_consecutive_losses,
                 updated_at = excluded.updated_at;
             """;
 
@@ -654,6 +677,11 @@ public sealed class SqliteGridRepository : IGridRepository
         command.Parameters.AddWithValue("$liquidation_buffer_percent", FormatDecimal(settings.LiquidationBufferPercent));
         command.Parameters.AddWithValue("$reduce_only_enabled", settings.ReduceOnlyEnabled);
         command.Parameters.AddWithValue("$aggressive_mode_enabled", settings.AggressiveModeEnabled);
+        command.Parameters.AddWithValue("$aggressive_mode_kind", settings.AggressiveModeKind.ToString());
+        command.Parameters.AddWithValue("$aggressive_entry_multiplier", FormatDecimal(settings.AggressiveEntryMultiplier));
+        command.Parameters.AddWithValue("$aggressive_max_orders_per_hour", settings.AggressiveMaxOrdersPerHour);
+        command.Parameters.AddWithValue("$aggressive_min_seconds_between_entries", settings.AggressiveMinSecondsBetweenEntries);
+        command.Parameters.AddWithValue("$aggressive_max_consecutive_losses", settings.AggressiveMaxConsecutiveLosses);
         command.Parameters.AddWithValue("$updated_at", settings.UpdatedAt.ToString("O", CultureInfo.InvariantCulture));
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
@@ -1640,7 +1668,12 @@ public sealed class SqliteGridRepository : IGridRepository
             LiquidationBufferPercent = ParseDecimal(reader.GetString(13)),
             ReduceOnlyEnabled = reader.GetBoolean(14),
             AggressiveModeEnabled = reader.GetBoolean(15),
-            UpdatedAt = DateTimeOffset.Parse(reader.GetString(16), CultureInfo.InvariantCulture)
+            AggressiveModeKind = ParseEnum(reader.GetString(16), FuturesAggressiveModeKind.Normal),
+            AggressiveEntryMultiplier = ParseDecimal(reader.GetString(17)),
+            AggressiveMaxOrdersPerHour = reader.GetInt32(18),
+            AggressiveMinSecondsBetweenEntries = reader.GetInt32(19),
+            AggressiveMaxConsecutiveLosses = reader.GetInt32(20),
+            UpdatedAt = DateTimeOffset.Parse(reader.GetString(21), CultureInfo.InvariantCulture)
         };
     }
 
