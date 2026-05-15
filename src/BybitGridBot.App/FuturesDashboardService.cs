@@ -776,9 +776,23 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
     .copy-controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
     .hours-input { max-width: 88px; }
     .compact-button { padding: 9px 11px; }
+    .market-ticker {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      margin: 14px 0 4px;
+      padding: 16px 18px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255,255,255,0.88);
+    }
+    .ticker-symbol { font-size: 18px; font-weight: 800; }
+    .ticker-price { font-size: 30px; font-weight: 900; line-height: 1; }
     @media (max-width: 980px) {
       .layout, form { grid-template-columns: 1fr; }
       .stats { grid-template-columns: repeat(2, minmax(0,1fr)); }
+      .market-ticker { align-items: flex-start; flex-direction: column; }
       th, td { white-space: nowrap; }
     }
   </style>
@@ -796,6 +810,8 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
     </div>
 
     <div class="tabs" id="profileTabs"></div>
+
+    <section class="market-ticker" id="marketTicker"></section>
 
     <section class="stats" id="positionStats"></section>
 
@@ -1045,10 +1061,21 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             <td>${formatDate(config.updatedAt)}</td>
           </tr>`).join('');
     };
+    const resolveCurrentPrice = (data) => Number(data.position?.markPrice || data.autoRecommendation?.lastPrice || 0);
+    const renderMarketTicker = (data) => {
+      const symbol = data.position?.symbol || data.settings?.symbol || selectedSymbol || '-';
+      const price = resolveCurrentPrice(data);
+      byId('marketTicker').innerHTML = `
+        <div>
+          <div class="label">Current Futures Price</div>
+          <div class="ticker-symbol">${escapeHtml(symbol)}</div>
+        </div>
+        <div class="ticker-price">${formatCurrentPrice(symbol, price)}</div>`;
+    };
     const renderPosition = (data) => {
       const p = data.position;
       const symbol = p.symbol || data.settings?.symbol || selectedSymbol || '';
-      const currentPrice = Number(p.markPrice || data.autoRecommendation?.lastPrice || 0);
+      const currentPrice = resolveCurrentPrice(data);
       const error = data.positionError ? `<div class="notice">Position sync unavailable: ${escapeHtml(data.positionError)}</div>` : '';
       byId('positionStats').innerHTML = [
         ['Current Price', formatCurrentPrice(symbol, currentPrice)],
@@ -1291,6 +1318,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
       }
       renderTabs(data.profiles);
       renderConfigs(data.configSummaries || []);
+      renderMarketTicker(data);
       renderPosition(data);
       renderPaperAccount(data.paperAccount || {}, data.pnlStats || {});
       renderRuntime(data);
