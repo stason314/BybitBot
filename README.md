@@ -51,7 +51,7 @@ Current scope:
 - `FuturesUserStreamWorker` runs outside paper mode when `FUTURES_USER_STREAM_ENABLED=true`: it authenticates to Bybit private WebSocket, keeps local managed orders/fills/positions current between 30-second REST reconciliation cycles, and pauses the profile on non-normal position status or liquidation-buffer breach
 - `FuturesExecutionService` is the dedicated execution layer: `OpenLong` maps to Bybit `Buy` with `reduceOnly=false`; `CloseLong` and `ReduceOnlyClose` map to Bybit `Sell` with `reduceOnly=true`
 - `FuturesPreflightService` validates `FUTURES_ENABLED=true`, `category=linear`, isolated margin, one-way mode, leverage, and instrument min qty/min notional before testnet trading
-- futures runtime guards keep execution paper-only unless `FUTURES_TESTNET_ENABLED=true`; mainnet also requires `FUTURES_MAINNET_ENABLED=true`
+- futures runtime guards keep execution paper-only unless `FUTURES_TESTNET_ENABLED=true`; mainnet also requires `FUTURES_MAINNET_ENABLED=true` and every `FUTURES_MAINNET_CONFIRM_*` checklist flag
 - the first `FUTURES_MIN_SIZE_ORDER_COUNT` futures open-long orders must use instrument minimum size, and leverage is capped by `FUTURES_MVP_MAX_LEVERAGE`
 - every futures `OpenLong` must attach `stopLoss` in Bybit order create; missing stop-loss protection blocks the order before it reaches Bybit
 - futures state now has dedicated SQLite tables: `futures_orders`, `futures_positions`, `futures_fills`, and `futures_risk_decisions`
@@ -66,7 +66,7 @@ Current scope:
 - `GridBotWorker` hard-fails non-spot runtime categories when the spot worker is registered. Futures profile category is controlled by `FUTURES_CATEGORY`.
 - In futures-only mode (`CATEGORY=linear` and `FUTURES_ENABLED=true`) the spot worker is not registered; with `CATEGORY=spot`, spot and futures workers can run side by side.
 
-Futures mainnet order placement is still blocked. The worker only executes in `paper` or `testnet`.
+Futures mainnet order placement is blocked by default. It is allowed only when `TRADING_MODE=mainnet`, `FUTURES_MAINNET_ENABLED=true`, and the explicit mainnet checklist flags confirm testnet soak, protective stops, restart recovery, emergency pause, and Telegram alerts.
 
 Example futures defaults:
 
@@ -97,6 +97,11 @@ FUTURES_MAX_ENTRY_ATR_PERCENT=6
 FUTURES_BTC_RISK_OFF_ENABLED=true
 FUTURES_BTC_RISK_OFF_MOVE_PERCENT=-1.5
 FUTURES_STOP_LOSS_COOLDOWN_MINUTES=30
+FUTURES_MAINNET_CONFIRM_TESTNET_SOAK=false
+FUTURES_MAINNET_CONFIRM_PROTECTIVE_STOPS=false
+FUTURES_MAINNET_CONFIRM_RESTART_RECOVERY=false
+FUTURES_MAINNET_CONFIRM_EMERGENCY_PAUSE=false
+FUTURES_MAINNET_CONFIRM_TELEGRAM_ALERTS=false
 BYBIT_PRIVATE_WS_URL=
 ```
 

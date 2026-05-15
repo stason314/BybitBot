@@ -203,6 +203,7 @@ public sealed class FuturesIntegrationSafetyTests
         return new FuturesExecutionService(
             Options.Create(new AppOptions { TradingMode = tradingMode }),
             Options.Create(futuresOptions ?? new FuturesOptions { MvpMaxLeverage = 2m }),
+            Options.Create(new FuturesMainnetChecklistOptions()),
             new FakeBybitRestClient(),
             new FuturesPaperSimulator(new FuturesAccounting()),
             repository);
