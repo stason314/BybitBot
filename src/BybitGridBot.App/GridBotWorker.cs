@@ -47,6 +47,7 @@ public sealed class GridBotWorker : BackgroundService
     private readonly FuturesOptions _futuresOptions;
     private readonly GridOptions _defaultGridOptions;
     private readonly IBybitRestClient _bybitRestClient;
+    private readonly ExpectedProfitFilter _expectedProfitFilter;
     private readonly ILogger<GridBotWorker> _logger;
     private readonly MarketRegimeAnalyzer _marketRegimeAnalyzer;
     private readonly MarketRegimeFilter _marketRegimeFilter;
@@ -87,6 +88,7 @@ public sealed class GridBotWorker : BackgroundService
         IBybitRestClient bybitRestClient,
         BtdStrategy btdStrategy,
         DcaStrategy dcaStrategy,
+        ExpectedProfitFilter expectedProfitFilter,
         IGridTradingStrategy strategy,
         RiskManager riskManager,
         MarketRegimeAnalyzer marketRegimeAnalyzer,
@@ -106,6 +108,7 @@ public sealed class GridBotWorker : BackgroundService
         _gridOptions = _defaultGridOptions;
         _riskOptions = riskOptions.Value;
         _bybitRestClient = bybitRestClient;
+        _expectedProfitFilter = expectedProfitFilter;
         _btdStrategy = btdStrategy;
         _dcaStrategy = dcaStrategy;
         _strategy = strategy;
@@ -521,7 +524,7 @@ public sealed class GridBotWorker : BackgroundService
 
     private static string FormatStrategyScoresForLog(MarketRegimeAnalysis regime)
     {
-        var grid = regime.Regime is MarketRegimeType.Range or MarketRegimeType.LowVolatility ? 80 : 35;
+        var grid = regime.Regime == MarketRegimeType.Range ? 80 : 35;
         var btd = regime.Regime == MarketRegimeType.Trend && regime.MovePercent < 0m ? 70 : 40;
         var breakout = regime.Regime == MarketRegimeType.Breakout ? 82 : 25;
         var trend = regime.Regime == MarketRegimeType.Trend && regime.MovePercent > 0m ? 78 : 30;
@@ -1322,7 +1325,7 @@ public sealed class GridBotWorker : BackgroundService
                 return state;
             }
 
-            await CleanRiskyActiveOrdersAsync(profile, state, activeOrders, cancellationToken);
+            await CleanRiskyActiveOrdersAsync(profile, state, levels, activeOrders, cancellationToken);
             await SimulatePaperFillsAsync(state, levels, profile, currentPrice, cancellationToken);
         }
         else
@@ -1335,7 +1338,7 @@ public sealed class GridBotWorker : BackgroundService
                 return state;
             }
 
-            await CleanRiskyActiveOrdersAsync(profile, state, activeOrders, cancellationToken);
+            await CleanRiskyActiveOrdersAsync(profile, state, levels, activeOrders, cancellationToken);
         }
 
         if (state.IsPaused)
@@ -1451,6 +1454,36 @@ public sealed class GridBotWorker : BackgroundService
             return state;
         }
 
+        if (!IsGridSidewaysMarket(marketRegime, marketPhase))
+        {
+            _logger.LogInformation(
+                "Grid orders skipped for {Symbol}: grid is allowed only in sideways markets. Regime={Regime}, Move={MovePercent:F4}%, Phase={Phase}, Reason={Reason}",
+                _gridOptions.Symbol,
+                marketRegime.Regime,
+                marketRegime.MovePercent,
+                marketPhase.Phase,
+                marketPhase.Reason);
+
+            await CancelActiveBuyOrdersAsync(activeGridOrders, cancellationToken);
+            activeGridOrders = await _repository.GetActiveOrdersAsync(_gridOptions.Symbol, cancellationToken);
+            if (state.BaseAssetQuantity > 0m)
+            {
+                activeGridOrders = await ApplyReduceOnlyProtectionAsync(
+                    profile,
+                    state,
+                    levels,
+                    instrument,
+                    activeGridOrders,
+                    currentPrice,
+                    $"grid-non-sideways-market: regime={marketRegime.Regime}, move={marketRegime.MovePercent:0.####}%, phase={marketPhase.Phase}",
+                    cancellationToken);
+                return await FinishProtectiveReduceOnlyCycleAsync(profile, state, levels, currentPrice, cancellationToken);
+            }
+
+            await _repository.SaveBotStateAsync(state, cancellationToken);
+            return state;
+        }
+
         if (IsProtectiveSellOnlyPhase(marketPhase.Phase))
         {
             await CancelActiveBuyOrdersAsync(activeGridOrders, cancellationToken);
@@ -1496,7 +1529,7 @@ public sealed class GridBotWorker : BackgroundService
             return state;
         }
 
-        activeGridOrders = await CleanRiskyActiveOrdersAsync(profile, state, activeGridOrders, cancellationToken);
+        activeGridOrders = await CleanRiskyActiveOrdersAsync(profile, state, levels, activeGridOrders, cancellationToken);
         var wallet = _appOptions.TradingMode == TradingMode.Paper
             ? null
             : await _bybitRestClient.GetWalletBalanceAsync(cancellationToken, _quoteAsset, _baseAsset);
@@ -2202,12 +2235,19 @@ public sealed class GridBotWorker : BackgroundService
                 continue;
             }
 
+            var expectedProfitPercent = ExpectedProfitFilter.CalculateLongRoundTripPercent(state.AverageEntryPrice, price);
+
             var createdOrders = await ExecuteStrategyDecisionAsync(
                 new StrategyExecutionDecision
                 {
-                    OrderIntents = [new OrderIntent(TradeSide.Sell, price, quantity, ReduceOnlyExitMarker, ReduceOnlySource)]
+                    OrderIntents = [new OrderIntent(TradeSide.Sell, price, quantity, ReduceOnlyExitMarker, ReduceOnlySource, expectedProfitPercent)]
                 },
                 cancellationToken);
+            if (createdOrders.Count == 0)
+            {
+                continue;
+            }
+
             var createdOrder = createdOrders[0];
             activeOrders = activeOrders.Append(createdOrder).ToArray();
             availableBase -= quantity;
@@ -2265,6 +2305,15 @@ public sealed class GridBotWorker : BackgroundService
                 continue;
             }
 
+            var targetSellLevel = _strategy.GetNextUpperLevel(levels, level.Price);
+            if (targetSellLevel is null)
+            {
+                _logger.LogInformation("Grid buy at {Price} skipped because no upper sell level exists for expected profit calculation.", level.Price);
+                continue;
+            }
+
+            var buyExpectedProfitPercent = ExpectedProfitFilter.CalculateLongRoundTripPercent(level.Price, targetSellLevel.Price);
+
             var orderSizeUsdt = GetOrderSizeUsdt(TradeSide.Buy, level.Price, state);
             var quantity = instrument.RoundQuantity(orderSizeUsdt / level.Price);
             if (quantity <= 0m || quantity < instrument.MinOrderQty)
@@ -2298,9 +2347,14 @@ public sealed class GridBotWorker : BackgroundService
 
             var decision = new StrategyExecutionDecision
             {
-                OrderIntents = [new OrderIntent(TradeSide.Buy, level.Price, quantity, StrategySource: ResolveGridSource(profile))]
+                OrderIntents = [new OrderIntent(TradeSide.Buy, level.Price, quantity, StrategySource: ResolveGridSource(profile), ExpectedProfitPercent: buyExpectedProfitPercent)]
             };
             var createdOrders = await ExecuteStrategyDecisionAsync(decision, cancellationToken);
+            if (createdOrders.Count == 0)
+            {
+                continue;
+            }
+
             var createdOrder = createdOrders[0];
             activeOrders = activeOrders.Append(createdOrder).ToArray();
         }
@@ -2326,6 +2380,8 @@ public sealed class GridBotWorker : BackgroundService
                 continue;
             }
 
+            var sellExpectedProfitPercent = ExpectedProfitFilter.CalculateLongRoundTripPercent(state.AverageEntryPrice, level.Price);
+
             var availableBase = GetAvailableBaseBalance(state, activeOrders, wallet);
             if (availableBase < quantity)
             {
@@ -2341,9 +2397,14 @@ public sealed class GridBotWorker : BackgroundService
 
             var decision = new StrategyExecutionDecision
             {
-                OrderIntents = [new OrderIntent(TradeSide.Sell, level.Price, quantity, StrategySource: ResolveGridSource(profile))]
+                OrderIntents = [new OrderIntent(TradeSide.Sell, level.Price, quantity, StrategySource: ResolveGridSource(profile), ExpectedProfitPercent: sellExpectedProfitPercent)]
             };
             var createdOrders = await ExecuteStrategyDecisionAsync(decision, cancellationToken);
+            if (createdOrders.Count == 0)
+            {
+                continue;
+            }
+
             var createdOrder = createdOrders[0];
             activeOrders = activeOrders.Append(createdOrder).ToArray();
         }
@@ -2472,12 +2533,18 @@ public sealed class GridBotWorker : BackgroundService
             return;
         }
 
-        await ExecuteStrategyDecisionAsync(
+        var takeProfitPrice = _dcaStrategy.CalculateTakeProfitPrice(limitPrice, config);
+        var expectedProfitPercent = ExpectedProfitFilter.CalculateLongRoundTripPercent(limitPrice, takeProfitPrice);
+        var createdOrders = await ExecuteStrategyDecisionAsync(
             new StrategyExecutionDecision
             {
-                OrderIntents = [new OrderIntent(TradeSide.Buy, limitPrice, quantity, entryMarker, ResolveDipEntrySource(profile, entryMarker))]
+                OrderIntents = [new OrderIntent(TradeSide.Buy, limitPrice, quantity, entryMarker, ResolveDipEntrySource(profile, entryMarker), expectedProfitPercent)]
             },
             cancellationToken);
+        if (createdOrders.Count == 0)
+        {
+            return;
+        }
 
         _logger.LogInformation(
             "{StrategyName} entry order created for {Symbol}. Price: {Price}, Quantity: {Quantity}, Config: {StrategyConfig}",
@@ -2543,12 +2610,19 @@ public sealed class GridBotWorker : BackgroundService
             return;
         }
 
-        await ExecuteStrategyDecisionAsync(
+        var expectedProfitPercent = ExpectedProfitFilter.CalculateLongRoundTripPercent(
+            limitPrice,
+            limitPrice * (1m + GetSignalTakeProfitPercent(config) / 100m));
+        var createdOrders = await ExecuteStrategyDecisionAsync(
             new StrategyExecutionDecision
             {
-                OrderIntents = [new OrderIntent(TradeSide.Buy, limitPrice, quantity, SignalEntryMarker, SignalSource)]
+                OrderIntents = [new OrderIntent(TradeSide.Buy, limitPrice, quantity, SignalEntryMarker, SignalSource, expectedProfitPercent)]
             },
             cancellationToken);
+        if (createdOrders.Count == 0)
+        {
+            return;
+        }
 
         _logger.LogInformation(
             "Signal buy order created for {Symbol}. Price: {Price}, Quantity: {Quantity}",
@@ -2595,12 +2669,18 @@ public sealed class GridBotWorker : BackgroundService
             return;
         }
 
-        await ExecuteStrategyDecisionAsync(
+        var skipExpectedProfitFilter = !string.Equals(reason, "take-profit", StringComparison.OrdinalIgnoreCase);
+        var expectedProfitPercent = ExpectedProfitFilter.CalculateLongRoundTripPercent(signalPosition.AverageEntryPrice, limitPrice);
+        var createdOrders = await ExecuteStrategyDecisionAsync(
             new StrategyExecutionDecision
             {
-                OrderIntents = [new OrderIntent(TradeSide.Sell, limitPrice, quantity, SignalExitMarker, SignalSource)]
+                OrderIntents = [new OrderIntent(TradeSide.Sell, limitPrice, quantity, SignalExitMarker, SignalSource, expectedProfitPercent, skipExpectedProfitFilter)]
             },
             cancellationToken);
+        if (createdOrders.Count == 0)
+        {
+            return;
+        }
 
         _logger.LogInformation(
             "Signal sell order created for {Symbol}. Reason: {Reason}, Price: {Price}, Quantity: {Quantity}",
@@ -2660,12 +2740,19 @@ public sealed class GridBotWorker : BackgroundService
             return;
         }
 
-        await ExecuteStrategyDecisionAsync(
+        var expectedProfitPercent = ExpectedProfitFilter.CalculateLongRoundTripPercent(
+            limitPrice,
+            limitPrice * (1m + config.TakeProfitPercent / 100m));
+        var createdOrders = await ExecuteStrategyDecisionAsync(
             new StrategyExecutionDecision
             {
-                OrderIntents = [new OrderIntent(TradeSide.Buy, limitPrice, quantity, TrendEntryMarker, TrendSource)]
+                OrderIntents = [new OrderIntent(TradeSide.Buy, limitPrice, quantity, TrendEntryMarker, TrendSource, expectedProfitPercent)]
             },
             cancellationToken);
+        if (createdOrders.Count == 0)
+        {
+            return;
+        }
 
         _logger.LogInformation(
             "Trend-following buy order created for {Symbol}. Price: {Price}, Quantity: {Quantity}",
@@ -2707,12 +2794,18 @@ public sealed class GridBotWorker : BackgroundService
             return;
         }
 
-        await ExecuteStrategyDecisionAsync(
+        var skipExpectedProfitFilter = !string.Equals(reason, "take-profit", StringComparison.OrdinalIgnoreCase);
+        var expectedProfitPercent = ExpectedProfitFilter.CalculateLongRoundTripPercent(trendPosition.AverageEntryPrice, limitPrice);
+        var createdOrders = await ExecuteStrategyDecisionAsync(
             new StrategyExecutionDecision
             {
-                OrderIntents = [new OrderIntent(TradeSide.Sell, limitPrice, quantity, TrendExitMarker, TrendSource)]
+                OrderIntents = [new OrderIntent(TradeSide.Sell, limitPrice, quantity, TrendExitMarker, TrendSource, expectedProfitPercent, skipExpectedProfitFilter)]
             },
             cancellationToken);
+        if (createdOrders.Count == 0)
+        {
+            return;
+        }
 
         _logger.LogInformation(
             "Trend-following sell order created for {Symbol}. Reason: {Reason}, Price: {Price}, Quantity: {Quantity}",
@@ -2861,10 +2954,11 @@ public sealed class GridBotWorker : BackgroundService
             return;
         }
 
+        var expectedProfitPercent = ExpectedProfitFilter.CalculateLongRoundTripPercent(entryPrice, takeProfitPrice);
         await ExecuteStrategyDecisionAsync(
             new StrategyExecutionDecision
             {
-                OrderIntents = [new OrderIntent(TradeSide.Sell, takeProfitPrice, quantity, filledOrder.OrderLinkId, filledOrder.StrategySource)]
+                OrderIntents = [new OrderIntent(TradeSide.Sell, takeProfitPrice, quantity, filledOrder.OrderLinkId, filledOrder.StrategySource, expectedProfitPercent)]
             },
             cancellationToken);
     }
@@ -2872,14 +2966,53 @@ public sealed class GridBotWorker : BackgroundService
     private async Task<IReadOnlyList<GridOrder>> CleanRiskyActiveOrdersAsync(
         GridBotSettings? profile,
         BotState state,
+        IReadOnlyList<GridLevel> levels,
         IReadOnlyCollection<GridOrder> activeOrders,
         CancellationToken cancellationToken)
     {
         var cleanedOrders = await CancelUnprofitableSellOrdersAsync(profile, state, activeOrders, cancellationToken);
         cleanedOrders = await CancelCrossSideOrdersAtSameLevelAsync(cleanedOrders, cancellationToken);
+        cleanedOrders = await CancelGridBuyOrdersBelowExpectedProfitAsync(levels, cleanedOrders, cancellationToken);
         cleanedOrders = await ReduceBuyExposureAfterDailyTakeProfitAsync(state, cleanedOrders, cancellationToken);
 
         return cleanedOrders.ToArray();
+    }
+
+    private async Task<IReadOnlyCollection<GridOrder>> CancelGridBuyOrdersBelowExpectedProfitAsync(
+        IReadOnlyList<GridLevel> levels,
+        IReadOnlyCollection<GridOrder> activeOrders,
+        CancellationToken cancellationToken)
+    {
+        foreach (var order in activeOrders.Where(order => order.IsActive && order.Side == TradeSide.Buy && IsGridSource(order.StrategySource)).ToArray())
+        {
+            var targetSellLevel = _strategy.GetNextUpperLevel(levels, order.Price);
+            if (targetSellLevel is null)
+            {
+                await CancelManagedOrderAsync(order, cancellationToken);
+                _logger.LogInformation(
+                    "Grid buy order {OrderLinkId} at {Price} cancelled because no upper sell level exists for expected profit calculation.",
+                    order.OrderLinkId,
+                    order.Price);
+                continue;
+            }
+
+            var expectedProfitPercent = ExpectedProfitFilter.CalculateLongRoundTripPercent(order.Price, targetSellLevel.Price);
+            var decision = _expectedProfitFilter.Evaluate(_gridOptions, order.Side, expectedProfitPercent, order.StrategySource);
+            if (decision.IsAllowed)
+            {
+                continue;
+            }
+
+            await CancelManagedOrderAsync(order, cancellationToken);
+            _logger.LogInformation(
+                "Grid buy order {OrderLinkId} at {Price} cancelled by expected profit filter. Expected: {ExpectedProfitPercent:F4}%, required: {RequiredProfitPercent:F4}%.",
+                order.OrderLinkId,
+                order.Price,
+                decision.ExpectedProfitPercent,
+                decision.RequiredProfitPercent);
+        }
+
+        return activeOrders.Where(order => order.IsActive).ToArray();
     }
 
     private async Task<IReadOnlyList<GridOrder>> CleanDcaActiveOrdersAsync(
@@ -3094,17 +3227,23 @@ public sealed class GridBotWorker : BackgroundService
             }
         }
 
+        var followUpSide = filledOrder.Side == TradeSide.Buy ? TradeSide.Sell : TradeSide.Buy;
+        var expectedProfitPercent = filledOrder.Side == TradeSide.Buy
+            ? ExpectedProfitFilter.CalculateLongRoundTripPercent(filledOrder.Price, nextLevel.Price)
+            : ExpectedProfitFilter.CalculateLongRoundTripPercent(nextLevel.Price, filledOrder.Price);
+
         await ExecuteStrategyDecisionAsync(
             new StrategyExecutionDecision
             {
                 OrderIntents =
                 [
                     new OrderIntent(
-                        filledOrder.Side == TradeSide.Buy ? TradeSide.Sell : TradeSide.Buy,
+                        followUpSide,
                         nextLevel.Price,
                         quantity,
                         filledOrder.OrderLinkId,
-                        filledOrder.StrategySource)
+                        filledOrder.StrategySource,
+                        expectedProfitPercent)
                 ]
             },
             cancellationToken);
@@ -3118,10 +3257,45 @@ public sealed class GridBotWorker : BackgroundService
 
         foreach (var intent in decision.OrderIntents)
         {
+            if (!ShouldAllowOrderByExpectedProfit(intent))
+            {
+                continue;
+            }
+
             createdOrders.Add(await ExecuteOrderIntentAsync(intent, cancellationToken));
         }
 
         return createdOrders;
+    }
+
+    private bool ShouldAllowOrderByExpectedProfit(OrderIntent intent)
+    {
+        if (intent.SkipExpectedProfitFilter)
+        {
+            _logger.LogInformation(
+                "Expected profit filter bypassed for {Source} {Side} at {Price} because the order is a risk-reduction exit.",
+                NormalizeOrderSource(intent.StrategySource, intent.ParentOrderLinkId),
+                intent.Side,
+                intent.Price);
+            return true;
+        }
+
+        var source = NormalizeOrderSource(intent.StrategySource, intent.ParentOrderLinkId);
+        var expectedProfitPercent = intent.ExpectedProfitPercent ?? 0m;
+        var decision = _expectedProfitFilter.Evaluate(_gridOptions, intent.Side, expectedProfitPercent, source);
+        if (decision.IsAllowed)
+        {
+            return true;
+        }
+
+        _logger.LogInformation(
+            "{Source} {Side} order at {Price} skipped by expected profit filter. Expected: {ExpectedProfitPercent:F4}%, required: {RequiredProfitPercent:F4}%.",
+            source,
+            intent.Side,
+            intent.Price,
+            decision.ExpectedProfitPercent,
+            decision.RequiredProfitPercent);
+        return false;
     }
 
     private Task<GridOrder> ExecuteOrderIntentAsync(OrderIntent intent, CancellationToken cancellationToken) =>
@@ -3619,6 +3793,12 @@ public sealed class GridBotWorker : BackgroundService
             or MarketPhase.Exhaustion;
     }
 
+    private static bool IsGridSidewaysMarket(MarketRegimeAnalysis marketRegime, MarketPhaseResult marketPhase)
+    {
+        return marketRegime.Regime == MarketRegimeType.Range &&
+            marketPhase.Phase == MarketPhase.RangeBound;
+    }
+
     private static string ResolveGridSource(GridBotSettings? profile)
     {
         return profile?.StrategyType switch
@@ -3640,6 +3820,13 @@ public sealed class GridBotWorker : BackgroundService
             (_, BtdEntryMarker) => BtdSource,
             _ => NormalizeOrderSource(null, entryMarker)
         };
+    }
+
+    private static bool IsGridSource(string? source)
+    {
+        return string.Equals(source, GridSource, StringComparison.Ordinal) ||
+            string.Equals(source, ComboGridSource, StringComparison.Ordinal) ||
+            string.Equals(source, HybridGridSource, StringComparison.Ordinal);
     }
 
     private static string NormalizeOrderSource(string? source, string? parentOrderLinkId)
@@ -3824,13 +4011,22 @@ public sealed class GridBotWorker : BackgroundService
                 : 0m;
         }
 
-        return await HasMinimumNetProfitAsync(
+        var hasMinimumNetProfit = await HasMinimumNetProfitAsync(
             TradeSide.Sell,
             entryPrice,
             order.Price,
             remainingQuantity,
             entryFee,
             cancellationToken);
+        if (!hasMinimumNetProfit)
+        {
+            return false;
+        }
+
+        var expectedProfitPercent = ExpectedProfitFilter.CalculateLongRoundTripPercent(entryPrice, order.Price);
+        return _expectedProfitFilter
+            .Evaluate(_gridOptions, TradeSide.Sell, expectedProfitPercent, NormalizeOrderSource(order.StrategySource, order.ParentOrderLinkId))
+            .IsAllowed;
     }
 
     private async Task<bool> HasMinimumNetProfitAsync(

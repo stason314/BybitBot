@@ -7,12 +7,23 @@ public sealed class ExpectedProfitFilter
     public ExpectedProfitDecision Evaluate(GridOptions options, TradeSide side, decimal expectedProfitPercent, string source)
     {
         var required = RequiredPercent(options);
-        var allowed = expectedProfitPercent >= required;
+        var allowed = expectedProfitPercent > required;
         var reason = allowed
             ? $"{source} expected profit {expectedProfitPercent:F4}% is above required {required:F4}%."
             : $"{source} expected profit {expectedProfitPercent:F4}% is below fees/slippage/min threshold {required:F4}%.";
 
         return new ExpectedProfitDecision(allowed, expectedProfitPercent, required, side, source, reason);
+    }
+
+    public ExpectedProfitDecision EvaluateLongRoundTrip(
+        GridOptions options,
+        TradeSide side,
+        decimal entryPrice,
+        decimal targetExitPrice,
+        string source)
+    {
+        var expectedProfitPercent = CalculateLongRoundTripPercent(entryPrice, targetExitPrice);
+        return Evaluate(options, side, expectedProfitPercent, source);
     }
 
     public ExpectedProfitDecision EvaluateGrid(GridOptions options, decimal price, decimal step)
@@ -24,6 +35,11 @@ public sealed class ExpectedProfitFilter
     public static decimal RequiredPercent(GridOptions options)
     {
         return (options.FeePercent * 2m) + options.SlippagePercent + options.MinExpectedProfitPercent;
+    }
+
+    public static decimal CalculateLongRoundTripPercent(decimal entryPrice, decimal targetExitPrice)
+    {
+        return entryPrice <= 0m ? 0m : (targetExitPrice - entryPrice) / entryPrice * 100m;
     }
 }
 

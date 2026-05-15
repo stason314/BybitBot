@@ -214,6 +214,37 @@ public sealed class AutoStrategySelectorTests
     }
 
     [Fact]
+    public void Recommend_ReturnsNoTrade_ForLowVolatility()
+    {
+        var selector = new AutoStrategySelector();
+        var options = new GridOptions
+        {
+            LowerPrice = 2.0m,
+            UpperPrice = 2.2m,
+            Step = 0.01m,
+            OrderSizeUsdt = 20m,
+            MinOrderSizeUsdt = 10m,
+            StopLowerPrice = 1.9m,
+            StopUpperPrice = 2.3m
+        };
+        var candles = BuildCandles(2.10m, 2.105m, 2.095m, 30);
+
+        var recommendation = selector.Recommend(
+            options,
+            new MarketRegimeAnalysis
+            {
+                Regime = MarketRegimeType.LowVolatility,
+                Recommendation = "Low volatility",
+                Support = 2.095m,
+                Resistance = 2.105m
+            },
+            candles);
+
+        Assert.Equal(TradingStrategyType.NoTrade, recommendation.StrategyType);
+        Assert.Equal("{}", recommendation.StrategyConfigJson);
+    }
+
+    [Fact]
     public void Recommend_RespectsConfiguredMinimumOrderSize()
     {
         var selector = new AutoStrategySelector();

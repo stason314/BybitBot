@@ -21,6 +21,8 @@ public sealed record OrderIntent(
     decimal Price,
     decimal Quantity,
     string? ParentOrderLinkId = null,
-    string? StrategySource = null);
+    string? StrategySource = null,
+    decimal? ExpectedProfitPercent = null,
+    bool SkipExpectedProfitFilter = false);
 
 public sealed record CancelOrderIntent(string OrderLinkId, string? Reason = null);
