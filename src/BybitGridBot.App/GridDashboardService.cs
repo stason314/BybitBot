@@ -125,6 +125,12 @@ public sealed class GridDashboardService : IGridDashboardService
         var unrealizedPnl = currentPrice is null
             ? 0m
             : state.BaseAssetQuantity * (currentPrice.Value - state.AverageEntryPrice);
+        var currentProfitPercent = state.AverageEntryPrice > 0m && currentPrice is > 0m
+            ? (currentPrice.Value - state.AverageEntryPrice) / state.AverageEntryPrice * 100m
+            : 0m;
+        var peakProfitPercent = state.AverageEntryPrice > 0m && state.ProfitProtectionPeakPrice > 0m
+            ? (state.ProfitProtectionPeakPrice - state.AverageEntryPrice) / state.AverageEntryPrice * 100m
+            : 0m;
         var estimatedTotalEquity = state.QuoteAssetBalance + (currentPrice ?? 0m) * state.BaseAssetQuantity;
         var generatedAt = DateTimeOffset.UtcNow;
         var analysisCandles = await GetAnalysisCandlesAsync(gridOptions, cancellationToken);
@@ -187,6 +193,10 @@ public sealed class GridDashboardService : IGridDashboardService
                 BaseAssetQuantity = state.BaseAssetQuantity,
                 QuoteAssetBalance = state.QuoteAssetBalance,
                 AverageEntryPrice = state.AverageEntryPrice,
+                ProfitProtectionCurrentProfitPercent = currentProfitPercent,
+                ProfitProtectionPeakProfitPercent = peakProfitPercent,
+                ProfitProtectionPeakPrice = state.ProfitProtectionPeakPrice,
+                ProfitProtectionTrailingStopPrice = state.ProfitProtectionTrailingStopPrice,
                 UpdatedAt = state.UpdatedAt
             },
             MarketRegime = MapMarketRegime(marketRegime),
@@ -1855,7 +1865,10 @@ public sealed class GridDashboardService : IGridDashboardService
         ['Estimated Equity', formatNumber(data.state.estimatedTotalEquity)],
         ['Base Asset Qty', formatNumber(data.state.baseAssetQuantity)],
         ['Quote Balance', formatNumber(data.state.quoteAssetBalance)],
-        ['Average Entry', formatNumber(data.state.averageEntryPrice)]
+        ['Average Entry', formatNumber(data.state.averageEntryPrice)],
+        ['Profit %', `${formatNumber(data.state.profitProtectionCurrentProfitPercent)}%`],
+        ['Peak Profit %', `${formatNumber(data.state.profitProtectionPeakProfitPercent)}%`],
+        ['Trailing Stop', formatNumber(data.state.profitProtectionTrailingStopPrice)]
       ].map(([label, value]) => `<div class="stat"><div class="label">${label}</div><div class="value">${value}</div></div>`).join('');
 
       const noTradeReason = data.lastNoTradeReason;

@@ -82,6 +82,8 @@ public sealed class SqliteGridRepository : IGridRepository
                 peak_equity_usdt TEXT NOT NULL DEFAULT '0',
                 current_drawdown_usdt TEXT NOT NULL DEFAULT '0',
                 current_drawdown_percent TEXT NOT NULL DEFAULT '0',
+                profit_protection_peak_price TEXT NOT NULL DEFAULT '0',
+                profit_protection_trailing_stop_price TEXT NOT NULL DEFAULT '0',
                 daily_pnl_date TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -1217,7 +1219,8 @@ public sealed class SqliteGridRepository : IGridRepository
                    base_asset_quantity, quote_asset_balance, average_entry_price, total_realized_pnl,
                    daily_realized_pnl, daily_pnl_date, updated_at, position_side, reduce_only, position_idx,
                    leverage, margin_mode, entry_price, mark_price, liquidation_price, unrealized_pnl,
-                   peak_equity_usdt, current_drawdown_usdt, current_drawdown_percent
+                   peak_equity_usdt, current_drawdown_usdt, current_drawdown_percent,
+                   profit_protection_peak_price, profit_protection_trailing_stop_price
             FROM bot_state
             WHERE symbol = $symbol
             LIMIT 1;
@@ -1260,7 +1263,9 @@ public sealed class SqliteGridRepository : IGridRepository
             UnrealizedPnl = ParseDecimal(reader.GetString(21)),
             PeakEquityUsdt = ParseDecimal(reader.GetString(22)),
             CurrentDrawdownUsdt = ParseDecimal(reader.GetString(23)),
-            CurrentDrawdownPercent = ParseDecimal(reader.GetString(24))
+            CurrentDrawdownPercent = ParseDecimal(reader.GetString(24)),
+            ProfitProtectionPeakPrice = ParseDecimal(reader.GetString(25)),
+            ProfitProtectionTrailingStopPrice = ParseDecimal(reader.GetString(26))
         };
     }
 
@@ -1272,14 +1277,16 @@ public sealed class SqliteGridRepository : IGridRepository
                 base_asset_quantity, quote_asset_balance, average_entry_price, total_realized_pnl,
                 daily_realized_pnl, daily_pnl_date, updated_at, position_side, reduce_only, position_idx,
                 leverage, margin_mode, entry_price, mark_price, liquidation_price, unrealized_pnl,
-                peak_equity_usdt, current_drawdown_usdt, current_drawdown_percent
+                peak_equity_usdt, current_drawdown_usdt, current_drawdown_percent,
+                profit_protection_peak_price, profit_protection_trailing_stop_price
             )
             VALUES (
                 $symbol, $trading_mode, $is_initialized, $is_paused, $pause_reason, $last_observed_price,
                 $base_asset_quantity, $quote_asset_balance, $average_entry_price, $total_realized_pnl,
                 $daily_realized_pnl, $daily_pnl_date, $updated_at, $position_side, $reduce_only, $position_idx,
                 $leverage, $margin_mode, $entry_price, $mark_price, $liquidation_price, $unrealized_pnl,
-                $peak_equity_usdt, $current_drawdown_usdt, $current_drawdown_percent
+                $peak_equity_usdt, $current_drawdown_usdt, $current_drawdown_percent,
+                $profit_protection_peak_price, $profit_protection_trailing_stop_price
             )
             ON CONFLICT(symbol) DO UPDATE SET
                 trading_mode = excluded.trading_mode,
@@ -1305,7 +1312,9 @@ public sealed class SqliteGridRepository : IGridRepository
                 unrealized_pnl = excluded.unrealized_pnl,
                 peak_equity_usdt = excluded.peak_equity_usdt,
                 current_drawdown_usdt = excluded.current_drawdown_usdt,
-                current_drawdown_percent = excluded.current_drawdown_percent;
+                current_drawdown_percent = excluded.current_drawdown_percent,
+                profit_protection_peak_price = excluded.profit_protection_peak_price,
+                profit_protection_trailing_stop_price = excluded.profit_protection_trailing_stop_price;
             """;
 
         await using var connection = await OpenConnectionAsync(cancellationToken);
@@ -1336,6 +1345,8 @@ public sealed class SqliteGridRepository : IGridRepository
         command.Parameters.AddWithValue("$peak_equity_usdt", FormatDecimal(state.PeakEquityUsdt));
         command.Parameters.AddWithValue("$current_drawdown_usdt", FormatDecimal(state.CurrentDrawdownUsdt));
         command.Parameters.AddWithValue("$current_drawdown_percent", FormatDecimal(state.CurrentDrawdownPercent));
+        command.Parameters.AddWithValue("$profit_protection_peak_price", FormatDecimal(state.ProfitProtectionPeakPrice));
+        command.Parameters.AddWithValue("$profit_protection_trailing_stop_price", FormatDecimal(state.ProfitProtectionTrailingStopPrice));
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
@@ -1665,6 +1676,8 @@ public sealed class SqliteGridRepository : IGridRepository
         await EnsureColumnAsync(connection, tableName, "peak_equity_usdt", "TEXT NOT NULL DEFAULT '0'", cancellationToken);
         await EnsureColumnAsync(connection, tableName, "current_drawdown_usdt", "TEXT NOT NULL DEFAULT '0'", cancellationToken);
         await EnsureColumnAsync(connection, tableName, "current_drawdown_percent", "TEXT NOT NULL DEFAULT '0'", cancellationToken);
+        await EnsureColumnAsync(connection, tableName, "profit_protection_peak_price", "TEXT NOT NULL DEFAULT '0'", cancellationToken);
+        await EnsureColumnAsync(connection, tableName, "profit_protection_trailing_stop_price", "TEXT NOT NULL DEFAULT '0'", cancellationToken);
     }
 
     private static async Task EnsureUniqueFuturesFillExecIndexAsync(

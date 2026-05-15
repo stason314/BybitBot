@@ -2159,6 +2159,7 @@ public sealed class GridBotWorker : BackgroundService
             : ShouldApplyTrailingProtection(candles, currentPrice, out var pumpPercent, out var pullbackPercent)
                 ? $"{ReduceOnlyReasonTrailing}: pump={pumpPercent:0.####}%, pullback={pullbackPercent:0.####}%"
                 : null;
+        RefreshProfitProtectionState(state, currentPrice);
         var marketPhase = _priceActionPhaseDetector.Detect(_gridOptions, currentPrice, candles, []);
         var profitProtection = _profitProtectionManager.Evaluate(
             _gridOptions,
@@ -2171,7 +2172,10 @@ public sealed class GridBotWorker : BackgroundService
                 CurrentPrice = currentPrice
             },
             currentPrice,
+            state.ProfitProtectionPeakPrice,
             marketPhase);
+        state.ProfitProtectionPeakPrice = profitProtection.PeakPrice;
+        state.ProfitProtectionTrailingStopPrice = profitProtection.TrailingStopPrice;
         if (reason is null && profitProtection.ShouldBlockNewBuys)
         {
             reason = $"profit-protection: {profitProtection.Reason}";
@@ -2245,6 +2249,23 @@ public sealed class GridBotWorker : BackgroundService
 
         return pumpPercent >= _gridOptions.TrailingProtectionPumpPercent &&
             pullbackPercent >= _gridOptions.TrailingProtectionPullbackPercent;
+    }
+
+    private void RefreshProfitProtectionState(BotState state, decimal currentPrice)
+    {
+        if (state.BaseAssetQuantity <= 0m || state.AverageEntryPrice <= 0m || currentPrice <= 0m)
+        {
+            state.ProfitProtectionPeakPrice = 0m;
+            state.ProfitProtectionTrailingStopPrice = 0m;
+            return;
+        }
+
+        state.ProfitProtectionPeakPrice = decimal.Max(state.ProfitProtectionPeakPrice, currentPrice);
+        var peakProfitPercent = (state.ProfitProtectionPeakPrice - state.AverageEntryPrice) / state.AverageEntryPrice * 100m;
+        state.ProfitProtectionTrailingStopPrice = _gridOptions.TrailingStopEnabled &&
+            peakProfitPercent >= _gridOptions.ProfitProtectionTriggerPercent
+                ? state.ProfitProtectionPeakPrice * (1m - _gridOptions.TrailingStopPercent / 100m)
+                : 0m;
     }
 
     private async Task<IReadOnlyList<GridOrder>> ApplyReduceOnlyProtectionAsync(
@@ -3528,6 +3549,7 @@ public sealed class GridBotWorker : BackgroundService
             var totalCostAfter = totalCostBefore + (fillQuantity * fillPrice);
             state.BaseAssetQuantity += fillQuantity;
             state.AverageEntryPrice = state.BaseAssetQuantity > 0m ? totalCostAfter / state.BaseAssetQuantity : 0m;
+            state.ProfitProtectionPeakPrice = decimal.Max(state.ProfitProtectionPeakPrice, fillPrice);
 
             if (_appOptions.TradingMode == TradingMode.Paper)
             {
@@ -3544,6 +3566,8 @@ public sealed class GridBotWorker : BackgroundService
             if (state.BaseAssetQuantity == 0m)
             {
                 state.AverageEntryPrice = 0m;
+                state.ProfitProtectionPeakPrice = 0m;
+                state.ProfitProtectionTrailingStopPrice = 0m;
             }
 
             if (_appOptions.TradingMode == TradingMode.Paper)

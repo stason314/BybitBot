@@ -123,6 +123,14 @@ public sealed class DashboardState
 
     public decimal AverageEntryPrice { get; init; }
 
+    public decimal ProfitProtectionCurrentProfitPercent { get; init; }
+
+    public decimal ProfitProtectionPeakProfitPercent { get; init; }
+
+    public decimal ProfitProtectionPeakPrice { get; init; }
+
+    public decimal ProfitProtectionTrailingStopPrice { get; init; }
+
     public DateTimeOffset UpdatedAt { get; init; }
 }
 
