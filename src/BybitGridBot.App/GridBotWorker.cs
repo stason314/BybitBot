@@ -53,6 +53,7 @@ public sealed class GridBotWorker : BackgroundService
     private readonly MarketRegimeFilter _marketRegimeFilter;
     private readonly PriceActionPhaseDetector _priceActionPhaseDetector;
     private readonly BigRedCandleGuard _bigRedCandleGuard;
+    private readonly ProfitProtectionManager _profitProtectionManager;
     private readonly ITelegramNotifier _notifier;
     private readonly IGridRepository _repository;
     private readonly RiskManager _riskManager;
@@ -95,6 +96,7 @@ public sealed class GridBotWorker : BackgroundService
         MarketRegimeFilter marketRegimeFilter,
         PriceActionPhaseDetector priceActionPhaseDetector,
         BigRedCandleGuard bigRedCandleGuard,
+        ProfitProtectionManager profitProtectionManager,
         SignalAnalyzer signalAnalyzer,
         IGridRepository repository,
         ITelegramNotifier notifier,
@@ -117,6 +119,7 @@ public sealed class GridBotWorker : BackgroundService
         _marketRegimeFilter = marketRegimeFilter;
         _priceActionPhaseDetector = priceActionPhaseDetector;
         _bigRedCandleGuard = bigRedCandleGuard;
+        _profitProtectionManager = profitProtectionManager;
         _signalAnalyzer = signalAnalyzer;
         _repository = repository;
         _notifier = notifier;
@@ -2124,6 +2127,24 @@ public sealed class GridBotWorker : BackgroundService
             : ShouldApplyTrailingProtection(candles, currentPrice, out var pumpPercent, out var pullbackPercent)
                 ? $"{ReduceOnlyReasonTrailing}: pump={pumpPercent:0.####}%, pullback={pullbackPercent:0.####}%"
                 : null;
+        var marketPhase = _priceActionPhaseDetector.Detect(_gridOptions, currentPrice, candles, []);
+        var profitProtection = _profitProtectionManager.Evaluate(
+            _gridOptions,
+            new PositionSnapshot
+            {
+                Symbol = _gridOptions.Symbol,
+                BaseAssetQuantity = state.BaseAssetQuantity,
+                AverageEntryPrice = state.AverageEntryPrice,
+                QuoteAssetBalance = state.QuoteAssetBalance,
+                CurrentPrice = currentPrice
+            },
+            currentPrice,
+            marketPhase);
+        if (reason is null && profitProtection.ShouldBlockNewBuys)
+        {
+            reason = $"profit-protection: {profitProtection.Reason}";
+        }
+
         if (reason is null)
         {
             return false;
@@ -2140,7 +2161,16 @@ public sealed class GridBotWorker : BackgroundService
                 "Protective no-buy mode active for {Symbol}. Reason: {Reason}. Buy orders were cancelled and no new buy orders will be created.",
                 _gridOptions.Symbol,
                 reason);
+            await RecordNoTradeReasonAsync(profile, ResolveNoTradeReason(marketPhase), reason, cancellationToken);
             return true;
+        }
+
+        var maxSellQuantity = profitProtection.ShouldTakePartialProfit && profitProtection.PartialTakeProfitPercent > 0m
+            ? state.BaseAssetQuantity * decimal.Min(100m, profitProtection.PartialTakeProfitPercent) / 100m
+            : (decimal?)null;
+        if (profitProtection.ShouldBlockNewBuys)
+        {
+            await RecordNoTradeReasonAsync(profile, ResolveNoTradeReason(marketPhase), reason, cancellationToken);
         }
 
         await ApplyReduceOnlyProtectionAsync(
@@ -2151,6 +2181,7 @@ public sealed class GridBotWorker : BackgroundService
             activeOrders,
             currentPrice,
             reason,
+            maxSellQuantity,
             cancellationToken);
 
         return true;
@@ -2192,6 +2223,27 @@ public sealed class GridBotWorker : BackgroundService
         IReadOnlyCollection<GridOrder> activeOrders,
         decimal currentPrice,
         string reason,
+        CancellationToken cancellationToken) =>
+        await ApplyReduceOnlyProtectionAsync(
+            profile,
+            state,
+            levels,
+            instrument,
+            activeOrders,
+            currentPrice,
+            reason,
+            null,
+            cancellationToken);
+
+    private async Task<IReadOnlyList<GridOrder>> ApplyReduceOnlyProtectionAsync(
+        GridBotSettings? profile,
+        BotState state,
+        IReadOnlyList<GridLevel> levels,
+        BybitInstrumentInfo instrument,
+        IReadOnlyCollection<GridOrder> activeOrders,
+        decimal currentPrice,
+        string reason,
+        decimal? maxSellQuantity,
         CancellationToken cancellationToken)
     {
         _logger.LogWarning(
@@ -2212,7 +2264,7 @@ public sealed class GridBotWorker : BackgroundService
         var wallet = _appOptions.TradingMode == TradingMode.Paper
             ? null
             : await _bybitRestClient.GetWalletBalanceAsync(cancellationToken, _quoteAsset, _baseAsset);
-        var createdSellCount = await EnsureReduceOnlySellOrdersAsync(profile, state, levels, instrument, remainingOrders, wallet, currentPrice, cancellationToken);
+        var createdSellCount = await EnsureReduceOnlySellOrdersAsync(profile, state, levels, instrument, remainingOrders, wallet, currentPrice, maxSellQuantity, cancellationToken);
         if (cancelledBuyCount > 0 || createdSellCount > 0)
         {
             await _notifier.NotifyAsync(
@@ -2231,6 +2283,7 @@ public sealed class GridBotWorker : BackgroundService
         IReadOnlyCollection<GridOrder> activeOrders,
         BybitWalletBalance? wallet,
         decimal currentPrice,
+        decimal? maxSellQuantity,
         CancellationToken cancellationToken)
     {
         if (state.BaseAssetQuantity <= 0m)
@@ -2239,6 +2292,11 @@ public sealed class GridBotWorker : BackgroundService
         }
 
         var availableBase = GetAvailableBaseBalance(state, activeOrders, wallet);
+        if (maxSellQuantity is > 0m)
+        {
+            availableBase = decimal.Min(availableBase, maxSellQuantity.Value);
+        }
+
         if (availableBase <= 0m)
         {
             return 0;
