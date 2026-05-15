@@ -435,6 +435,74 @@ public sealed class AutoStrategySelectorTests
         Assert.Equal(expectedStrategy, recommendation.StrategyType);
     }
 
+    [Fact]
+    public void Recommend_UsesNoTradeForUnknownPhase_WhenAggressiveModeInactive()
+    {
+        var selector = new AutoStrategySelector();
+        var options = new GridOptions
+        {
+            LowerPrice = 2.0m,
+            UpperPrice = 2.2m,
+            Step = 0.01m,
+            OrderSizeUsdt = 20m,
+            MinOrderSizeUsdt = 15m,
+            StopLowerPrice = 1.9m,
+            StopUpperPrice = 2.3m
+        };
+        var candles = BuildCandles(2.10m, 2.14m, 2.08m, 60);
+
+        var recommendation = selector.Recommend(
+            options,
+            new MarketRegimeAnalysis
+            {
+                Regime = MarketRegimeType.Trend,
+                MovePercent = -1.2m,
+                Recommendation = "Downtrend",
+                Support = 2.08m,
+                Resistance = 2.14m
+            },
+            UnknownPhase(),
+            candles,
+            aggressiveModeActive: false);
+
+        Assert.Equal(TradingStrategyType.NoTrade, recommendation.StrategyType);
+    }
+
+    [Fact]
+    public void Recommend_UsesComboForUnknownDowntrend_WhenAggressiveModeActive()
+    {
+        var selector = new AutoStrategySelector();
+        var options = new GridOptions
+        {
+            LowerPrice = 2.0m,
+            UpperPrice = 2.2m,
+            Step = 0.01m,
+            OrderSizeUsdt = 20m,
+            MinOrderSizeUsdt = 15m,
+            StopLowerPrice = 1.9m,
+            StopUpperPrice = 2.3m
+        };
+        var candles = BuildCandles(2.10m, 2.14m, 2.08m, 60);
+
+        var recommendation = selector.Recommend(
+            options,
+            new MarketRegimeAnalysis
+            {
+                Regime = MarketRegimeType.Trend,
+                MovePercent = -1.2m,
+                Recommendation = "Downtrend",
+                Support = 2.08m,
+                Resistance = 2.14m
+            },
+            UnknownPhase(),
+            candles,
+            aggressiveModeActive: true);
+
+        Assert.Equal(TradingStrategyType.Combo, recommendation.StrategyType);
+        Assert.Contains("Baseline was Btd", recommendation.Reason);
+        Assert.Contains("maxActiveBuyOrders", recommendation.StrategyConfigJson);
+    }
+
     private static IReadOnlyList<Candle> BuildCandles(decimal open, decimal high, decimal low, int count)
     {
         var now = DateTimeOffset.UtcNow;
@@ -448,6 +516,19 @@ public sealed class AutoStrategySelectorTests
                 1000m,
                 1000m * open))
             .ToArray();
+    }
+
+    private static MarketPhaseResult UnknownPhase()
+    {
+        return new MarketPhaseResult
+        {
+            Phase = MarketPhase.Unknown,
+            Confidence = 0.35m,
+            Score = 35m,
+            Reason = "No reliable phase match.",
+            SuggestedStrategy = StrategyType.Pause,
+            DetectedAt = DateTimeOffset.UtcNow
+        };
     }
 
     private static IReadOnlyList<Candle> BuildBullishSignalCandles()

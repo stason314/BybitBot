@@ -88,6 +88,7 @@ public sealed class GridDashboardService : IGridDashboardService
                 TradingMode = _appOptions.TradingMode,
                 QuoteAssetBalance = gridOptions.PaperInitialUsdt,
                 BaseAssetQuantity = gridOptions.PaperInitialBaseAssetQuantity,
+                AggressiveModeEnabled = gridOptions.AggressiveModeEnabled,
                 UpdatedAt = DateTimeOffset.UtcNow
             };
         var levels = await _repository.GetGridLevelsAsync(gridOptions.Symbol, cancellationToken);
@@ -144,7 +145,13 @@ public sealed class GridDashboardService : IGridDashboardService
         var btcCandles = await GetBtcCandlesForPhaseAsync(gridOptions, cancellationToken);
         var marketPhase = DetectMarketPhase(gridOptions, analysisCandles, btcCandles, currentPrice);
         var btdDiagnostics = BuildBtdDiagnostics(gridOptions, runtimeSettings, analysisCandles, btcCandles, marketPhase, currentPrice);
-        var autoRecommendation = _autoStrategySelector.Recommend(gridOptions, marketRegime, marketPhase, analysisCandles);
+        var aggressiveModeActive = IsAggressiveModeActive(gridOptions, state, generatedAt);
+        var autoRecommendation = _autoStrategySelector.Recommend(
+            gridOptions,
+            marketRegime,
+            marketPhase,
+            analysisCandles,
+            aggressiveModeActive);
         var recommendedSettings = BuildRecommendedSettings(runtimeSettings, autoRecommendation, StrategySelectionMode.Auto, generatedAt);
         recommendedSettings = UseReduceOnlyWhenNoTradeWouldLeavePosition(recommendedSettings, state);
         autoRecommendation = UseReduceOnlyRecommendationWhenNoTradeWouldLeavePosition(autoRecommendation, recommendedSettings);
@@ -204,6 +211,10 @@ public sealed class GridDashboardService : IGridDashboardService
                 ProfitProtectionPeakProfitPercent = peakProfitPercent,
                 ProfitProtectionPeakPrice = state.ProfitProtectionPeakPrice,
                 ProfitProtectionTrailingStopPrice = state.ProfitProtectionTrailingStopPrice,
+                AggressiveModeEnabled = state.AggressiveModeEnabled,
+                AggressiveModeDisabledUntil = state.AggressiveModeDisabledUntil,
+                AggressiveModeDisabledReason = state.AggressiveModeDisabledReason,
+                AggressiveModeLastLossAt = state.AggressiveModeLastLossAt,
                 UpdatedAt = state.UpdatedAt
             },
             MarketRegime = MapMarketRegime(marketRegime),
@@ -378,7 +389,12 @@ public sealed class GridDashboardService : IGridDashboardService
         var state = await _repository.GetBotStateAsync(runtimeSettings.Symbol, cancellationToken);
         var marketRegime = AnalyzeMarketRegime(candles);
         var marketPhase = await DetectMarketPhaseAsync(gridOptions, candles, state?.LastObservedPrice, cancellationToken);
-        var recommendation = _autoStrategySelector.Recommend(gridOptions, marketRegime, marketPhase, candles);
+        var recommendation = _autoStrategySelector.Recommend(
+            gridOptions,
+            marketRegime,
+            marketPhase,
+            candles,
+            IsAggressiveModeActive(gridOptions, state, DateTimeOffset.UtcNow));
         var activeOrders = await _repository.GetActiveOrdersAsync(runtimeSettings.Symbol, cancellationToken);
         var recommendedSettings = BuildRecommendedSettings(runtimeSettings, recommendation, StrategySelectionMode.Auto, DateTimeOffset.UtcNow);
         recommendedSettings = UseReduceOnlyWhenNoTradeWouldLeavePosition(recommendedSettings, state);
@@ -2035,6 +2051,11 @@ public sealed class GridDashboardService : IGridDashboardService
         setSettingsFormDirty(false);
       }
 
+      const aggressiveModeText = data.state.aggressiveModeEnabled
+        ? 'on'
+        : data.state.aggressiveModeDisabledUntil
+          ? `off until ${formatDate(data.state.aggressiveModeDisabledUntil)}`
+          : 'off';
       byId('stats').innerHTML = [
         ['Current Price', formatNumber(data.state.currentPrice)],
         ['Total Realized PnL', formatSigned(data.state.totalRealizedPnl)],
@@ -2046,7 +2067,8 @@ public sealed class GridDashboardService : IGridDashboardService
         ['Average Entry', formatNumber(data.state.averageEntryPrice)],
         ['Profit %', `${formatNumber(data.state.profitProtectionCurrentProfitPercent)}%`],
         ['Peak Profit %', `${formatNumber(data.state.profitProtectionPeakProfitPercent)}%`],
-        ['Trailing Stop', formatNumber(data.state.profitProtectionTrailingStopPrice)]
+        ['Trailing Stop', formatNumber(data.state.profitProtectionTrailingStopPrice)],
+        ['Aggressive Mode', aggressiveModeText]
       ].map(([label, value]) => `<div class="stat"><div class="label">${label}</div><div class="value">${value}</div></div>`).join('');
 
       const noTradeReason = data.lastNoTradeReason;
@@ -2405,6 +2427,14 @@ public sealed class GridDashboardService : IGridDashboardService
         return pauseReason is not null &&
             (pauseReason.Contains("STOP_LOWER_PRICE", StringComparison.OrdinalIgnoreCase) ||
              pauseReason.Contains("STOP_UPPER_PRICE", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool IsAggressiveModeActive(GridOptions gridOptions, BotState? state, DateTimeOffset now)
+    {
+        return gridOptions.AggressiveModeEnabled &&
+            (state is null ||
+             (state.AggressiveModeEnabled &&
+              (state.AggressiveModeDisabledUntil is null || state.AggressiveModeDisabledUntil <= now)));
     }
 
     private async Task<decimal?> GetCurrentOrLastPriceAsync(string category, string symbol, decimal? fallbackPrice, CancellationToken cancellationToken)

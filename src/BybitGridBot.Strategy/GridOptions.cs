@@ -363,6 +363,17 @@ public sealed class GridOptions
     [ConfigurationKeyName("ENABLE_STRATEGY_PERFORMANCE_ANALYTICS")]
     public bool EnableStrategyPerformanceAnalytics { get; init; } = true;
 
+    [ConfigurationKeyName("AGGRESSIVE_MODE_ENABLED")]
+    public bool AggressiveModeEnabled { get; init; } = true;
+
+    [ConfigurationKeyName("AGGRESSIVE_MODE_COOLDOWN_MINUTES")]
+    [Range(1, 1440)]
+    public int AggressiveModeCooldownMinutes { get; init; } = 30;
+
+    [ConfigurationKeyName("AGGRESSIVE_STOP_LOSS_PERCENT")]
+    [Range(typeof(decimal), "0", "100")]
+    public decimal AggressiveStopLossPercent { get; init; } = 2m;
+
     [ConfigurationKeyName("AUTO_RECENTER_ENABLED")]
     public bool AutoRecenterEnabled { get; init; } = false;
 

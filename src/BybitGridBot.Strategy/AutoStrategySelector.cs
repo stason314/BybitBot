@@ -207,15 +207,17 @@ public sealed class AutoStrategySelector
         GridOptions currentOptions,
         MarketRegimeAnalysis regime,
         MarketPhaseResult phase,
-        IReadOnlyList<Candle> candles)
+        IReadOnlyList<Candle> candles,
+        bool aggressiveModeActive = true)
     {
         var baseline = Recommend(currentOptions, regime, candles);
         var strategyType = StrategyForPhase(phase, currentOptions.SpotOnly);
-        var aggressiveUnknownFallback = phase.Phase == MarketPhase.Unknown &&
+        var aggressiveUnknownFallback = aggressiveModeActive &&
+            phase.Phase == MarketPhase.Unknown &&
             baseline.StrategyType is not TradingStrategyType.NoTrade and not TradingStrategyType.Pause;
         if (aggressiveUnknownFallback)
         {
-            strategyType = baseline.StrategyType;
+            strategyType = ResolveAggressiveUnknownFallbackStrategy(baseline);
         }
 
         if (phase.Phase != MarketPhase.Dump &&
@@ -342,6 +344,13 @@ public sealed class AutoStrategySelector
         };
     }
 
+    private static TradingStrategyType ResolveAggressiveUnknownFallbackStrategy(AutoConfigRecommendation baseline)
+    {
+        return baseline.StrategyType == TradingStrategyType.Grid
+            ? TradingStrategyType.Grid
+            : TradingStrategyType.Combo;
+    }
+
     private static string BuildPhaseRecommendationReason(
         MarketPhaseResult phase,
         TradingStrategyType strategyType,
@@ -350,7 +359,7 @@ public sealed class AutoStrategySelector
     {
         if (aggressiveUnknownFallback)
         {
-            return $"Aggressive auto fallback: phase is Unknown, using baseline {baseline.StrategyType} from market regime instead of NoTrade. Baseline reason: {baseline.Reason}. Phase confidence: {phase.Confidence:0.####}. {phase.Reason}";
+            return $"Aggressive auto fallback: phase is Unknown, using {strategyType} from market regime instead of NoTrade. Baseline was {baseline.StrategyType}. Baseline reason: {baseline.Reason}. Phase confidence: {phase.Confidence:0.####}. {phase.Reason}";
         }
 
         return strategyType switch

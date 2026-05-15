@@ -84,6 +84,10 @@ public sealed class SqliteGridRepository : IGridRepository
                 current_drawdown_percent TEXT NOT NULL DEFAULT '0',
                 profit_protection_peak_price TEXT NOT NULL DEFAULT '0',
                 profit_protection_trailing_stop_price TEXT NOT NULL DEFAULT '0',
+                aggressive_mode_enabled INTEGER NOT NULL DEFAULT 1,
+                aggressive_mode_disabled_until TEXT NULL,
+                aggressive_mode_disabled_reason TEXT NULL,
+                aggressive_mode_last_loss_at TEXT NULL,
                 daily_pnl_date TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -415,6 +419,7 @@ public sealed class SqliteGridRepository : IGridRepository
         await EnsureFuturesOrderColumnsAsync(connection, "grid_orders", cancellationToken);
         await EnsureFuturesOrderColumnsAsync(connection, "orders", cancellationToken);
         await EnsureFuturesStateColumnsAsync(connection, "bot_state", cancellationToken);
+        await EnsureAggressiveModeStateColumnsAsync(connection, "bot_state", cancellationToken);
         await EnsureColumnAsync(connection, "futures_settings", "enabled", "INTEGER NOT NULL DEFAULT 1", cancellationToken);
         await EnsureColumnAsync(connection, "futures_fills", "exec_id", "TEXT NULL", cancellationToken);
         await EnsureColumnAsync(connection, "futures_fills", "exec_type", "TEXT NOT NULL DEFAULT 'Trade'", cancellationToken);
@@ -1444,7 +1449,9 @@ public sealed class SqliteGridRepository : IGridRepository
                    daily_realized_pnl, daily_pnl_date, updated_at, position_side, reduce_only, position_idx,
                    leverage, margin_mode, entry_price, mark_price, liquidation_price, unrealized_pnl,
                    peak_equity_usdt, current_drawdown_usdt, current_drawdown_percent,
-                   profit_protection_peak_price, profit_protection_trailing_stop_price
+                   profit_protection_peak_price, profit_protection_trailing_stop_price,
+                   aggressive_mode_enabled, aggressive_mode_disabled_until, aggressive_mode_disabled_reason,
+                   aggressive_mode_last_loss_at
             FROM bot_state
             WHERE symbol = $symbol
             LIMIT 1;
@@ -1489,7 +1496,11 @@ public sealed class SqliteGridRepository : IGridRepository
             CurrentDrawdownUsdt = ParseDecimal(reader.GetString(23)),
             CurrentDrawdownPercent = ParseDecimal(reader.GetString(24)),
             ProfitProtectionPeakPrice = ParseDecimal(reader.GetString(25)),
-            ProfitProtectionTrailingStopPrice = ParseDecimal(reader.GetString(26))
+            ProfitProtectionTrailingStopPrice = ParseDecimal(reader.GetString(26)),
+            AggressiveModeEnabled = reader.GetBoolean(27),
+            AggressiveModeDisabledUntil = reader.IsDBNull(28) ? null : DateTimeOffset.Parse(reader.GetString(28), CultureInfo.InvariantCulture),
+            AggressiveModeDisabledReason = reader.IsDBNull(29) ? null : reader.GetString(29),
+            AggressiveModeLastLossAt = reader.IsDBNull(30) ? null : DateTimeOffset.Parse(reader.GetString(30), CultureInfo.InvariantCulture)
         };
     }
 
@@ -1502,7 +1513,9 @@ public sealed class SqliteGridRepository : IGridRepository
                 daily_realized_pnl, daily_pnl_date, updated_at, position_side, reduce_only, position_idx,
                 leverage, margin_mode, entry_price, mark_price, liquidation_price, unrealized_pnl,
                 peak_equity_usdt, current_drawdown_usdt, current_drawdown_percent,
-                profit_protection_peak_price, profit_protection_trailing_stop_price
+                profit_protection_peak_price, profit_protection_trailing_stop_price,
+                aggressive_mode_enabled, aggressive_mode_disabled_until, aggressive_mode_disabled_reason,
+                aggressive_mode_last_loss_at
             )
             VALUES (
                 $symbol, $trading_mode, $is_initialized, $is_paused, $pause_reason, $last_observed_price,
@@ -1510,7 +1523,9 @@ public sealed class SqliteGridRepository : IGridRepository
                 $daily_realized_pnl, $daily_pnl_date, $updated_at, $position_side, $reduce_only, $position_idx,
                 $leverage, $margin_mode, $entry_price, $mark_price, $liquidation_price, $unrealized_pnl,
                 $peak_equity_usdt, $current_drawdown_usdt, $current_drawdown_percent,
-                $profit_protection_peak_price, $profit_protection_trailing_stop_price
+                $profit_protection_peak_price, $profit_protection_trailing_stop_price,
+                $aggressive_mode_enabled, $aggressive_mode_disabled_until, $aggressive_mode_disabled_reason,
+                $aggressive_mode_last_loss_at
             )
             ON CONFLICT(symbol) DO UPDATE SET
                 trading_mode = excluded.trading_mode,
@@ -1538,7 +1553,11 @@ public sealed class SqliteGridRepository : IGridRepository
                 current_drawdown_usdt = excluded.current_drawdown_usdt,
                 current_drawdown_percent = excluded.current_drawdown_percent,
                 profit_protection_peak_price = excluded.profit_protection_peak_price,
-                profit_protection_trailing_stop_price = excluded.profit_protection_trailing_stop_price;
+                profit_protection_trailing_stop_price = excluded.profit_protection_trailing_stop_price,
+                aggressive_mode_enabled = excluded.aggressive_mode_enabled,
+                aggressive_mode_disabled_until = excluded.aggressive_mode_disabled_until,
+                aggressive_mode_disabled_reason = excluded.aggressive_mode_disabled_reason,
+                aggressive_mode_last_loss_at = excluded.aggressive_mode_last_loss_at;
             """;
 
         await using var connection = await OpenConnectionAsync(cancellationToken);
@@ -1571,6 +1590,10 @@ public sealed class SqliteGridRepository : IGridRepository
         command.Parameters.AddWithValue("$current_drawdown_percent", FormatDecimal(state.CurrentDrawdownPercent));
         command.Parameters.AddWithValue("$profit_protection_peak_price", FormatDecimal(state.ProfitProtectionPeakPrice));
         command.Parameters.AddWithValue("$profit_protection_trailing_stop_price", FormatDecimal(state.ProfitProtectionTrailingStopPrice));
+        command.Parameters.AddWithValue("$aggressive_mode_enabled", state.AggressiveModeEnabled);
+        command.Parameters.AddWithValue("$aggressive_mode_disabled_until", state.AggressiveModeDisabledUntil?.ToString("O", CultureInfo.InvariantCulture) ?? (object)DBNull.Value);
+        command.Parameters.AddWithValue("$aggressive_mode_disabled_reason", (object?)state.AggressiveModeDisabledReason ?? DBNull.Value);
+        command.Parameters.AddWithValue("$aggressive_mode_last_loss_at", state.AggressiveModeLastLossAt?.ToString("O", CultureInfo.InvariantCulture) ?? (object)DBNull.Value);
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
@@ -1919,6 +1942,17 @@ public sealed class SqliteGridRepository : IGridRepository
         await EnsureColumnAsync(connection, tableName, "current_drawdown_percent", "TEXT NOT NULL DEFAULT '0'", cancellationToken);
         await EnsureColumnAsync(connection, tableName, "profit_protection_peak_price", "TEXT NOT NULL DEFAULT '0'", cancellationToken);
         await EnsureColumnAsync(connection, tableName, "profit_protection_trailing_stop_price", "TEXT NOT NULL DEFAULT '0'", cancellationToken);
+    }
+
+    private static async Task EnsureAggressiveModeStateColumnsAsync(
+        SqliteConnection connection,
+        string tableName,
+        CancellationToken cancellationToken)
+    {
+        await EnsureColumnAsync(connection, tableName, "aggressive_mode_enabled", "INTEGER NOT NULL DEFAULT 1", cancellationToken);
+        await EnsureColumnAsync(connection, tableName, "aggressive_mode_disabled_until", "TEXT NULL", cancellationToken);
+        await EnsureColumnAsync(connection, tableName, "aggressive_mode_disabled_reason", "TEXT NULL", cancellationToken);
+        await EnsureColumnAsync(connection, tableName, "aggressive_mode_last_loss_at", "TEXT NULL", cancellationToken);
     }
 
     private static async Task EnsureUniqueFuturesFillExecIndexAsync(

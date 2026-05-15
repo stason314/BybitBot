@@ -52,6 +52,14 @@ public sealed class BotState
 
     public decimal ProfitProtectionTrailingStopPrice { get; set; }
 
+    public bool AggressiveModeEnabled { get; set; } = true;
+
+    public DateTimeOffset? AggressiveModeDisabledUntil { get; set; }
+
+    public string? AggressiveModeDisabledReason { get; set; }
+
+    public DateTimeOffset? AggressiveModeLastLossAt { get; set; }
+
     public DateOnly DailyPnlDate { get; set; } = DateOnly.FromDateTime(DateTime.UtcNow);
 
     public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
