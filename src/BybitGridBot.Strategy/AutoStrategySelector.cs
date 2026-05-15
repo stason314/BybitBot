@@ -178,12 +178,12 @@ public sealed class AutoStrategySelector
                 metrics),
 
             MarketRegimeType.LowVolatility => Build(
-                TradingStrategyType.Grid,
-                "Low volatility. Keep grid but reduce order size because fees can eat small cycles.",
+                TradingStrategyType.NoTrade,
+                "Low volatility is not a sideways grid opportunity. Pause until expected grid cycles clear fees, slippage, and minimum profit.",
                 lower,
                 upper,
                 step,
-                decimal.Max(currentOptions.MinOrderSizeUsdt, orderSize * 0.5m),
+                currentOptions.MinOrderSizeUsdt,
                 stopLower,
                 stopUpper,
                 "{}",

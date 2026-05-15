@@ -106,6 +106,7 @@ public sealed class GridDashboardService : IGridDashboardService
         var activeOrders = orders
             .Where(order => order.Status is nameof(OrderStatus.New) or nameof(OrderStatus.PartiallyFilled))
             .ToArray();
+        var performanceByStrategy = BuildStrategyPerformance(allOrders, orderSourceLabels);
 
         decimal? currentPrice = state.LastObservedPrice;
         try
@@ -190,6 +191,7 @@ public sealed class GridDashboardService : IGridDashboardService
             AutoRecommendation = MapAutoRecommendation(autoRecommendation, autoRecommendationSafetyErrors),
             Orders = orders,
             ActiveOrders = activeOrders,
+            PerformanceByStrategy = performanceByStrategy,
             GridLevels = levels.Select(level => level.Price).ToArray(),
             GeneratedAt = generatedAt
         };
@@ -1236,6 +1238,22 @@ public sealed class GridDashboardService : IGridDashboardService
 
     <section class="stats" id="stats"></section>
 
+    <section class="panel section" style="margin-bottom:20px;">
+      <div class="section-head">
+        <h2>Strategy Performance</h2>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Strategy</th><th>Net PnL</th><th>Gross PnL</th><th>Fees</th><th>Fills</th><th>Closed</th><th>Win Rate</th><th>Active</th>
+            </tr>
+          </thead>
+          <tbody id="strategyPerformanceRows"></tbody>
+        </table>
+      </div>
+    </section>
+
     <section class="panel section regime-card">
       <div>
         <div class="label">Market Regime</div>
@@ -1586,6 +1604,7 @@ public sealed class GridDashboardService : IGridDashboardService
         autoRecommendation: latestDashboardData.autoRecommendation,
         gridLevels: latestDashboardData.gridLevels,
         activeOrders: latestDashboardData.activeOrders,
+        performanceByStrategy: latestDashboardData.performanceByStrategy,
         recentOrdersWindowHours: hours,
         recentOrders,
         generatedAt: latestDashboardData.generatedAt
@@ -1780,6 +1799,20 @@ public sealed class GridDashboardService : IGridDashboardService
         ['Quote Balance', formatNumber(data.state.quoteAssetBalance)],
         ['Average Entry', formatNumber(data.state.averageEntryPrice)]
       ].map(([label, value]) => `<div class="stat"><div class="label">${label}</div><div class="value">${value}</div></div>`).join('');
+
+      byId('strategyPerformanceRows').innerHTML = (data.performanceByStrategy || []).length === 0
+        ? `<tr><td colspan="8">No strategy performance yet.</td></tr>`
+        : data.performanceByStrategy.map(item => `
+            <tr>
+              <td>${escapeHtml(item.strategy)}</td>
+              <td>${formatPnl(item.netPnl)}</td>
+              <td>${formatPnl(item.grossPnl)}</td>
+              <td>${formatNumber(item.feesPaid)}</td>
+              <td>${formatNumber(item.filledTradesCount)}</td>
+              <td>${formatNumber(item.closedTradesCount)}</td>
+              <td>${formatNumber(item.winRate)}%</td>
+              <td>${formatNumber(item.activeOrdersCount)}</td>
+            </tr>`).join('');
 
       byId('gridLevels').innerHTML = data.gridLevels.map(level => `<div class="grid-chip">${formatNumber(level)}</div>`).join('');
       byId('activeOrders').innerHTML = data.activeOrders.length === 0
@@ -2145,6 +2178,110 @@ public sealed class GridDashboardService : IGridDashboardService
             UpdatedAt = order.UpdatedAt,
             FilledAt = order.FilledAt
         };
+    }
+
+    private static IReadOnlyList<DashboardStrategyPerformanceItem> BuildStrategyPerformance(
+        IReadOnlyCollection<GridOrder> orders,
+        IReadOnlyDictionary<string, string> sourceLabels)
+    {
+        var strategyOrder = new[] { "Grid", "BTD", "DCA", "Signal", "ReduceOnly", "Hybrid" };
+        var groups = orders
+            .GroupBy(
+                order => NormalizePerformanceStrategy(sourceLabels.TryGetValue(order.OrderLinkId, out var source)
+                    ? source
+                    : order.StrategySource),
+                StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.ToArray(), StringComparer.OrdinalIgnoreCase);
+
+        var result = new List<DashboardStrategyPerformanceItem>();
+        foreach (var strategy in strategyOrder)
+        {
+            groups.Remove(strategy, out var strategyOrders);
+            result.Add(MapStrategyPerformance(strategy, strategyOrders ?? Array.Empty<GridOrder>()));
+        }
+
+        foreach (var extraGroup in groups.OrderBy(group => group.Key, StringComparer.OrdinalIgnoreCase))
+        {
+            result.Add(MapStrategyPerformance(extraGroup.Key, extraGroup.Value));
+        }
+
+        return result;
+    }
+
+    private static DashboardStrategyPerformanceItem MapStrategyPerformance(
+        string strategy,
+        IReadOnlyCollection<GridOrder> orders)
+    {
+        var filledOrders = orders
+            .Where(order => order.FilledQuantity > 0m)
+            .ToArray();
+        var closedOrders = filledOrders
+            .Where(order => order.Side == TradeSide.Sell)
+            .ToArray();
+        var wins = closedOrders
+            .Where(order => order.RealizedPnl > 0m)
+            .Select(order => order.RealizedPnl)
+            .ToArray();
+        var losses = closedOrders
+            .Where(order => order.RealizedPnl < 0m)
+            .Select(order => order.RealizedPnl)
+            .ToArray();
+
+        return new DashboardStrategyPerformanceItem
+        {
+            Strategy = strategy,
+            GrossPnl = filledOrders.Sum(order => order.RealizedPnl + order.FeePaid),
+            FeesPaid = filledOrders.Sum(order => order.FeePaid),
+            NetPnl = filledOrders.Sum(order => order.RealizedPnl),
+            FilledTradesCount = filledOrders.Length,
+            ClosedTradesCount = closedOrders.Length,
+            ActiveOrdersCount = orders.Count(order => order.IsActive),
+            WinRate = closedOrders.Length == 0 ? 0m : wins.Length * 100m / closedOrders.Length,
+            AverageWin = wins.Length == 0 ? 0m : wins.Average(),
+            AverageLoss = losses.Length == 0 ? 0m : losses.Average()
+        };
+    }
+
+    private static string NormalizePerformanceStrategy(string? source)
+    {
+        if (string.IsNullOrWhiteSpace(source) ||
+            string.Equals(source, "Managed", StringComparison.OrdinalIgnoreCase))
+        {
+            return "Grid";
+        }
+
+        var normalized = source.Trim();
+        if (normalized.StartsWith("Hybrid", StringComparison.OrdinalIgnoreCase))
+        {
+            return "Hybrid";
+        }
+
+        if (normalized.Contains("BTD", StringComparison.OrdinalIgnoreCase))
+        {
+            return "BTD";
+        }
+
+        if (normalized.Contains("DCA", StringComparison.OrdinalIgnoreCase))
+        {
+            return "DCA";
+        }
+
+        if (normalized.Contains("Signal", StringComparison.OrdinalIgnoreCase))
+        {
+            return "Signal";
+        }
+
+        if (normalized.Contains("ReduceOnly", StringComparison.OrdinalIgnoreCase))
+        {
+            return "ReduceOnly";
+        }
+
+        if (normalized.Contains("Grid", StringComparison.OrdinalIgnoreCase))
+        {
+            return "Grid";
+        }
+
+        return normalized;
     }
 
     private static OrderSourceContext ResolveOrderSourceContext(TradingStrategyType strategyType)
