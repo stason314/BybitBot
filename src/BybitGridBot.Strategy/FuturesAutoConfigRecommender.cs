@@ -45,6 +45,7 @@ public sealed class FuturesAutoConfigRecommender
         var stopLossPercent = RecommendStopLoss(currentSettings.StopLossPercent, atrPercent);
         var takeProfitPercent = decimal.Max(stopLossPercent * 1.8m, currentSettings.TakeProfitPercent);
         var exposureMultiplier = RecommendExposureMultiplier(atrPercent);
+        var modeEntryMultiplier = currentSettings.AggressiveModeEnabled ? 1.5m : 1m;
         var maxNotional = decimal.Max(1m, currentSettings.MaxNotionalUsdt);
         var maxMargin = recommendedLeverage > 0m
             ? decimal.Min(currentSettings.MaxMarginUsdt, maxNotional / recommendedLeverage)
@@ -62,7 +63,7 @@ public sealed class FuturesAutoConfigRecommender
                 maxMargin,
                 stopLossPercent,
                 takeProfitPercent,
-                entryNotionalMultiplier: 0.25m * exposureMultiplier);
+                entryNotionalMultiplier: 0.25m * exposureMultiplier * modeEntryMultiplier);
         }
 
         if (movePercent >= 1.2m && drawdownPercent <= 2m)
@@ -77,7 +78,7 @@ public sealed class FuturesAutoConfigRecommender
                 maxMargin,
                 stopLossPercent,
                 takeProfitPercent,
-                entryNotionalMultiplier: 0.25m * exposureMultiplier);
+                entryNotionalMultiplier: 0.25m * exposureMultiplier * modeEntryMultiplier);
         }
 
         if (lastPrice > high - (atr * 0.5m) && movePercent > 0.4m)
@@ -92,7 +93,7 @@ public sealed class FuturesAutoConfigRecommender
                 maxMargin,
                 stopLossPercent,
                 takeProfitPercent,
-                entryNotionalMultiplier: 0.1875m * exposureMultiplier);
+                entryNotionalMultiplier: 0.1875m * exposureMultiplier * modeEntryMultiplier);
         }
 
         return Build(
@@ -105,7 +106,7 @@ public sealed class FuturesAutoConfigRecommender
             maxMargin,
             stopLossPercent,
             takeProfitPercent,
-            entryNotionalMultiplier: 0.1875m * exposureMultiplier);
+            entryNotionalMultiplier: 0.1875m * exposureMultiplier * modeEntryMultiplier);
     }
 
     private static FuturesAutoConfigRecommendation Build(

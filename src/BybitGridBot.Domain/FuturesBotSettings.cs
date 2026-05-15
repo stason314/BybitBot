@@ -32,5 +32,7 @@ public sealed class FuturesBotSettings
 
     public bool ReduceOnlyEnabled { get; init; } = true;
 
+    public bool AggressiveModeEnabled { get; init; }
+
     public DateTimeOffset UpdatedAt { get; init; } = DateTimeOffset.UtcNow;
 }

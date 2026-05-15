@@ -41,6 +41,18 @@ public sealed class FuturesRiskOptions
     [Range(0, 1000)]
     public int MaxOpenPositions { get; init; } = 1;
 
+    [ConfigurationKeyName("FUTURES_AGGRESSIVE_MAX_ORDERS_PER_HOUR")]
+    [Range(0, 1000)]
+    public int AggressiveMaxOrdersPerHour { get; init; } = 6;
+
+    [ConfigurationKeyName("FUTURES_AGGRESSIVE_MIN_SECONDS_BETWEEN_ENTRIES")]
+    [Range(0, 86400)]
+    public int AggressiveMinSecondsBetweenEntries { get; init; } = 60;
+
+    [ConfigurationKeyName("FUTURES_AGGRESSIVE_MAX_CONSECUTIVE_LOSSES")]
+    [Range(0, 1000)]
+    public int AggressiveMaxConsecutiveLosses { get; init; } = 2;
+
     [ConfigurationKeyName("FUTURES_EMERGENCY_PAUSE")]
     public bool EmergencyPause { get; init; } = false;
 

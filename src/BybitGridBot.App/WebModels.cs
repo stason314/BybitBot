@@ -376,6 +376,8 @@ public sealed class FuturesDashboardResponse
 
     public required FuturesUserStreamStatusView UserStreamStatus { get; init; }
 
+    public required FuturesAggressiveModeView AggressiveMode { get; init; }
+
     public required FuturesAutoRecommendationView AutoRecommendation { get; init; }
 
     public required IReadOnlyList<string> StrategyActions { get; init; }
@@ -461,7 +463,32 @@ public sealed class FuturesSettingsView
 
     public bool ReduceOnlyEnabled { get; init; }
 
+    public bool AggressiveModeEnabled { get; init; }
+
     public bool Enabled { get; init; }
+}
+
+public sealed class FuturesAggressiveModeView
+{
+    public bool Enabled { get; init; }
+
+    public bool Effective { get; init; }
+
+    public bool PaperOnly { get; init; }
+
+    public int EntriesLastHour { get; init; }
+
+    public int MaxEntriesPerHour { get; init; }
+
+    public int MinSecondsBetweenEntries { get; init; }
+
+    public int ConsecutiveLosses { get; init; }
+
+    public int MaxConsecutiveLosses { get; init; }
+
+    public required string GuardStatus { get; init; }
+
+    public required string LastBlockReason { get; init; }
 }
 
 public sealed class FuturesOrderView
@@ -719,4 +746,6 @@ public sealed class UpdateFuturesSettingsRequest
     public decimal LiquidationBufferPercent { get; init; } = 15m;
 
     public bool ReduceOnlyEnabled { get; init; } = true;
+
+    public bool AggressiveModeEnabled { get; init; }
 }

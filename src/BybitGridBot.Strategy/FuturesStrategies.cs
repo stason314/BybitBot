@@ -49,7 +49,7 @@ public sealed class FuturesTrendFollowLongOnly : IFuturesStrategy
             return FuturesLongOnlySignals.CloseLong(context, "exit-signal");
         }
 
-        if (context.Position.Size > 0m)
+        if (context.Position.Size > 0m && !context.Settings.AggressiveModeEnabled)
         {
             return FuturesStrategyDecision.Empty("Existing futures long remains open.");
         }
@@ -76,7 +76,7 @@ public sealed class FuturesBreakoutLongOnly : IFuturesStrategy
             return FuturesLongOnlySignals.CloseLong(context, "exit-signal");
         }
 
-        if (context.Position.Size > 0m)
+        if (context.Position.Size > 0m && !context.Settings.AggressiveModeEnabled)
         {
             return FuturesStrategyDecision.Empty("Existing futures long remains open.");
         }
@@ -103,7 +103,7 @@ public sealed class FuturesGridLongOnly : IFuturesStrategy
             return FuturesLongOnlySignals.CloseLong(context, "exit-signal");
         }
 
-        if (context.Position.Size > 0m)
+        if (context.Position.Size > 0m && !context.Settings.AggressiveModeEnabled)
         {
             return FuturesStrategyDecision.Empty("Existing futures long remains open.");
         }
