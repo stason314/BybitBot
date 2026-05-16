@@ -1070,6 +1070,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
       </div>
       <div class="stats" id="paperAccountStats" style="margin-bottom:0;"></div>
       <div class="stats" id="pnlStats" style="margin-top:12px;margin-bottom:0;"></div>
+      <div class="subtle" id="pnlStatsNote" style="margin-top:8px;"></div>
       <div class="status" id="copyStatus"></div>
     </section>
 
@@ -1503,14 +1504,19 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
       byId('pnlStats').innerHTML = [
         ['Gross Profit', formatPnl(stats.grossProfit)],
         ['Gross Loss', formatPnl(stats.grossLoss)],
+        ['Trading PnL', formatPnl(stats.realizedTradingPnl)],
         ['Net PnL', formatPnl(stats.netPnl)],
         ['Fees', formatPnl(-Math.abs(Number(stats.feesPaid || 0)))],
+        ['Entry Fees', formatPnl(-Math.abs(Number(stats.entryFeesPaid || 0)))],
+        ['Exit Fees', formatPnl(-Math.abs(Number(stats.exitFeesPaid || 0)))],
         ['Funding', formatPnl(stats.fundingPaid)],
         ['Fills', formatNumber(stats.filledTradesCount)],
+        ['Open / Closed', `${formatNumber(stats.openFillsCount)} / ${formatNumber(stats.closedTradesCount)}`],
         ['Win Rate %', formatNumber(stats.winRate)],
         ['Profit Factor', formatNumber(stats.profitFactor)],
         ['Avg Win / Loss', `${formatPnl(stats.averageWin)} / ${formatPnl(stats.averageLoss)}`]
       ].map(([label, value]) => `<div class="stat"><div class="label">${label}</div><div class="value">${value}</div></div>`).join('');
+      byId('pnlStatsNote').textContent = 'Entry fills can show negative realized PnL because fees are booked immediately; win/loss stats use closed trades only.';
     };
     const renderRuntime = (data) => {
       const preflight = data.lastPreflightResult;
@@ -1581,19 +1587,25 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
     const renderRecentOrders = (orders) => {
       byId('recentOrderRows').innerHTML = orders.length === 0
         ? '<tr><td colspan="10">No futures order history yet.</td></tr>'
-        : orders.map(order => `
-          <tr>
-            <td>${formatDate(order.updatedAt)}</td>
-            <td>${escapeHtml(order.orderLinkId)}</td>
-            <td>${escapeHtml(order.action)}</td>
-            <td>${escapeHtml(order.side)}</td>
-            <td>${formatNumber(order.quantity)}</td>
-            <td>${formatNumber(order.filledQuantity)}</td>
-            <td>${formatNumber(order.averageFillPrice)}</td>
-            <td>${escapeHtml(order.status)}</td>
-            <td>${formatPnl(order.realizedPnl)}</td>
-            <td>${formatPnl(-Math.abs(Number(order.feePaid || 0)))}</td>
-          </tr>`).join('');
+        : orders.map(order => {
+            const isEntry = order.action === 'OpenLong' || order.action === 'OpenShort';
+            const realized = isEntry
+              ? `${formatPnl(order.realizedPnl)}<br><span class="subtle">entry fee</span>`
+              : formatPnl(order.realizedPnl);
+            return `
+              <tr>
+                <td>${formatDate(order.updatedAt)}</td>
+                <td>${escapeHtml(order.orderLinkId)}</td>
+                <td>${escapeHtml(order.action)}</td>
+                <td>${escapeHtml(order.side)}</td>
+                <td>${formatNumber(order.quantity)}</td>
+                <td>${formatNumber(order.filledQuantity)}</td>
+                <td>${formatNumber(order.averageFillPrice)}</td>
+                <td>${escapeHtml(order.status)}</td>
+                <td>${realized}</td>
+                <td>${formatPnl(-Math.abs(Number(order.feePaid || 0)))}</td>
+              </tr>`;
+          }).join('');
     };
     const recentOrdersForHours = (hours) => {
       const cutoff = Date.now() - hours * 60 * 60 * 1000;
@@ -2223,23 +2235,39 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             .Where(fill => fill.Quantity > 0m)
             .Where(fill => fill.Action != FuturesTradeAction.Funding)
             .ToArray();
-        var realized = filled.Select(fill => fill.RealizedPnl).ToArray();
-        var wins = realized.Where(pnl => pnl > 0m).ToArray();
-        var losses = realized.Where(pnl => pnl < 0m).ToArray();
+        var entryFills = filled
+            .Where(fill => fill.Action is FuturesTradeAction.OpenLong or FuturesTradeAction.OpenShort)
+            .ToArray();
+        var closingFills = filled
+            .Where(fill => fill.Action is FuturesTradeAction.CloseLong or FuturesTradeAction.CloseShort or FuturesTradeAction.ReduceOnlyClose)
+            .ToArray();
+        var closedNetPnl = closingFills.Select(fill => fill.RealizedPnl).ToArray();
+        var wins = closedNetPnl.Where(pnl => pnl > 0m).ToArray();
+        var losses = closedNetPnl.Where(pnl => pnl < 0m).ToArray();
         var grossProfit = wins.Sum();
         var grossLoss = losses.Sum();
+        var entryFeesPaid = entryFills.Sum(fill => fill.Fee);
+        var exitFeesPaid = closingFills.Sum(fill => fill.Fee);
+        var realizedTradingPnl = closingFills.Sum(fill => fill.RealizedPnl + fill.Fee - fill.Funding);
+        var fundingPaid = fillLedger.TotalFunding;
+        var netPnl = realizedTradingPnl - fillLedger.FeesPaid - fundingPaid;
 
         return new FuturesPnlStatsView
         {
             GrossProfit = grossProfit,
             GrossLoss = grossLoss,
-            NetPnl = fillLedger.TotalRealizedPnl + fillLedger.TotalFunding,
+            NetPnl = netPnl,
+            RealizedTradingPnl = realizedTradingPnl,
             FeesPaid = fillLedger.FeesPaid,
-            FundingPaid = fillLedger.TotalFunding,
+            EntryFeesPaid = entryFeesPaid,
+            ExitFeesPaid = exitFeesPaid,
+            FundingPaid = fundingPaid,
             FilledTradesCount = filled.Length,
+            OpenFillsCount = entryFills.Length,
+            ClosedTradesCount = closingFills.Length,
             WinningTradesCount = wins.Length,
             LosingTradesCount = losses.Length,
-            WinRate = filled.Length == 0 ? 0m : (decimal)wins.Length / filled.Length * 100m,
+            WinRate = closingFills.Length == 0 ? 0m : (decimal)wins.Length / closingFills.Length * 100m,
             ProfitFactor = grossLoss == 0m ? (grossProfit > 0m ? grossProfit : 0m) : grossProfit / Math.Abs(grossLoss),
             AverageWin = wins.Length == 0 ? 0m : wins.Average(),
             AverageLoss = losses.Length == 0 ? 0m : losses.Average()

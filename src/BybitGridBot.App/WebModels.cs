@@ -860,11 +860,21 @@ public sealed class FuturesPnlStatsView
 
     public decimal NetPnl { get; init; }
 
+    public decimal RealizedTradingPnl { get; init; }
+
     public decimal FeesPaid { get; init; }
+
+    public decimal EntryFeesPaid { get; init; }
+
+    public decimal ExitFeesPaid { get; init; }
 
     public decimal FundingPaid { get; init; }
 
     public int FilledTradesCount { get; init; }
+
+    public int OpenFillsCount { get; init; }
+
+    public int ClosedTradesCount { get; init; }
 
     public int WinningTradesCount { get; init; }
 
