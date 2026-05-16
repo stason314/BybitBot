@@ -122,6 +122,26 @@ public sealed class GridOptions
     [Range(typeof(decimal), "0", "1000")]
     public decimal PairScoreRecentLossMaxMultiplier { get; init; } = 0.5m;
 
+    [ConfigurationKeyName("TOP_PAIR_ACTIVE_COUNT")]
+    [Range(0, 1000)]
+    public int TopPairActiveCount { get; init; } = 5;
+
+    [ConfigurationKeyName("TOP_PAIR_MIN_SCORE")]
+    [Range(typeof(decimal), "0", "100")]
+    public decimal TopPairMinScore { get; init; } = 75m;
+
+    [ConfigurationKeyName("TOP_PAIR_MIN_PROFIT_STREAK")]
+    [Range(0, 1000)]
+    public int TopPairMinProfitStreak { get; init; } = 3;
+
+    [ConfigurationKeyName("NON_TOP_PAIR_MULTIPLIER")]
+    [Range(typeof(decimal), "0", "1000")]
+    public decimal NonTopPairMultiplier { get; init; } = 0m;
+
+    [ConfigurationKeyName("NON_TOP_PAIR_PROBATION_MULTIPLIER")]
+    [Range(typeof(decimal), "0", "1000")]
+    public decimal NonTopPairProbationMultiplier { get; init; } = 0.25m;
+
     [ConfigurationKeyName("STOP_LOWER_PRICE")]
     public decimal StopLowerPrice { get; init; } = 0.09m;
 

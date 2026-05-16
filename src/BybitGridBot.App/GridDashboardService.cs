@@ -25,13 +25,6 @@ public sealed class GridDashboardService : IGridDashboardService
 {
     private static readonly JsonSerializerOptions StrategyJsonOptions = new(JsonSerializerDefaults.Web);
     private const decimal ExecutionDrawdownWarningPercent = 1m;
-    private const decimal PairScoreMinBuyScore = 60m;
-    private const decimal PairScoreProbationMultiplier = 0.5m;
-    private const decimal PairScoreFirstProfitMultiplier = 1m;
-    private const decimal PairScoreProfitStreakMultiplier = 1.4m;
-    private const int PairScoreProfitStreakTrades = 3;
-    private const decimal PairScoreNegativeDailyMaxMultiplier = 0.5m;
-    private const decimal PairScoreRecentLossMaxMultiplier = 0.5m;
 
     private readonly AppOptions _appOptions;
     private readonly AutoStrategySelector _autoStrategySelector;
@@ -664,6 +657,7 @@ public sealed class GridDashboardService : IGridDashboardService
                     await ordersTask,
                     (await noTradeReasonsTask).FirstOrDefault(),
                     await marketTask,
+                    _defaultGridOptions,
                     now);
             }
             finally
@@ -672,7 +666,8 @@ public sealed class GridDashboardService : IGridDashboardService
             }
         });
 
-        var scores = await Task.WhenAll(scoreTasks);
+        var candidates = await Task.WhenAll(scoreTasks);
+        var scores = ApplyDashboardTopPairGate(candidates);
 
         return scores
             .OrderByDescending(score => score.Score)
@@ -732,12 +727,13 @@ public sealed class GridDashboardService : IGridDashboardService
         }
     }
 
-    private static DashboardPairScoreItem BuildPairScore(
+    private static DashboardPairScoreCandidate BuildPairScore(
         GridBotSettings profile,
         BotState? state,
         IReadOnlyCollection<GridOrder> orders,
         NoTradeReasonRecord? lastNoTradeReason,
         PairScoreMarketMetrics market,
+        GridOptions gridOptions,
         DateTimeOffset now)
     {
         var score = 50m;
@@ -864,8 +860,9 @@ public sealed class GridDashboardService : IGridDashboardService
         }
 
         score = decimal.Max(0m, decimal.Min(100m, decimal.Round(score, 2, MidpointRounding.AwayFromZero)));
-        var suggestedMultiplier = ResolveDashboardSuggestedOrderSizeMultiplier(score, dailyPnl, orders, reasons);
-        return new DashboardPairScoreItem
+        var profitStats = CalculateDashboardPairProfitStats(orders);
+        var suggestedMultiplier = ResolveDashboardSuggestedOrderSizeMultiplier(score, dailyPnl, profitStats, gridOptions, reasons);
+        var item = new DashboardPairScoreItem
         {
             Symbol = profile.Symbol,
             Category = profile.Category,
@@ -880,53 +877,204 @@ public sealed class GridDashboardService : IGridDashboardService
             LastNoTradeReason = lastNoTradeReason?.ReasonCode.ToString(),
             Reasons = reasons.Count == 0 ? ["market data limited"] : reasons
         };
+        return new DashboardPairScoreCandidate(
+            item,
+            dailyPnl,
+            state?.BaseAssetQuantity > 0m,
+            profitStats,
+            IsDashboardTopPairTradingProfile(profile));
     }
 
     private static decimal ResolveDashboardSuggestedOrderSizeMultiplier(
         decimal score,
         decimal dailyPnl,
-        IReadOnlyCollection<GridOrder> orders,
+        DashboardPairProfitStats profitStats,
+        GridOptions gridOptions,
         List<string> reasons)
     {
-        if (score < PairScoreMinBuyScore)
+        if (score < gridOptions.PairScoreMinBuyScore)
         {
-            reasons.Add($"Market Fit below buy threshold {PairScoreMinBuyScore:0.#}");
+            reasons.Add($"Market Fit below buy threshold {gridOptions.PairScoreMinBuyScore:0.#}");
             return 0m;
         }
 
-        var multiplier = score >= 75m ? 1.4m : score >= 60m ? 1.15m : 1m;
-        var profitStats = CalculateDashboardPairProfitStats(orders);
+        var multiplier = score >= 75m
+            ? gridOptions.PairScoreHotMultiplier
+            : score >= 60m
+                ? gridOptions.PairScoreGoodMultiplier
+                : gridOptions.PairScoreNeutralMultiplier;
         if (profitStats.ProfitableClosedSellCount == 0)
         {
-            multiplier = decimal.Min(multiplier, PairScoreProbationMultiplier);
+            multiplier = decimal.Min(multiplier, gridOptions.PairScoreProbationMultiplier);
             reasons.Add("probation size until first profitable cycle");
         }
         else if (profitStats.ProfitableClosedSellCount == 1 ||
-                 profitStats.CurrentProfitStreak < PairScoreProfitStreakTrades)
+                 profitStats.CurrentProfitStreak < gridOptions.PairScoreProfitStreakTrades)
         {
-            multiplier = decimal.Min(multiplier, PairScoreFirstProfitMultiplier);
+            multiplier = decimal.Min(multiplier, gridOptions.PairScoreFirstProfitMultiplier);
             reasons.Add("profit-first size until streak improves");
         }
         else
         {
-            multiplier = decimal.Min(multiplier, PairScoreProfitStreakMultiplier);
+            multiplier = decimal.Min(multiplier, gridOptions.PairScoreProfitStreakMultiplier);
             reasons.Add($"profit streak {profitStats.CurrentProfitStreak}");
         }
 
         if (profitStats.LatestClosedSellWasLoss)
         {
-            multiplier = decimal.Min(multiplier, PairScoreRecentLossMaxMultiplier);
+            multiplier = decimal.Min(multiplier, gridOptions.PairScoreRecentLossMaxMultiplier);
             reasons.Add("latest closed sell was a loss");
         }
 
         if (dailyPnl < 0m)
         {
-            multiplier = decimal.Min(multiplier, PairScoreNegativeDailyMaxMultiplier);
+            multiplier = decimal.Min(multiplier, gridOptions.PairScoreNegativeDailyMaxMultiplier);
             reasons.Add("negative daily PnL caps size");
         }
 
         return multiplier;
     }
+
+    private IReadOnlyList<DashboardPairScoreItem> ApplyDashboardTopPairGate(
+        IReadOnlyCollection<DashboardPairScoreCandidate> candidates)
+    {
+        if (_defaultGridOptions.TopPairActiveCount <= 0)
+        {
+            return candidates.Select(candidate => candidate.Item).ToArray();
+        }
+
+        var topRanks = candidates
+            .Where(candidate => candidate.IsTradingProfile &&
+                IsDashboardTopPairCandidate(candidate.Item.Score, candidate.DailyPnl, candidate.ProfitStats, _defaultGridOptions, out _))
+            .OrderByDescending(candidate => candidate.Item.Score)
+            .ThenByDescending(candidate => candidate.ProfitStats.CurrentProfitStreak)
+            .ThenByDescending(candidate => candidate.DailyPnl)
+            .ThenBy(candidate => candidate.Item.Symbol, StringComparer.OrdinalIgnoreCase)
+            .Select((candidate, index) => new { candidate.Item.Symbol, Rank = index + 1 })
+            .ToDictionary(item => item.Symbol, item => item.Rank, StringComparer.OrdinalIgnoreCase);
+
+        return candidates
+            .Select(candidate => ApplyDashboardTopPairGate(candidate, topRanks))
+            .ToArray();
+    }
+
+    private DashboardPairScoreItem ApplyDashboardTopPairGate(
+        DashboardPairScoreCandidate candidate,
+        IReadOnlyDictionary<string, int> topRanks)
+    {
+        var reasons = candidate.Item.Reasons.ToList();
+        var multiplier = candidate.Item.SuggestedOrderSizeMultiplier;
+        if (!candidate.IsTradingProfile)
+        {
+            reasons.Add("execution mode blocks new buys");
+            return CopyDashboardPairScoreItem(candidate.Item, 0m, reasons);
+        }
+
+        if (!IsDashboardTopPairCandidate(candidate.Item.Score, candidate.DailyPnl, candidate.ProfitStats, _defaultGridOptions, out var reason))
+        {
+            multiplier = ResolveDashboardNonTopPairMultiplier(candidate);
+            reasons.Add($"top-pair gate: {reason}");
+            return CopyDashboardPairScoreItem(candidate.Item, multiplier, reasons);
+        }
+
+        var rank = topRanks.TryGetValue(candidate.Item.Symbol, out var resolvedRank)
+            ? resolvedRank
+            : int.MaxValue;
+        if (rank > _defaultGridOptions.TopPairActiveCount)
+        {
+            multiplier = ResolveDashboardNonTopPairMultiplier(candidate);
+            reasons.Add($"top-pair gate: rank {rank} outside top {_defaultGridOptions.TopPairActiveCount}");
+            return CopyDashboardPairScoreItem(candidate.Item, multiplier, reasons);
+        }
+
+        reasons.Add($"top-pair rank {rank}");
+        return CopyDashboardPairScoreItem(candidate.Item, multiplier, reasons);
+    }
+
+    private decimal ResolveDashboardNonTopPairMultiplier(DashboardPairScoreCandidate candidate)
+    {
+        if (candidate.HasPosition)
+        {
+            return 0m;
+        }
+
+        if (candidate.DailyPnl < 0m || candidate.ProfitStats.LatestClosedSellWasLoss)
+        {
+            return _defaultGridOptions.NonTopPairMultiplier;
+        }
+
+        return candidate.ProfitStats.ProfitableClosedSellCount == 0
+            ? _defaultGridOptions.NonTopPairProbationMultiplier
+            : _defaultGridOptions.NonTopPairMultiplier;
+    }
+
+    private static bool IsDashboardTopPairCandidate(
+        decimal score,
+        decimal dailyPnl,
+        DashboardPairProfitStats profitStats,
+        GridOptions gridOptions,
+        out string reason)
+    {
+        if (score < gridOptions.TopPairMinScore)
+        {
+            reason = $"score {score:0.##} below top-pair threshold {gridOptions.TopPairMinScore:0.##}";
+            return false;
+        }
+
+        if (profitStats.CurrentProfitStreak < gridOptions.TopPairMinProfitStreak)
+        {
+            reason = $"profit streak {profitStats.CurrentProfitStreak} below top-pair threshold {gridOptions.TopPairMinProfitStreak}";
+            return false;
+        }
+
+        if (dailyPnl < 0m)
+        {
+            reason = "negative daily PnL";
+            return false;
+        }
+
+        if (profitStats.LatestClosedSellWasLoss)
+        {
+            reason = "latest closed sell was a loss";
+            return false;
+        }
+
+        reason = "eligible";
+        return true;
+    }
+
+    private static bool IsDashboardTopPairTradingProfile(GridBotSettings profile) =>
+        string.Equals(profile.Category, "spot", StringComparison.OrdinalIgnoreCase) &&
+        profile.StrategyType is not TradingStrategyType.NoTrade and
+            not TradingStrategyType.Pause and
+            not TradingStrategyType.ReduceOnly;
+
+    private static DashboardPairScoreItem CopyDashboardPairScoreItem(
+        DashboardPairScoreItem item,
+        decimal suggestedOrderSizeMultiplier,
+        IReadOnlyList<string> reasons) =>
+        new()
+        {
+            Symbol = item.Symbol,
+            Category = item.Category,
+            Score = item.Score,
+            Label = item.Label,
+            SuggestedOrderSizeMultiplier = decimal.Max(0m, suggestedOrderSizeMultiplier),
+            SpreadPercent = item.SpreadPercent,
+            VolatilityPercent = item.VolatilityPercent,
+            VolumeRatio = item.VolumeRatio,
+            RecentWinRate = item.RecentWinRate,
+            CurrentDrawdownPercent = item.CurrentDrawdownPercent,
+            LastNoTradeReason = item.LastNoTradeReason,
+            Reasons = reasons
+        };
+
+    private sealed record DashboardPairScoreCandidate(
+        DashboardPairScoreItem Item,
+        decimal DailyPnl,
+        bool HasPosition,
+        DashboardPairProfitStats ProfitStats,
+        bool IsTradingProfile);
 
     private static DashboardPairProfitStats CalculateDashboardPairProfitStats(IReadOnlyCollection<GridOrder> orders)
     {

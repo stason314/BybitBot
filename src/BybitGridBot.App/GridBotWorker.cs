@@ -4480,7 +4480,30 @@ public sealed class GridBotWorker : BackgroundService
             multiplier = decimal.Min(multiplier, _gridOptions.PairScoreNegativeDailyMaxMultiplier);
         }
 
-        if (score >= 75m && _gridOptions.PairScoreMaxHotPairs > 0)
+        var topPairGate = await ResolveTopPairGateAsync(state, score, profitStats, cancellationToken);
+        if (!topPairGate.IsAllowed)
+        {
+            var nonTopMultiplier = ResolveNonTopPairMultiplier(state, profitStats);
+            if (nonTopMultiplier <= 0m)
+            {
+                await RecordNoTradeReasonAsync(
+                    profile,
+                    NoTradeReason.CapitalRejected,
+                    $"Top-pair capital gate blocked buy sizing: {topPairGate.Reason}.",
+                    cancellationToken);
+            }
+
+            _logger.LogInformation(
+                "Top-pair capital gate for {Symbol}: allowed={Allowed}, reason={Reason}, rank={Rank}, buy order multiplier={Multiplier}.",
+                _gridOptions.Symbol,
+                topPairGate.IsAllowed,
+                topPairGate.Reason,
+                topPairGate.Rank,
+                nonTopMultiplier);
+            return nonTopMultiplier;
+        }
+
+        if (_gridOptions.TopPairActiveCount <= 0 && score >= 75m && _gridOptions.PairScoreMaxHotPairs > 0)
         {
             var hotRank = await GetPairScoreRankAsync(score, cancellationToken);
             if (hotRank > _gridOptions.PairScoreMaxHotPairs)
@@ -4610,6 +4633,83 @@ public sealed class GridBotWorker : BackgroundService
     private static decimal ApplyPairScoreOrderSizeMultiplier(decimal orderSizeUsdt, decimal multiplier) =>
         decimal.Max(0m, orderSizeUsdt * decimal.Max(0m, multiplier));
 
+    private async Task<TopPairGateResult> ResolveTopPairGateAsync(
+        BotState state,
+        decimal score,
+        PairProfitStats profitStats,
+        CancellationToken cancellationToken)
+    {
+        if (_gridOptions.TopPairActiveCount <= 0)
+        {
+            return new TopPairGateResult(true, 0, "top-pair gate disabled");
+        }
+
+        if (!IsTopPairCandidate(score, state.DailyRealizedPnl, profitStats, out var reason))
+        {
+            return new TopPairGateResult(false, 0, reason);
+        }
+
+        var rank = await GetTopPairRankAsync(
+            score,
+            profitStats.CurrentProfitStreak,
+            state.DailyRealizedPnl,
+            cancellationToken);
+        return rank <= _gridOptions.TopPairActiveCount
+            ? new TopPairGateResult(true, rank, $"top-pair rank {rank}")
+            : new TopPairGateResult(false, rank, $"rank {rank} outside top {_gridOptions.TopPairActiveCount}");
+    }
+
+    private decimal ResolveNonTopPairMultiplier(BotState state, PairProfitStats profitStats)
+    {
+        if (state.BaseAssetQuantity > 0m)
+        {
+            return 0m;
+        }
+
+        if (state.DailyRealizedPnl < 0m || profitStats.LatestClosedSellWasLoss)
+        {
+            return _gridOptions.NonTopPairMultiplier;
+        }
+
+        return profitStats.ProfitableClosedSellCount == 0
+            ? _gridOptions.NonTopPairProbationMultiplier
+            : _gridOptions.NonTopPairMultiplier;
+    }
+
+    private bool IsTopPairCandidate(
+        decimal score,
+        decimal dailyPnl,
+        PairProfitStats profitStats,
+        out string reason)
+    {
+        if (score < _gridOptions.TopPairMinScore)
+        {
+            reason = $"score {score:0.##} below top-pair threshold {_gridOptions.TopPairMinScore:0.##}";
+            return false;
+        }
+
+        if (profitStats.CurrentProfitStreak < _gridOptions.TopPairMinProfitStreak)
+        {
+            reason = $"profit streak {profitStats.CurrentProfitStreak} below top-pair threshold {_gridOptions.TopPairMinProfitStreak}";
+            return false;
+        }
+
+        if (dailyPnl < 0m)
+        {
+            reason = "negative daily PnL";
+            return false;
+        }
+
+        if (profitStats.LatestClosedSellWasLoss)
+        {
+            reason = "latest closed sell was a loss";
+            return false;
+        }
+
+        reason = "eligible";
+        return true;
+    }
+
     private static PairProfitStats CalculatePairProfitStats(IReadOnlyCollection<GridOrder> orders)
     {
         var closedSells = orders
@@ -4639,6 +4739,11 @@ public sealed class GridBotWorker : BackgroundService
         int CurrentProfitStreak,
         bool LatestClosedSellWasLoss);
 
+    private sealed record TopPairGateResult(
+        bool IsAllowed,
+        int Rank,
+        string Reason);
+
     private async Task<int> GetPairScoreRankAsync(decimal currentScore, CancellationToken cancellationToken)
     {
         var profiles = await _repository.GetRuntimeSettingsProfilesAsync(cancellationToken);
@@ -4664,6 +4769,84 @@ public sealed class GridBotWorker : BackgroundService
         }
 
         return higherRankedCount + 1;
+    }
+
+    private async Task<int> GetTopPairRankAsync(
+        decimal currentScore,
+        int currentProfitStreak,
+        decimal currentDailyPnl,
+        CancellationToken cancellationToken)
+    {
+        var profiles = await _repository.GetRuntimeSettingsProfilesAsync(cancellationToken);
+        var higherRankedCount = 0;
+        foreach (var profile in profiles.Where(profile =>
+                     IsTopPairTradingProfile(profile) &&
+                     !string.Equals(profile.Symbol, _gridOptions.Symbol, StringComparison.OrdinalIgnoreCase)))
+        {
+            var state = await _repository.GetBotStateAsync(profile.Symbol, cancellationToken);
+            if (state is null)
+            {
+                continue;
+            }
+
+            var orders = await _repository.GetOrdersAsync(profile.Symbol, cancellationToken);
+            var lastNoTradeReason = (await _repository.GetNoTradeReasonsAsync(profile.Symbol, 1, cancellationToken)).FirstOrDefault();
+            var score = CalculateCapitalPairScore(state, orders, lastNoTradeReason);
+            var profitStats = CalculatePairProfitStats(orders);
+            if (!IsTopPairCandidate(score, state.DailyRealizedPnl, profitStats, out _))
+            {
+                continue;
+            }
+
+            if (IsTopPairRankedAhead(
+                    score,
+                    profitStats.CurrentProfitStreak,
+                    state.DailyRealizedPnl,
+                    profile.Symbol,
+                    currentScore,
+                    currentProfitStreak,
+                    currentDailyPnl,
+                    _gridOptions.Symbol))
+            {
+                higherRankedCount++;
+            }
+        }
+
+        return higherRankedCount + 1;
+    }
+
+    private static bool IsTopPairTradingProfile(GridBotSettings profile) =>
+        string.Equals(profile.Category, "spot", StringComparison.OrdinalIgnoreCase) &&
+        profile.StrategyType is not TradingStrategyType.NoTrade and
+            not TradingStrategyType.Pause and
+            not TradingStrategyType.ReduceOnly;
+
+    private static bool IsTopPairRankedAhead(
+        decimal candidateScore,
+        int candidateProfitStreak,
+        decimal candidateDailyPnl,
+        string candidateSymbol,
+        decimal currentScore,
+        int currentProfitStreak,
+        decimal currentDailyPnl,
+        string currentSymbol)
+    {
+        if (candidateScore != currentScore)
+        {
+            return candidateScore > currentScore;
+        }
+
+        if (candidateProfitStreak != currentProfitStreak)
+        {
+            return candidateProfitStreak > currentProfitStreak;
+        }
+
+        if (candidateDailyPnl != currentDailyPnl)
+        {
+            return candidateDailyPnl > currentDailyPnl;
+        }
+
+        return string.Compare(candidateSymbol, currentSymbol, StringComparison.OrdinalIgnoreCase) < 0;
     }
 
     private async Task<decimal> CalculateGlobalActiveBuyNotionalAsync(CancellationToken cancellationToken)
