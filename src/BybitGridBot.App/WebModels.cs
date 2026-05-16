@@ -793,6 +793,12 @@ public sealed class FuturesStrategyQualityView
 
     public int EntriesCapacityLeft { get; init; }
 
+    public string ExitStage { get; init; } = "no-position";
+
+    public decimal CurrentR { get; init; }
+
+    public decimal NextExitPrice { get; init; }
+
     public string CurrentActiveBlockReason { get; init; } = "-";
 
     public string CurrentActiveBlockSource { get; init; } = "-";

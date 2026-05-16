@@ -10,6 +10,8 @@ public sealed class FuturesStrategyContext
 
     public FuturesPositionSnapshot Position { get; init; } = new();
 
+    public IReadOnlyList<FuturesFillRecord> RecentFills { get; init; } = [];
+
     public decimal CurrentPrice { get; init; }
 
     public FuturesInstrumentRules Instrument { get; init; } = new();

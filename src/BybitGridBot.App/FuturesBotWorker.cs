@@ -189,11 +189,13 @@ public sealed class FuturesBotWorker : BackgroundService
         var recommendation = _recommender.Recommend(settings, candles, position.Size > 0m);
         settings = await TryApplyAutoRecommendationAsync(settings, recommendation, position, cancellationToken);
         await RecordPositionStrategyGuardIfNeededAsync(settings, recommendation, position, cancellationToken);
+        var recentFills = await _repository.GetFuturesFillsAsync(settings.Symbol, 1000, cancellationToken);
         var decision = _strategyRouter.Decide(new FuturesStrategyContext
         {
             Settings = settings,
             Candles = candles,
             Position = position,
+            RecentFills = recentFills,
             CurrentPrice = currentPrice,
             Instrument = instrumentRules
         });
@@ -783,6 +785,7 @@ public sealed class FuturesBotWorker : BackgroundService
 
     private static bool IsFeeProtectedExitReason(string reason) =>
         string.Equals(reason, "take-profit", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(reason, "final-tp", StringComparison.OrdinalIgnoreCase) ||
         string.Equals(reason, "partial-take-profit", StringComparison.OrdinalIgnoreCase) ||
         string.Equals(reason, "trailing-profit", StringComparison.OrdinalIgnoreCase) ||
         string.Equals(reason, "exit-signal", StringComparison.OrdinalIgnoreCase);

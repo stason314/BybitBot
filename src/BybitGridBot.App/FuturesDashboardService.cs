@@ -1861,6 +1861,9 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         ['Capital Used %', `${formatNumber(quality.capitalUtilizationPercent)}%`],
         ['Remaining Margin', formatNumber(quality.remainingMarginUsdt)],
         ['Entry Capacity', formatNumber(quality.entriesCapacityLeft)],
+        ['Exit Stage', quality.exitStage || '-'],
+        ['Current R', formatNumber(quality.currentR)],
+        ['Next Exit', formatNumber(quality.nextExitPrice)],
         ['Fee / Trading PnL', `${formatNumber(quality.feeToTradingPnlPercent)}%`],
         ['Profit Efficiency', quality.profitEfficiencyStatus || '-'],
         ['No Trade', formatNumber(quality.noTradeReasonCount)],
@@ -2754,6 +2757,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             .FirstOrDefault();
         var positionCapacity = BuildPositionCapacity(settings, position, instrument);
         var efficiency = BuildProfitEfficiency(fills);
+        var exitLadder = BuildExitLadderStatus(settings, position, fills);
 
         return new FuturesStrategyQualityView
         {
@@ -2772,6 +2776,9 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             CapitalUtilizationPercent = positionCapacity.CapitalUtilizationPercent,
             RemainingMarginUsdt = positionCapacity.RemainingMarginUsdt,
             EntriesCapacityLeft = positionCapacity.EntriesCapacityLeft,
+            ExitStage = exitLadder.Stage,
+            CurrentR = exitLadder.CurrentR,
+            NextExitPrice = exitLadder.NextExitPrice,
             CurrentActiveBlockReason = currentActiveBlock?.Reason ?? "-",
             CurrentActiveBlockSource = currentActiveBlock?.Source ?? "-",
             CurrentActiveBlockAt = currentActiveBlock?.CreatedAt,
@@ -2798,6 +2805,86 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         decimal CapitalUtilizationPercent,
         decimal RemainingMarginUsdt,
         int EntriesCapacityLeft);
+
+    private readonly record struct FuturesExitLadderView(
+        string Stage,
+        decimal CurrentR,
+        decimal NextExitPrice);
+
+    private static FuturesExitLadderView BuildExitLadderStatus(
+        FuturesBotSettings settings,
+        FuturesPositionSnapshot position,
+        IReadOnlyCollection<FuturesFillRecord> fills)
+    {
+        if (position.Size <= 0m || position.EntryPrice <= 0m || position.MarkPrice <= 0m || settings.StopLossPercent <= 0m)
+        {
+            return new FuturesExitLadderView("no-position", 0m, 0m);
+        }
+
+        var isShort = string.Equals(position.Side, "Sell", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(position.Side, "Short", StringComparison.OrdinalIgnoreCase);
+        var profitPercent = isShort
+            ? (position.EntryPrice - position.MarkPrice) / position.EntryPrice * 100m
+            : (position.MarkPrice - position.EntryPrice) / position.EntryPrice * 100m;
+        var currentR = profitPercent / settings.StopLossPercent;
+        var hasPartial = HasCloseAfterLastEntry(
+            fills,
+            isShort ? FuturesTradeAction.OpenShort : FuturesTradeAction.OpenLong,
+            isShort ? FuturesTradeAction.CloseShort : FuturesTradeAction.CloseLong);
+        var finalR = settings.TakeProfitPercent > 0m
+            ? settings.TakeProfitPercent / settings.StopLossPercent
+            : 3m;
+        var stage = currentR >= finalR
+            ? "final-tp"
+            : hasPartial
+                ? "trailing"
+                : currentR >= 1m
+                    ? "partial-taken"
+                    : "waiting-1r";
+        var nextExitPrice = stage switch
+        {
+            "waiting-1r" or "partial-taken" => CalculateRPrice(position.EntryPrice, settings.StopLossPercent, 1m, isShort),
+            "trailing" => CalculateTrailingExitPrice(position.MarkPrice, position.EntryPrice, settings.StopLossPercent, isShort),
+            _ => CalculateRPrice(position.EntryPrice, settings.StopLossPercent, finalR, isShort)
+        };
+
+        return new FuturesExitLadderView(
+            stage,
+            decimal.Round(currentR, 4, MidpointRounding.AwayFromZero),
+            decimal.Round(nextExitPrice, 8, MidpointRounding.AwayFromZero));
+    }
+
+    private static decimal CalculateRPrice(decimal entryPrice, decimal stopLossPercent, decimal r, bool isShort)
+    {
+        var move = entryPrice * stopLossPercent / 100m * r;
+        return isShort ? entryPrice - move : entryPrice + move;
+    }
+
+    private static decimal CalculateTrailingExitPrice(decimal markPrice, decimal entryPrice, decimal stopLossPercent, bool isShort)
+    {
+        var riskDistance = entryPrice * stopLossPercent / 100m;
+        var raw = isShort ? markPrice + riskDistance : markPrice - riskDistance;
+        return isShort ? decimal.Min(entryPrice, raw) : decimal.Max(entryPrice, raw);
+    }
+
+    private static bool HasCloseAfterLastEntry(
+        IReadOnlyCollection<FuturesFillRecord> fills,
+        FuturesTradeAction entryAction,
+        FuturesTradeAction closeAction)
+    {
+        var lastEntry = fills
+            .Where(fill => fill.Action == entryAction)
+            .OrderByDescending(fill => fill.CreatedAt)
+            .FirstOrDefault();
+        if (lastEntry is null)
+        {
+            return false;
+        }
+
+        return fills.Any(fill =>
+            fill.CreatedAt > lastEntry.CreatedAt &&
+            (fill.Action == closeAction || fill.Action == FuturesTradeAction.ReduceOnlyClose));
+    }
 
     private async Task<FuturesInstrumentRules?> TryGetInstrumentRulesAsync(
         FuturesBotSettings settings,
