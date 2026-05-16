@@ -1524,6 +1524,34 @@ public sealed class GridDashboardService : IGridDashboardService
     }
     .token { font-family: "IBM Plex Mono", monospace; font-size: 12px; }
     .table-wrap { overflow: auto; }
+    .market-scan-table-wrap {
+      --market-scan-row-height: 72px;
+      max-height: calc(44px + (var(--market-scan-row-height) * 10));
+      overflow: auto;
+      overscroll-behavior: contain;
+    }
+    .market-scan-table-wrap th {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      background: #f7f1e7;
+      box-shadow: 0 1px 0 rgba(29,35,31,0.08);
+    }
+    .market-scan-table-wrap th,
+    .market-scan-table-wrap td {
+      padding: 10px 8px;
+    }
+    .market-scan-table-wrap tbody tr {
+      height: var(--market-scan-row-height);
+    }
+    .market-scan-reasons {
+      display: -webkit-box;
+      max-width: 360px;
+      overflow: hidden;
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: 2;
+      line-clamp: 2;
+    }
     .config-summary-panel { margin-bottom: 20px; }
     .config-profit-totals {
       display: flex;
@@ -1761,7 +1789,7 @@ public sealed class GridDashboardService : IGridDashboardService
         <table class="config-table">
           <thead>
             <tr>
-              <th>Symbol</th><th>Strategy</th><th>Type</th><th>Status</th><th>Score</th><th>Capital</th><th>Daily Profit</th><th>Total Profit ↓</th><th>Updated</th>
+              <th>Symbol</th><th>Strategy</th><th>Type</th><th>Status</th><th>Score</th><th>Capital</th><th>Daily Profit</th><th>Total Profit ↓</th><th>Updated</th><th>Action</th>
             </tr>
           </thead>
           <tbody id="configSummaryRows"></tbody>
@@ -1791,7 +1819,7 @@ public sealed class GridDashboardService : IGridDashboardService
         </div>
       </div>
       <div class="status" id="marketScanStatus">Scanner has not run yet.</div>
-      <div class="table-wrap">
+      <div class="table-wrap market-scan-table-wrap">
         <table>
           <thead>
             <tr>
@@ -2053,7 +2081,7 @@ public sealed class GridDashboardService : IGridDashboardService
     const renderConfigSummaries = (configs) => {
       renderConfigTotals(configs);
       byId('configSummaryRows').innerHTML = configs.length === 0
-        ? `<tr><td colspan="9">No configs yet.</td></tr>`
+        ? `<tr><td colspan="10">No configs yet.</td></tr>`
         : configs.map(config => `
             <tr class="${config.isSelected && !isCreatingNewProfile ? 'selected' : ''}" data-symbol="${escapeHtml(config.symbol)}">
               <td>
@@ -2073,7 +2101,37 @@ public sealed class GridDashboardService : IGridDashboardService
               <td>${formatPnl(config.dailyRealizedPnl)}</td>
               <td>${formatPnl(config.totalRealizedPnl)}</td>
               <td>${formatDate(config.updatedAt)}</td>
+              <td>
+                <button type="button" class="danger-button compact-button" data-action="delete-config" data-symbol="${escapeHtml(config.symbol)}">Delete</button>
+              </td>
             </tr>`).join('');
+    };
+    const deleteProfile = async (symbol) => {
+      const normalizedSymbol = String(symbol || '').toUpperCase();
+      if (!normalizedSymbol) {
+        return;
+      }
+
+      if (!window.confirm(`Delete config ${normalizedSymbol}? Active orders will be cancelled on the next bot loop.`)) {
+        return;
+      }
+
+      const status = byId('formStatus');
+      status.className = 'status';
+      status.textContent = `Deleting ${normalizedSymbol}...`;
+      const response = await fetch(`/api/settings/${encodeURIComponent(normalizedSymbol)}`, { method: 'DELETE' });
+      const result = await response.json();
+      status.className = `status ${response.ok ? 'ok' : 'error'}`;
+      status.textContent = response.ok ? result.message : (result.errors?.join(' | ') || result.message || 'Failed to delete settings.');
+      if (response.ok) {
+        if (selectedSymbol === normalizedSymbol) {
+          selectedSymbol = null;
+        }
+        isCreatingNewProfile = false;
+        setSettingsFormDirty(false);
+        updateSelectedSymbolUrl();
+        await loadDashboard({ forceSettingsRefresh: true });
+      }
     };
     const parseSettingsPreset = (text) => {
       const parsed = {};
@@ -2202,6 +2260,7 @@ public sealed class GridDashboardService : IGridDashboardService
       delete snapshot.isDirty;
       return snapshot;
     };
+    const marketScanVisibleRows = 10;
     const renderMarketScanRows = (items) => {
       byId('marketScanRows').innerHTML = !items || items.length === 0
         ? `<tr><td colspan="11">No scan results yet.</td></tr>`
@@ -2227,7 +2286,7 @@ public sealed class GridDashboardService : IGridDashboardService
                 <td>${formatNumber(item.atrPercent)}%</td>
                 <td>${formatNumber(item.volume6hUsdt)}</td>
                 <td>${formatNumber(item.support)} / ${formatNumber(item.resistance)}</td>
-                <td>${escapeHtml((item.reasons || []).join('; '))}</td>
+                <td><div class="market-scan-reasons" title="${escapeHtml((item.reasons || []).join('; '))}">${escapeHtml((item.reasons || []).join('; '))}</div></td>
                 <td>
                   <button type="button" class="secondary-button compact-button" data-action="create-scan-profile" data-symbol="${escapeHtml(item.symbol)}" ${canCreate ? '' : 'disabled'}>${canCreate ? 'Create Config' : 'View Only'}</button>
                 </td>
@@ -2252,7 +2311,7 @@ public sealed class GridDashboardService : IGridDashboardService
         latestMarketScanData = result;
         renderMarketScanRows(result.items || []);
         status.className = 'status ok';
-        status.textContent = `Scanned ${result.scannedCount}/${result.candidateCount} ${result.category} instruments. Failed: ${result.failedCount}.`;
+        status.textContent = `Scanned ${result.scannedCount}/${result.candidateCount} ${result.category} instruments. Showing up to ${marketScanVisibleRows} rows at once. Failed: ${result.failedCount}.`;
       } finally {
         setDashboardLoading(false);
       }
@@ -2866,20 +2925,7 @@ public sealed class GridDashboardService : IGridDashboardService
 
       if (action === 'delete-profile' && symbol) {
         event.stopPropagation();
-        const response = await fetch(`/api/settings/${encodeURIComponent(symbol)}`, { method: 'DELETE' });
-        const result = await response.json();
-        const status = byId('formStatus');
-        status.className = `status ${response.ok ? 'ok' : 'error'}`;
-        status.textContent = response.ok ? result.message : (result.errors?.join(' | ') || result.message || 'Failed to delete settings.');
-        if (response.ok) {
-          if (selectedSymbol === symbol.toUpperCase()) {
-            selectedSymbol = null;
-          }
-          isCreatingNewProfile = false;
-          setSettingsFormDirty(false);
-          updateSelectedSymbolUrl();
-          await loadDashboard({ forceSettingsRefresh: true });
-        }
+        await deleteProfile(symbol);
         return;
       }
 
@@ -2895,6 +2941,13 @@ public sealed class GridDashboardService : IGridDashboardService
       }
     });
     byId('configSummaryRows').addEventListener('click', async (event) => {
+      const actionTarget = event.target.closest('[data-action]');
+      if (actionTarget?.dataset.action === 'delete-config' && actionTarget.dataset.symbol) {
+        event.stopPropagation();
+        await deleteProfile(actionTarget.dataset.symbol);
+        return;
+      }
+
       const row = event.target.closest('tr[data-symbol]');
       if (!row) {
         return;
