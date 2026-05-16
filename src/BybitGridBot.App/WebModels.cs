@@ -4,6 +4,8 @@ namespace BybitGridBot.App;
 
 public sealed class DashboardResponse
 {
+    public bool IsPartial { get; init; }
+
     public required IReadOnlyList<DashboardProfileItem> Profiles { get; init; }
 
     public required IReadOnlyList<DashboardConfigSummaryItem> ConfigSummaries { get; init; }
@@ -318,7 +320,15 @@ public sealed class DashboardOrderItem
 
     public decimal FilledQuantity { get; init; }
 
+    public decimal NotionalUsdt { get; init; }
+
+    public decimal RemainingNotionalUsdt { get; init; }
+
     public decimal RealizedPnl { get; init; }
+
+    public decimal TradePnl { get; init; }
+
+    public decimal NetCashFlow { get; init; }
 
     public decimal FeePaid { get; init; }
 

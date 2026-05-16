@@ -122,8 +122,8 @@ app.MapGet("/", (IGridDashboardService dashboardService) =>
 app.MapGet("/futures", (IFuturesDashboardService dashboardService) =>
     Results.Content(dashboardService.RenderDashboardPage(), "text/html; charset=utf-8"));
 
-app.MapGet("/api/dashboard", async (string? symbol, IGridDashboardService dashboardService, CancellationToken cancellationToken) =>
-    Results.Ok(await dashboardService.GetDashboardAsync(symbol, cancellationToken)));
+app.MapGet("/api/dashboard", async (string? symbol, bool? fast, IGridDashboardService dashboardService, CancellationToken cancellationToken) =>
+    Results.Ok(await dashboardService.GetDashboardAsync(symbol, fast == true, cancellationToken)));
 
 app.MapPost("/api/settings", async (UpdateSettingsRequest request, IGridDashboardService dashboardService, CancellationToken cancellationToken) =>
 {

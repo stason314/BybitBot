@@ -62,6 +62,7 @@ public sealed class GridBotWorker : BackgroundService
     private readonly IGridTradingStrategy _strategy;
     private readonly Dictionary<string, CachedFeeRate> _feeRates = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, DateTimeOffset> _lastTimedAutoApplyChecks = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, ReduceOnlyExitVerification> _reduceOnlyExitVerifications = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, GridOptions> _runningProfiles = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, GridBotSettings> _runningSettings = new(StringComparer.OrdinalIgnoreCase);
     private GridOptions _gridOptions;
@@ -71,6 +72,11 @@ public sealed class GridBotWorker : BackgroundService
     private readonly record struct SignalPositionSnapshot(decimal Quantity, decimal AverageEntryPrice);
 
     private readonly record struct SpotAccountRiskSnapshot(decimal EquityUsdt, decimal ExposureUsdt, int ActiveBuyOrders);
+
+    private readonly record struct ReduceOnlyExitVerification(
+        decimal ExpectedBaseQuantity,
+        DateTimeOffset RequestedAt,
+        int Attempts);
 
     private readonly record struct TrendFollowingSignal(
         bool ShouldBuy,
@@ -2456,6 +2462,7 @@ public sealed class GridBotWorker : BackgroundService
             _gridOptions.Symbol,
             reason,
             forceExit);
+        var forceExitAttempt = VerifyReduceOnlyForceExitProgress(state);
 
         var cancelledBuyCount = 0;
         foreach (var order in activeOrders.Where(order => order.IsActive && order.Side == TradeSide.Buy).ToArray())
@@ -2483,12 +2490,21 @@ public sealed class GridBotWorker : BackgroundService
         }
 
         var remainingOrders = activeOrders.Where(order => order.IsActive).ToArray();
+        remainingOrders = (await CleanupBadUnparentedSellOrdersAsync(profile, state, remainingOrders, cancellationToken)).ToArray();
         remainingOrders = (await CancelUnprofitableSellOrdersAsync(profile, state, remainingOrders, cancellationToken)).ToArray();
 
         var wallet = _appOptions.TradingMode == TradingMode.Paper
             ? null
             : await _bybitRestClient.GetWalletBalanceAsync(cancellationToken, _quoteAsset, _baseAsset);
-        var createdSellCount = await EnsureReduceOnlySellOrdersAsync(profile, state, levels, instrument, remainingOrders, wallet, currentPrice, maxSellQuantity, forceExit, cancellationToken);
+        var createdSellCount = await EnsureReduceOnlySellOrdersAsync(profile, state, levels, instrument, remainingOrders, wallet, currentPrice, maxSellQuantity, forceExit, forceExitAttempt, cancellationToken);
+        if (forceExit && createdSellCount > 0 && state.BaseAssetQuantity > 0m)
+        {
+            _reduceOnlyExitVerifications[_gridOptions.Symbol] = new ReduceOnlyExitVerification(
+                state.BaseAssetQuantity,
+                DateTimeOffset.UtcNow,
+                forceExitAttempt);
+        }
+
         if (cancelledBuyCount > 0 || cancelledSellCount > 0 || createdSellCount > 0)
         {
             await _notifier.NotifyAsync(
@@ -2509,6 +2525,7 @@ public sealed class GridBotWorker : BackgroundService
         decimal currentPrice,
         decimal? maxSellQuantity,
         bool forceExit,
+        int forceExitAttempt,
         CancellationToken cancellationToken)
     {
         if (state.BaseAssetQuantity <= 0m)
@@ -2529,7 +2546,7 @@ public sealed class GridBotWorker : BackgroundService
 
         var createdSellCount = 0;
         var sellLevels = forceExit
-            ? new[] { instrument.RoundPrice(currentPrice * (1m - SignalMarketLikeLimitBufferPercent / 100m)) }
+            ? new[] { instrument.RoundPrice(currentPrice * (1m - GetReduceOnlyForceExitOffsetPercent(forceExitAttempt) / 100m)) }
             : BuildReduceOnlySellLevels(levels, currentPrice, state.AverageEntryPrice).ToArray();
         foreach (var price in sellLevels)
         {
@@ -2580,6 +2597,47 @@ public sealed class GridBotWorker : BackgroundService
     private bool ShouldForceReduceOnlyExitOnDrawdown(BotState state, decimal currentPrice) =>
         _gridOptions.ReduceOnlyForceExitOnDrawdown &&
         CalculatePositionDrawdownPercent(state, currentPrice) >= _gridOptions.ReduceOnlyForceExitDrawdownPercent;
+
+    private int VerifyReduceOnlyForceExitProgress(BotState state)
+    {
+        if (!_reduceOnlyExitVerifications.TryGetValue(_gridOptions.Symbol, out var pending))
+        {
+            return 0;
+        }
+
+        if (state.BaseAssetQuantity <= 0m || state.BaseAssetQuantity < pending.ExpectedBaseQuantity * 0.995m)
+        {
+            _reduceOnlyExitVerifications.Remove(_gridOptions.Symbol);
+            _logger.LogInformation(
+                "ReduceOnly force-exit verification passed for {Symbol}. Base quantity moved from {ExpectedBaseQuantity} to {CurrentBaseQuantity}.",
+                _gridOptions.Symbol,
+                pending.ExpectedBaseQuantity,
+                state.BaseAssetQuantity);
+            return 0;
+        }
+
+        var minWait = TimeSpan.FromSeconds(Math.Max(1, _gridOptions.BotLoopIntervalSeconds));
+        if (DateTimeOffset.UtcNow - pending.RequestedAt < minWait)
+        {
+            return pending.Attempts;
+        }
+
+        var nextAttempt = Math.Min(5, pending.Attempts + 1);
+        _reduceOnlyExitVerifications[_gridOptions.Symbol] = pending with
+        {
+            RequestedAt = DateTimeOffset.UtcNow,
+            Attempts = nextAttempt
+        };
+        _logger.LogWarning(
+            "ReduceOnly force-exit verification failed for {Symbol}. Base quantity is still {CurrentBaseQuantity}; increasing exit offset attempt to {Attempt}.",
+            _gridOptions.Symbol,
+            state.BaseAssetQuantity,
+            nextAttempt);
+        return nextAttempt;
+    }
+
+    private static decimal GetReduceOnlyForceExitOffsetPercent(int attempt) =>
+        decimal.Min(0.5m, SignalMarketLikeLimitBufferPercent * (1m + Math.Max(0, attempt)));
 
     private static decimal CalculatePositionDrawdownPercent(BotState state, decimal currentPrice)
     {
@@ -3311,6 +3369,17 @@ public sealed class GridBotWorker : BackgroundService
                 continue;
             }
 
+            var entryFeeShare = filledOrder.FilledQuantity > 0m && filledOrder.FeePaid > 0m
+                ? filledOrder.FeePaid * decimal.Min(1m, quantity / filledOrder.FilledQuantity)
+                : 0m;
+            if (!await HasMinimumNetProfitPercentAsync(TradeSide.Sell, entryPrice, takeProfitPrice, quantity, entryFeeShare, cancellationToken))
+            {
+                _logger.LogInformation(
+                    "TP ladder sell at {Price} skipped because net profit percent is below minimum.",
+                    takeProfitPrice);
+                continue;
+            }
+
             if (HasActiveOrderAtLevel(activeOrders, takeProfitPrice) ||
                 !plannedPrices.Add(takeProfitPrice) ||
                 await _repository.GetActiveOrderAtLevelAsync(_gridOptions.Symbol, TradeSide.Sell, takeProfitPrice, cancellationToken) is not null)
@@ -3521,7 +3590,8 @@ public sealed class GridBotWorker : BackgroundService
         IReadOnlyCollection<GridOrder> activeOrders,
         CancellationToken cancellationToken)
     {
-        var cleanedOrders = await CancelUnprofitableSellOrdersAsync(profile, state, activeOrders, cancellationToken);
+        var cleanedOrders = await CleanupBadUnparentedSellOrdersAsync(profile, state, activeOrders, cancellationToken);
+        cleanedOrders = await CancelUnprofitableSellOrdersAsync(profile, state, cleanedOrders, cancellationToken);
         cleanedOrders = await CancelCrossSideOrdersAtSameLevelAsync(cleanedOrders, cancellationToken);
         cleanedOrders = await CancelGridBuyOrdersBelowExpectedProfitAsync(levels, cleanedOrders, cancellationToken);
         cleanedOrders = await ReduceBuyExposureAfterDailyTakeProfitAsync(state, cleanedOrders, cancellationToken);
@@ -3571,7 +3641,8 @@ public sealed class GridBotWorker : BackgroundService
         IReadOnlyCollection<GridOrder> activeOrders,
         CancellationToken cancellationToken)
     {
-        var cleanedOrders = await CancelCrossSideOrdersAtSameLevelAsync(activeOrders, cancellationToken);
+        var cleanedOrders = await CleanupBadUnparentedSellOrdersAsync(ResolveCurrentProfile(), state, activeOrders, cancellationToken);
+        cleanedOrders = await CancelCrossSideOrdersAtSameLevelAsync(cleanedOrders, cancellationToken);
         cleanedOrders = await ReduceBuyExposureAfterDailyTakeProfitAsync(state, cleanedOrders, cancellationToken);
 
         return cleanedOrders.ToArray();
@@ -3582,10 +3653,47 @@ public sealed class GridBotWorker : BackgroundService
         IReadOnlyCollection<GridOrder> activeOrders,
         CancellationToken cancellationToken)
     {
-        var cleanedOrders = await CancelCrossSideOrdersAtSameLevelAsync(activeOrders, cancellationToken);
+        var cleanedOrders = await CleanupBadUnparentedSellOrdersAsync(ResolveCurrentProfile(), state, activeOrders, cancellationToken);
+        cleanedOrders = await CancelCrossSideOrdersAtSameLevelAsync(cleanedOrders, cancellationToken);
         cleanedOrders = await ReduceBuyExposureAfterDailyTakeProfitAsync(state, cleanedOrders, cancellationToken);
 
         return cleanedOrders.ToArray();
+    }
+
+    private async Task<IReadOnlyCollection<GridOrder>> CleanupBadUnparentedSellOrdersAsync(
+        GridBotSettings? profile,
+        BotState state,
+        IReadOnlyCollection<GridOrder> activeOrders,
+        CancellationToken cancellationToken)
+    {
+        foreach (var order in activeOrders
+                     .Where(order => order.IsActive &&
+                         order.Side == TradeSide.Sell &&
+                         string.IsNullOrWhiteSpace(order.ParentOrderLinkId))
+                     .ToArray())
+        {
+            if (IsSignalOrder(order) || IsTrendOrder(order))
+            {
+                continue;
+            }
+
+            var remainingQuantity = order.Quantity - order.FilledQuantity;
+            if (remainingQuantity <= 0m ||
+                await HasStrictUnparentedSellProfitAsync(state, order.Price, remainingQuantity, cancellationToken))
+            {
+                continue;
+            }
+
+            await CancelManagedOrderAsync(order, cancellationToken);
+            var reason = $"Cancelled unparented sell {order.OrderLinkId} at {order.Price}: strict profit check failed.";
+            await RecordNoTradeReasonAsync(profile, NoTradeReason.UnparentedSellCleanup, reason, cancellationToken);
+            _logger.LogInformation(
+                "Unparented sell order {OrderLinkId} at {Price} cancelled by live cleanup because strict profit check failed.",
+                order.OrderLinkId,
+                order.Price);
+        }
+
+        return activeOrders.Where(order => order.IsActive).ToArray();
     }
 
     private async Task<IReadOnlyCollection<GridOrder>> ReduceBuyExposureAfterDailyTakeProfitAsync(
@@ -4264,6 +4372,44 @@ public sealed class GridBotWorker : BackgroundService
                     ? _gridOptions.PairScoreNeutralMultiplier
                     : _gridOptions.PairScoreAvoidMultiplier;
 
+        if (score >= 75m && _gridOptions.PairScoreMaxHotPairs > 0)
+        {
+            var hotRank = await GetPairScoreRankAsync(score, cancellationToken);
+            if (hotRank > _gridOptions.PairScoreMaxHotPairs)
+            {
+                multiplier = decimal.Min(multiplier, 1m);
+                _logger.LogInformation(
+                    "Pair score boost skipped for {Symbol}: Hot rank {Rank} is outside top {MaxHotPairs}.",
+                    _gridOptions.Symbol,
+                    hotRank,
+                    _gridOptions.PairScoreMaxHotPairs);
+            }
+        }
+
+        if (_gridOptions.PairScoreGlobalActiveBuyCapUsdt > 0m)
+        {
+            var activeBuyNotional = await CalculateGlobalActiveBuyNotionalAsync(cancellationToken);
+            if (activeBuyNotional >= _gridOptions.PairScoreGlobalActiveBuyCapUsdt)
+            {
+                await RecordNoTradeReasonAsync(
+                    ResolveCurrentProfile(),
+                    NoTradeReason.CapitalRejected,
+                    $"PAIR_SCORE_GLOBAL_ACTIVE_BUY_CAP_USDT reached. Active buy notional={activeBuyNotional:0.####}, cap={_gridOptions.PairScoreGlobalActiveBuyCapUsdt:0.####}.",
+                    cancellationToken);
+                _logger.LogInformation(
+                    "Pair score capital cap blocks new buy sizing for {Symbol}. Active buy notional: {ActiveBuyNotional}, cap: {Cap}.",
+                    _gridOptions.Symbol,
+                    activeBuyNotional,
+                    _gridOptions.PairScoreGlobalActiveBuyCapUsdt);
+                return 0m;
+            }
+
+            if (activeBuyNotional > 0m && activeBuyNotional >= _gridOptions.PairScoreGlobalActiveBuyCapUsdt * 0.8m)
+            {
+                multiplier = decimal.Min(multiplier, 1m);
+            }
+        }
+
         if (multiplier != 1m)
         {
             _logger.LogInformation(
@@ -4278,6 +4424,48 @@ public sealed class GridBotWorker : BackgroundService
 
     private static decimal ApplyPairScoreOrderSizeMultiplier(decimal orderSizeUsdt, decimal multiplier) =>
         decimal.Max(0m, orderSizeUsdt * decimal.Max(0m, multiplier));
+
+    private async Task<int> GetPairScoreRankAsync(decimal currentScore, CancellationToken cancellationToken)
+    {
+        var profiles = await _repository.GetRuntimeSettingsProfilesAsync(cancellationToken);
+        var higherRankedCount = 0;
+        foreach (var profile in profiles.Where(profile =>
+                     string.Equals(profile.Category, "spot", StringComparison.OrdinalIgnoreCase) &&
+                     !string.Equals(profile.Symbol, _gridOptions.Symbol, StringComparison.OrdinalIgnoreCase)))
+        {
+            var state = await _repository.GetBotStateAsync(profile.Symbol, cancellationToken);
+            if (state is null)
+            {
+                continue;
+            }
+
+            var orders = await _repository.GetOrdersAsync(profile.Symbol, cancellationToken);
+            var lastNoTradeReason = (await _repository.GetNoTradeReasonsAsync(profile.Symbol, 1, cancellationToken)).FirstOrDefault();
+            var score = CalculateCapitalPairScore(state, orders, lastNoTradeReason);
+            if (score > currentScore ||
+                (score == currentScore && string.Compare(profile.Symbol, _gridOptions.Symbol, StringComparison.OrdinalIgnoreCase) < 0))
+            {
+                higherRankedCount++;
+            }
+        }
+
+        return higherRankedCount + 1;
+    }
+
+    private async Task<decimal> CalculateGlobalActiveBuyNotionalAsync(CancellationToken cancellationToken)
+    {
+        var profiles = await _repository.GetRuntimeSettingsProfilesAsync(cancellationToken);
+        var activeBuyNotional = 0m;
+        foreach (var profile in profiles.Where(profile => string.Equals(profile.Category, "spot", StringComparison.OrdinalIgnoreCase)))
+        {
+            var activeOrders = await _repository.GetActiveOrdersAsync(profile.Symbol, cancellationToken);
+            activeBuyNotional += activeOrders
+                .Where(order => order.Side == TradeSide.Buy)
+                .Sum(order => Math.Max(0m, order.Quantity - order.FilledQuantity) * order.Price);
+        }
+
+        return activeBuyNotional;
+    }
 
     private static decimal CalculateCapitalPairScore(
         BotState state,
@@ -4351,6 +4539,7 @@ public sealed class GridBotWorker : BackgroundService
         NoTradeReason.HighVolatility => 20m,
         NoTradeReason.MaxPositionReached => 15m,
         NoTradeReason.PriceOutsideRange => 12m,
+        NoTradeReason.UnparentedSellCleanup => 12m,
         NoTradeReason.ExpectedProfitTooLow => 10m,
         NoTradeReason.ScoreTooLow => 8m,
         NoTradeReason.UnknownMarketPhase => 6m,
@@ -5010,7 +5199,7 @@ public sealed class GridBotWorker : BackgroundService
         var exitFee = await EstimateFeeAsync(sellPrice * quantity, cancellationToken);
         var entryFee = await EstimateFeeAsync(state.AverageEntryPrice * quantity, cancellationToken);
         var netPnl = (sellPrice - state.AverageEntryPrice) * quantity - entryFee - exitFee;
-        if (netPnl <= 0m || netPnl < _gridOptions.MinNetProfitUsdt)
+        if (!PassesMinimumNetProfit(netPnl, state.AverageEntryPrice * quantity))
         {
             return false;
         }
@@ -5034,14 +5223,61 @@ public sealed class GridBotWorker : BackgroundService
             return true;
         }
 
+        var netPnl = await CalculateNetPnlAsync(closingSide, entryPrice, exitPrice, quantity, knownEntryFee, cancellationToken);
+        return PassesMinimumNetProfit(netPnl, entryPrice * quantity);
+    }
+
+    private async Task<bool> HasMinimumNetProfitPercentAsync(
+        TradeSide closingSide,
+        decimal entryPrice,
+        decimal exitPrice,
+        decimal quantity,
+        decimal knownEntryFee,
+        CancellationToken cancellationToken)
+    {
+        if (quantity <= 0m || entryPrice <= 0m)
+        {
+            return true;
+        }
+
+        var netPnl = await CalculateNetPnlAsync(closingSide, entryPrice, exitPrice, quantity, knownEntryFee, cancellationToken);
+        return PassesMinimumNetProfitPercent(netPnl, entryPrice * quantity);
+    }
+
+    private async Task<decimal> CalculateNetPnlAsync(
+        TradeSide closingSide,
+        decimal entryPrice,
+        decimal exitPrice,
+        decimal quantity,
+        decimal knownEntryFee,
+        CancellationToken cancellationToken)
+    {
         var exitFee = await EstimateFeeAsync(exitPrice * quantity, cancellationToken);
         var entryFee = knownEntryFee > 0m ? knownEntryFee : await EstimateFeeAsync(entryPrice * quantity, cancellationToken);
         var grossPnl = closingSide == TradeSide.Sell
             ? (exitPrice - entryPrice) * quantity
             : (entryPrice - exitPrice) * quantity;
-        var netPnl = grossPnl - entryFee - exitFee;
+        return grossPnl - entryFee - exitFee;
+    }
 
-        return netPnl >= _gridOptions.MinNetProfitUsdt;
+    private bool PassesMinimumNetProfit(decimal netPnl, decimal entryNotional) =>
+        PassesMinimumNetProfitPercent(netPnl, entryNotional) &&
+        (_gridOptions.MinNetProfitUsdt <= 0m || netPnl >= _gridOptions.MinNetProfitUsdt);
+
+    private bool PassesMinimumNetProfitPercent(decimal netPnl, decimal entryNotional)
+    {
+        if (netPnl <= 0m)
+        {
+            return false;
+        }
+
+        if (_gridOptions.MinNetProfitPercent <= 0m || entryNotional <= 0m)
+        {
+            return true;
+        }
+
+        var netProfitPercent = netPnl / entryNotional * 100m;
+        return netProfitPercent >= _gridOptions.MinNetProfitPercent;
     }
 
     private decimal CalculateFee(decimal tradedNotional) => tradedNotional * (_gridOptions.FeePercent / 100m);
