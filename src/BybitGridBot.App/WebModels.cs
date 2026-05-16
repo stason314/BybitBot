@@ -493,6 +493,10 @@ public sealed class FuturesConfigSummaryItem
 
     public decimal MaxMarginUsdt { get; init; }
 
+    public decimal DailyRealizedPnl { get; init; }
+
+    public decimal TotalRealizedPnl { get; init; }
+
     public bool IsSelected { get; init; }
 
     public DateTimeOffset UpdatedAt { get; init; }

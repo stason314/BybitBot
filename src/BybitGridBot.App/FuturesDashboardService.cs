@@ -131,21 +131,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
                     IsSelected = string.Equals(profile.Symbol, selectedSettings.Symbol, StringComparison.OrdinalIgnoreCase)
                 })
                 .ToArray(),
-            ConfigSummaries = profiles
-                .Select(profile => new FuturesConfigSummaryItem
-                {
-                    Symbol = profile.Symbol,
-                    Category = profile.Category,
-                    StrategyType = FormatEnum(profile.StrategyType),
-                    Direction = FormatEnum(profile.Direction),
-                    Enabled = profile.Enabled,
-                    Leverage = profile.Leverage,
-                    MaxNotionalUsdt = profile.MaxNotionalUsdt,
-                    MaxMarginUsdt = profile.MaxMarginUsdt,
-                    IsSelected = string.Equals(profile.Symbol, selectedSettings.Symbol, StringComparison.OrdinalIgnoreCase),
-                    UpdatedAt = profile.UpdatedAt
-                })
-                .ToArray(),
+            ConfigSummaries = await BuildConfigSummariesAsync(profiles, selectedSettings.Symbol, cancellationToken),
             Settings = MapSettings(selectedSettings),
             Position = position,
             PaperAccount = BuildPaperAccount(state, position, _futuresOptions.PaperInitialEquityUsdt, fillLedger, _appOptions.TradingMode),
@@ -1145,7 +1131,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         <div class="table-wrap">
           <table>
             <thead>
-              <tr><th>Symbol</th><th>Strategy</th><th>Direction</th><th>Leverage</th><th>Max Notional</th><th>Max Margin</th><th>Updated</th></tr>
+              <tr><th>Symbol</th><th>Strategy</th><th>Direction</th><th>Leverage</th><th>Max Notional</th><th>Max Margin</th><th>Daily Profit</th><th>Total Profit ↓</th><th>Updated</th></tr>
             </thead>
             <tbody id="configRows"></tbody>
           </table>
@@ -1340,7 +1326,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
     };
     const renderConfigs = (configs) => {
       byId('configRows').innerHTML = configs.length === 0
-        ? '<tr><td colspan="7">No futures configs yet.</td></tr>'
+        ? '<tr><td colspan="9">No futures configs yet.</td></tr>'
         : configs.map(config => `
           <tr data-symbol="${escapeHtml(config.symbol)}" class="${config.isSelected && !creating ? 'selected' : ''}">
             <td><strong>${escapeHtml(config.symbol)}</strong><br><span class="subtle">${escapeHtml(config.category)}</span></td>
@@ -1349,6 +1335,8 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             <td>${formatNumber(config.leverage)}x</td>
             <td>${formatNumber(config.maxNotionalUsdt)}</td>
             <td>${formatNumber(config.maxMarginUsdt)}</td>
+            <td>${formatPnl(config.dailyRealizedPnl)}</td>
+            <td>${formatPnl(config.totalRealizedPnl)}</td>
             <td>${formatDate(config.updatedAt)}</td>
           </tr>`).join('');
     };
@@ -1926,6 +1914,51 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
 </body>
 </html>
 """;
+
+    private async Task<IReadOnlyList<FuturesConfigSummaryItem>> BuildConfigSummariesAsync(
+        IReadOnlyCollection<FuturesBotSettings> profiles,
+        string selectedSymbol,
+        CancellationToken cancellationToken)
+    {
+        var today = DateOnly.FromDateTime(DateTime.UtcNow);
+        var summaries = new List<FuturesConfigSummaryItem>();
+        foreach (var profile in profiles)
+        {
+            var state = await _repository.GetBotStateAsync(FuturesStateKeys.ForSymbol(profile.Symbol), cancellationToken);
+            var dailyRealizedPnl = state?.DailyRealizedPnl ?? 0m;
+            var totalRealizedPnl = state?.TotalRealizedPnl ?? 0m;
+
+            if (_appOptions.TradingMode != TradingMode.Paper)
+            {
+                var fills = await _repository.GetFuturesFillsAsync(profile.Symbol, FuturesFillLedger.QueryLimit, cancellationToken);
+                var ledger = FuturesFillLedger.Build(fills, today);
+                dailyRealizedPnl = ledger.DailyRealizedPnl + ledger.DailyFunding;
+                totalRealizedPnl = ledger.TotalRealizedPnl + ledger.TotalFunding;
+            }
+
+            summaries.Add(new FuturesConfigSummaryItem
+            {
+                Symbol = profile.Symbol,
+                Category = profile.Category,
+                StrategyType = FormatEnum(profile.StrategyType),
+                Direction = FormatEnum(profile.Direction),
+                Enabled = profile.Enabled,
+                Leverage = profile.Leverage,
+                MaxNotionalUsdt = profile.MaxNotionalUsdt,
+                MaxMarginUsdt = profile.MaxMarginUsdt,
+                DailyRealizedPnl = dailyRealizedPnl,
+                TotalRealizedPnl = totalRealizedPnl,
+                IsSelected = string.Equals(profile.Symbol, selectedSymbol, StringComparison.OrdinalIgnoreCase),
+                UpdatedAt = profile.UpdatedAt
+            });
+        }
+
+        return summaries
+            .OrderByDescending(summary => summary.TotalRealizedPnl)
+            .ThenByDescending(summary => summary.DailyRealizedPnl)
+            .ThenBy(summary => summary.Symbol, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
 
     private static FuturesSettingsView MapSettings(FuturesBotSettings settings) => new()
     {
