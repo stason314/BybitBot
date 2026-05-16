@@ -12,12 +12,16 @@ namespace BybitGridBot.App;
 public sealed class FuturesBotWorker : BackgroundService
 {
     private static readonly TimeSpan LoopInterval = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan UserStreamStaleThreshold = TimeSpan.FromMinutes(2);
+    private static readonly TimeSpan UserStreamFallbackAlertCooldown = TimeSpan.FromMinutes(5);
 
     private readonly AppOptions _appOptions;
     private readonly IBybitRestClient _bybitRestClient;
+    private readonly BybitUserStreamTelemetry _userStreamTelemetry;
     private readonly FuturesExecutionService _executionService;
     private readonly FuturesOptions _futuresOptions;
     private readonly FuturesPreflightService _preflightService;
+    private readonly FuturesProtectionService _protectionService;
     private readonly FuturesReconciliationService _reconciliationService;
     private readonly FuturesRiskManager _riskManager;
     private readonly FuturesRiskOptions _riskOptions;
@@ -33,8 +37,10 @@ public sealed class FuturesBotWorker : BackgroundService
         IOptions<FuturesRiskOptions> riskOptions,
         IOptions<FuturesStrategyQualityOptions> strategyQualityOptions,
         IBybitRestClient bybitRestClient,
+        BybitUserStreamTelemetry userStreamTelemetry,
         FuturesExecutionService executionService,
         FuturesPreflightService preflightService,
+        FuturesProtectionService protectionService,
         FuturesReconciliationService reconciliationService,
         FuturesRiskManager riskManager,
         FuturesStrategyRouter strategyRouter,
@@ -47,8 +53,10 @@ public sealed class FuturesBotWorker : BackgroundService
         _riskOptions = riskOptions.Value;
         _strategyQualityOptions = strategyQualityOptions.Value;
         _bybitRestClient = bybitRestClient;
+        _userStreamTelemetry = userStreamTelemetry;
         _executionService = executionService;
         _preflightService = preflightService;
+        _protectionService = protectionService;
         _reconciliationService = reconciliationService;
         _riskManager = riskManager;
         _strategyRouter = strategyRouter;
@@ -65,9 +73,10 @@ public sealed class FuturesBotWorker : BackgroundService
             return;
         }
 
-        if (_appOptions.TradingMode == TradingMode.Mainnet && !_futuresOptions.MainnetEnabled)
+        if (_appOptions.TradingMode == TradingMode.Mainnet &&
+            (!_futuresOptions.MainnetEnabled || !_futuresOptions.MainnetOrderPlacementEnabled))
         {
-            throw new InvalidOperationException("Futures mainnet is blocked. Set FUTURES_MAINNET_ENABLED=true only after the mainnet checklist is complete.");
+            throw new InvalidOperationException("Futures mainnet is blocked. Set FUTURES_MAINNET_ENABLED=true and FUTURES_MAINNET_ORDER_PLACEMENT_ENABLED=true only after the mainnet checklist is complete.");
         }
 
         if (_appOptions.TradingMode == TradingMode.Testnet && !_futuresOptions.TestnetEnabled)
@@ -152,6 +161,7 @@ public sealed class FuturesBotWorker : BackgroundService
                     reconciliation.FixedHangingOrderCount);
             }
         }
+        await RecordUserStreamFallbackIfNeededAsync(settings, cancellationToken);
 
         if (_riskOptions.EmergencyPause)
         {
@@ -170,6 +180,7 @@ public sealed class FuturesBotWorker : BackgroundService
         }
 
         var accountRisk = await ResolveAccountRiskSnapshotAsync(settings, state, position, cancellationToken);
+        await UpdateEquityDrawdownAsync(state, accountRisk.AccountEquityUsdt, cancellationToken);
         var openPositionCount = await CountOpenFuturesPositionsAsync(profiles, cancellationToken);
         var decision = _strategyRouter.Decide(new FuturesStrategyContext
         {
@@ -261,23 +272,150 @@ public sealed class FuturesBotWorker : BackgroundService
             }, cancellationToken);
 
             position = result.Position;
-            FuturesReconciliationService.ApplyPositionToState(state, position, _appOptions.TradingMode == TradingMode.Paper);
-            await _repository.SaveBotStateAsync(state, cancellationToken);
+            await ApplyPositionSnapshotToStateAsync(settings, state, position, cancellationToken);
             await _repository.UpsertFuturesPositionAsync(position, _appOptions.TradingMode, cancellationToken);
+            if (position.Size > 0m)
+            {
+                await _protectionService.EnsureProtectiveStopAsync(settings, position, cancellationToken);
+            }
+
             _logger.LogInformation(
                 "Futures intent executed for {Symbol}. Action: {Action}. Paper: {IsPaper}. Message: {Message}",
                 settings.Symbol,
                 intent.Action,
                 result.IsPaper,
                 result.Message);
+            await NotifyOrderSubmissionAsync(settings.Symbol, intent.Action, result.Order, result.Position, result.IsPaper, cancellationToken);
         }
 
         if (decision.TradeIntents.Count == 0)
         {
-            FuturesReconciliationService.ApplyPositionToState(state, position, _appOptions.TradingMode == TradingMode.Paper);
-            await _repository.SaveBotStateAsync(state, cancellationToken);
+            await ApplyPositionSnapshotToStateAsync(settings, state, position, cancellationToken);
             await _repository.UpsertFuturesPositionAsync(position, _appOptions.TradingMode, cancellationToken);
         }
+    }
+
+    private async Task UpdateEquityDrawdownAsync(
+        BotState state,
+        decimal accountEquityUsdt,
+        CancellationToken cancellationToken)
+    {
+        if (accountEquityUsdt <= 0m)
+        {
+            return;
+        }
+
+        state.PeakEquityUsdt = state.PeakEquityUsdt <= 0m
+            ? accountEquityUsdt
+            : decimal.Max(state.PeakEquityUsdt, accountEquityUsdt);
+        state.CurrentDrawdownUsdt = decimal.Max(0m, state.PeakEquityUsdt - accountEquityUsdt);
+        state.CurrentDrawdownPercent = state.PeakEquityUsdt > 0m
+            ? state.CurrentDrawdownUsdt / state.PeakEquityUsdt * 100m
+            : 0m;
+        state.UpdatedAt = DateTimeOffset.UtcNow;
+        await _repository.SaveBotStateAsync(state, cancellationToken);
+    }
+
+    private async Task NotifyOrderSubmissionAsync(
+        string symbol,
+        FuturesTradeAction action,
+        GridOrder order,
+        FuturesPositionSnapshot position,
+        bool isPaper,
+        CancellationToken cancellationToken)
+    {
+        var kind = action is FuturesTradeAction.OpenLong or FuturesTradeAction.OpenShort
+            ? "entry"
+            : "exit";
+        var verb = isPaper ? "executed" : "submitted";
+        await _notifier.NotifyAsync(
+            $"Futures {kind} {verb}.\nSymbol: `{symbol}`\nAction: `{action}`\nQty: `{order.Quantity}`\nFilled: `{order.FilledQuantity}`\nAvg: `{order.AverageFillPrice}`\nRealized PnL: `{order.RealizedPnl}`\nPosition: `{position.Side} {position.Size}`",
+            cancellationToken);
+    }
+
+    private async Task ApplyPositionSnapshotToStateAsync(
+        FuturesBotSettings settings,
+        BotState state,
+        FuturesPositionSnapshot position,
+        CancellationToken cancellationToken)
+    {
+        FuturesReconciliationService.ApplyPositionToState(state, position, _appOptions.TradingMode == TradingMode.Paper);
+        if (_appOptions.TradingMode != TradingMode.Paper)
+        {
+            var today = DateOnly.FromDateTime(DateTime.UtcNow);
+            var fills = await _repository.GetFuturesFillsAsync(settings.Symbol, FuturesFillLedger.QueryLimit, cancellationToken);
+            var ledger = FuturesFillLedger.Build(fills, today);
+            state.TotalRealizedPnl = ledger.TotalRealizedPnl + ledger.TotalFunding;
+            state.DailyRealizedPnl = ledger.DailyRealizedPnl + ledger.DailyFunding;
+            state.DailyPnlDate = today;
+            state.UpdatedAt = DateTimeOffset.UtcNow;
+        }
+
+        await _repository.SaveBotStateAsync(state, cancellationToken);
+    }
+
+    private async Task RecordUserStreamFallbackIfNeededAsync(FuturesBotSettings settings, CancellationToken cancellationToken)
+    {
+        if (_appOptions.TradingMode == TradingMode.Paper || !_futuresOptions.UserStreamEnabled)
+        {
+            return;
+        }
+
+        var snapshot = _userStreamTelemetry.GetSnapshot();
+        var lastEventAge = snapshot.LastEventAt is null
+            ? (TimeSpan?)null
+            : DateTimeOffset.UtcNow - snapshot.LastEventAt.Value;
+        var stale = !snapshot.IsConnected ||
+            snapshot.LastEventAt is null ||
+            lastEventAge > UserStreamStaleThreshold;
+        if (!stale)
+        {
+            return;
+        }
+
+        var recentRiskDecisions = await _repository.GetFuturesRiskDecisionsAsync(settings.Symbol, 20, cancellationToken);
+        var lastFallback = recentRiskDecisions
+            .Where(decision => string.Equals(decision.Source, "UserStreamFallback", StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(decision => decision.CreatedAt)
+            .FirstOrDefault();
+        if (lastFallback is not null &&
+            DateTimeOffset.UtcNow - lastFallback.CreatedAt < UserStreamFallbackAlertCooldown)
+        {
+            return;
+        }
+
+        var reason = ResolveUserStreamFallbackReason(snapshot, lastEventAge);
+        await _repository.AddFuturesRiskDecisionAsync(new FuturesRiskDecisionRecord
+        {
+            Symbol = settings.Symbol,
+            Source = "UserStreamFallback",
+            IsAllowed = true,
+            Reason = reason,
+            Severity = RiskSeverity.Warning.ToString(),
+            SuggestedAction = RiskSuggestedAction.Allow.ToString(),
+            CreatedAt = DateTimeOffset.UtcNow
+        }, cancellationToken);
+        await _notifier.NotifyAsync(
+            $"Futures user stream fallback active.\nSymbol: `{settings.Symbol}`\nReason: `{reason}`",
+            cancellationToken);
+    }
+
+    private static string ResolveUserStreamFallbackReason(
+        BybitUserStreamTelemetrySnapshot snapshot,
+        TimeSpan? lastEventAge)
+    {
+        if (!snapshot.IsConnected)
+        {
+            return "Futures user stream disconnected; REST reconciliation fallback is active.";
+        }
+
+        if (snapshot.LastEventAt is null)
+        {
+            return "Futures user stream has no handled events yet; REST reconciliation fallback is active.";
+        }
+
+        var ageSeconds = Math.Round(lastEventAge?.TotalSeconds ?? 0d);
+        return $"Futures user stream stale for {ageSeconds}s; REST reconciliation fallback is active.";
     }
 
     private async Task<string?> GetStrategyEntryBlockReasonAsync(
@@ -669,12 +807,16 @@ public sealed class FuturesBotWorker : BackgroundService
         if (!string.Equals(settings.Category, "linear", StringComparison.OrdinalIgnoreCase) ||
             settings.MarginMode != FuturesMarginMode.Isolated ||
             settings.PositionMode != FuturesPositionMode.OneWay ||
-            (settings.Direction != FuturesDirection.LongOnly && _appOptions.TradingMode != TradingMode.Paper) ||
+            (settings.Direction != FuturesDirection.LongOnly && !AllowsShortPositions()) ||
             settings.Leverage > _futuresOptions.MvpMaxLeverage)
         {
-            throw new InvalidOperationException("Futures worker supports shorts only in paper mode; live/testnet remain linear, isolated, one-way, long-only within the leverage cap.");
+            throw new InvalidOperationException("Futures worker supports shorts only in paper mode or with FUTURES_TESTNET_SHORTS_ENABLED=true on testnet; live remains linear, isolated, one-way, long-only within the leverage cap.");
         }
     }
+
+    private bool AllowsShortPositions() =>
+        _appOptions.TradingMode == TradingMode.Paper ||
+        (_appOptions.TradingMode == TradingMode.Testnet && _futuresOptions.TestnetShortsEnabled);
 
     private static decimal CalculateUnrealizedPnl(string side, decimal size, decimal entryPrice, decimal currentPrice) =>
         IsShort(side)

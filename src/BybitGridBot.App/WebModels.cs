@@ -423,9 +423,15 @@ public sealed class FuturesDashboardResponse
 
     public required FuturesSoakStatusView TestnetSoak { get; init; }
 
+    public required FuturesProtectionStatusView ProtectionStatus { get; init; }
+
     public required FuturesUserStreamStatusView UserStreamStatus { get; init; }
 
+    public required FuturesRuntimeControlsView RuntimeControls { get; init; }
+
     public required FuturesAggressiveModeView AggressiveMode { get; init; }
+
+    public required FuturesStrategyQualityView StrategyQuality { get; init; }
 
     public required FuturesAutoRecommendationView AutoRecommendation { get; init; }
 
@@ -556,6 +562,56 @@ public sealed class FuturesAggressiveModeView
     public required string LastNoTradeReason { get; init; }
 }
 
+public sealed class FuturesRuntimeControlsView
+{
+    public bool EnvEmergencyPauseEnabled { get; init; }
+
+    public bool ProfilePaused { get; init; }
+
+    public string PauseReason { get; init; } = "-";
+
+    public decimal DailyRealizedPnl { get; init; }
+
+    public decimal MaxDailyLossUsdt { get; init; }
+
+    public decimal MaxDailyLossEquityPercent { get; init; }
+
+    public decimal PeakEquityUsdt { get; init; }
+
+    public decimal CurrentDrawdownUsdt { get; init; }
+
+    public decimal CurrentDrawdownPercent { get; init; }
+
+    public decimal MaxDrawdownEquityPercent { get; init; }
+
+    public int OpenPositionCount { get; init; }
+
+    public int MaxOpenPositions { get; init; }
+}
+
+public sealed class FuturesStrategyQualityView
+{
+    public required string StrategyType { get; init; }
+
+    public required string Direction { get; init; }
+
+    public decimal MaxEntryAtrPercent { get; init; }
+
+    public bool BtcRiskOffEnabled { get; init; }
+
+    public decimal BtcRiskOffMovePercent { get; init; }
+
+    public int StopLossCooldownMinutes { get; init; }
+
+    public int NoTradeReasonCount { get; init; }
+
+    public int StrategyFilterBlockCount { get; init; }
+
+    public int RiskBlockCount { get; init; }
+
+    public string LastNoTradeReason { get; init; } = "-";
+}
+
 public sealed class FuturesOrderView
 {
     public required string OrderLinkId { get; init; }
@@ -666,6 +722,27 @@ public sealed class FuturesSoakStatusView
     public string LastRiskReason { get; init; } = "-";
 }
 
+public sealed class FuturesProtectionStatusView
+{
+    public bool HasOpenPosition { get; init; }
+
+    public decimal ExpectedStopLoss { get; init; }
+
+    public decimal ExpectedTakeProfit { get; init; }
+
+    public decimal CurrentStopLoss { get; init; }
+
+    public decimal CurrentTakeProfit { get; init; }
+
+    public required string Status { get; init; }
+
+    public required string LastSource { get; init; }
+
+    public required string LastReason { get; init; }
+
+    public DateTimeOffset? LastCheckedAt { get; init; }
+}
+
 public sealed class FuturesUserStreamStatusView
 {
     public bool Enabled { get; init; }
@@ -674,7 +751,15 @@ public sealed class FuturesUserStreamStatusView
 
     public bool Stale { get; init; }
 
+    public bool FallbackActive { get; init; }
+
+    public string FallbackReason { get; init; } = "-";
+
     public DateTimeOffset? ConnectedAt { get; init; }
+
+    public DateTimeOffset? LastConnectAttemptAt { get; init; }
+
+    public DateTimeOffset? LastDisconnectedAt { get; init; }
 
     public DateTimeOffset? LastMessageAt { get; init; }
 
@@ -685,6 +770,8 @@ public sealed class FuturesUserStreamStatusView
     public string LastTopic { get; init; } = "-";
 
     public int DisconnectCount { get; init; }
+
+    public int ConnectAttemptCount { get; init; }
 
     public string LastError { get; init; } = "-";
 }

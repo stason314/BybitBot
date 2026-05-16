@@ -176,6 +176,18 @@ app.MapPost("/api/futures/settings/{symbol}/enabled", async (string symbol, bool
     return response.Success ? Results.Ok(response) : Results.BadRequest(response);
 });
 
+app.MapPost("/api/futures/settings/{symbol}/pause", async (string symbol, IFuturesDashboardService dashboardService, CancellationToken cancellationToken) =>
+{
+    var response = await dashboardService.PauseProfileAsync(symbol, cancellationToken);
+    return response.Success ? Results.Ok(response) : Results.BadRequest(response);
+});
+
+app.MapPost("/api/futures/settings/{symbol}/resume", async (string symbol, IFuturesDashboardService dashboardService, CancellationToken cancellationToken) =>
+{
+    var response = await dashboardService.ResumeProfileAsync(symbol, cancellationToken);
+    return response.Success ? Results.Ok(response) : Results.BadRequest(response);
+});
+
 app.MapPost("/api/futures/position/{symbol}/close", async (string symbol, IFuturesDashboardService dashboardService, CancellationToken cancellationToken) =>
 {
     var response = await dashboardService.ClosePositionAsync(symbol, cancellationToken);

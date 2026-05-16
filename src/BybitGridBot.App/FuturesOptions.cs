@@ -11,8 +11,14 @@ public sealed class FuturesOptions
     [ConfigurationKeyName("FUTURES_TESTNET_ENABLED")]
     public bool TestnetEnabled { get; init; } = false;
 
+    [ConfigurationKeyName("FUTURES_TESTNET_SHORTS_ENABLED")]
+    public bool TestnetShortsEnabled { get; init; } = false;
+
     [ConfigurationKeyName("FUTURES_MAINNET_ENABLED")]
     public bool MainnetEnabled { get; init; } = false;
+
+    [ConfigurationKeyName("FUTURES_MAINNET_ORDER_PLACEMENT_ENABLED")]
+    public bool MainnetOrderPlacementEnabled { get; init; } = false;
 
     [ConfigurationKeyName("FUTURES_CATEGORY")]
     public string Category { get; init; } = "linear";

@@ -128,7 +128,7 @@ public sealed class FuturesExecutionService
 
     public BybitCreateOrderRequest CreateBybitRequest(FuturesBotSettings settings, FuturesTradeIntent intent)
     {
-        ValidateMvpExecution(settings, intent, _futuresOptions.MvpMaxLeverage, _appOptions.TradingMode);
+        ValidateMvpExecution(settings, intent, _futuresOptions.MvpMaxLeverage, _futuresOptions.TestnetShortsEnabled, _appOptions.TradingMode);
         var request = FuturesOrderRequestFactory.Create(intent);
         if (intent.IsReduceOnly && request.ReduceOnly != true)
         {
@@ -158,6 +158,7 @@ public sealed class FuturesExecutionService
         FuturesBotSettings settings,
         FuturesTradeIntent intent,
         decimal maxLeverage,
+        bool testnetShortsEnabled,
         TradingMode tradingMode)
     {
         if (!string.Equals(settings.Category, "linear", StringComparison.OrdinalIgnoreCase) ||
@@ -176,9 +177,11 @@ public sealed class FuturesExecutionService
             throw new InvalidOperationException("Futures MVP supports only one-way mode.");
         }
 
-        if (settings.Direction != FuturesDirection.LongOnly && tradingMode != TradingMode.Paper)
+        var shortsAllowed = tradingMode == TradingMode.Paper ||
+            (tradingMode == TradingMode.Testnet && testnetShortsEnabled);
+        if (settings.Direction != FuturesDirection.LongOnly && !shortsAllowed)
         {
-            throw new InvalidOperationException("Futures short direction is enabled only in paper mode.");
+            throw new InvalidOperationException("Futures short direction is enabled only in paper mode or with FUTURES_TESTNET_SHORTS_ENABLED=true on testnet.");
         }
 
         if (intent.PositionIdx != 0)
@@ -187,9 +190,9 @@ public sealed class FuturesExecutionService
         }
 
         if (intent.Action is FuturesTradeAction.OpenShort or FuturesTradeAction.CloseShort &&
-            tradingMode != TradingMode.Paper)
+            !shortsAllowed)
         {
-            throw new InvalidOperationException("Futures short actions are enabled only in paper mode.");
+            throw new InvalidOperationException("Futures short actions are enabled only in paper mode or with FUTURES_TESTNET_SHORTS_ENABLED=true on testnet.");
         }
 
         if (settings.Leverage > maxLeverage || intent.Leverage > maxLeverage)
@@ -233,9 +236,10 @@ public sealed class FuturesExecutionService
             return;
         }
 
-        if (_appOptions.TradingMode == TradingMode.Mainnet && !_futuresOptions.MainnetEnabled)
+        if (_appOptions.TradingMode == TradingMode.Mainnet &&
+            (!_futuresOptions.MainnetEnabled || !_futuresOptions.MainnetOrderPlacementEnabled))
         {
-            throw new InvalidOperationException("Futures mainnet is blocked. Set FUTURES_MAINNET_ENABLED=true only after the mainnet checklist is complete.");
+            throw new InvalidOperationException("Futures mainnet order placement is blocked. Set FUTURES_MAINNET_ENABLED=true and FUTURES_MAINNET_ORDER_PLACEMENT_ENABLED=true only after the mainnet checklist is complete.");
         }
 
         if (_appOptions.TradingMode == TradingMode.Mainnet)
@@ -256,15 +260,15 @@ public sealed class FuturesExecutionService
     private async Task ValidateTestnetChecklistAsync(FuturesExecutionRequest request, CancellationToken cancellationToken)
     {
         if (_appOptions.TradingMode == TradingMode.Paper ||
-            request.Intent.Action != FuturesTradeAction.OpenLong ||
+            !request.Intent.IsPositionIncreasing ||
             _futuresOptions.MinSizeOrderCount <= 0)
         {
             return;
         }
 
-        var previousOpenLongOrders = (await _repository.GetFuturesOrdersAsync(request.Settings.Symbol, cancellationToken))
-            .Count(order => order.Action == FuturesTradeAction.OpenLong);
-        if (previousOpenLongOrders >= _futuresOptions.MinSizeOrderCount)
+        var previousOpeningOrders = (await _repository.GetFuturesOrdersAsync(request.Settings.Symbol, cancellationToken))
+            .Count(order => order.Action is FuturesTradeAction.OpenLong or FuturesTradeAction.OpenShort);
+        if (previousOpeningOrders >= _futuresOptions.MinSizeOrderCount)
         {
             return;
         }

@@ -117,7 +117,8 @@ public sealed class FuturesUserStreamWorker : BackgroundService
 
     private async Task HandleExecutionAsync(BybitExecutionSnapshot execution, CancellationToken cancellationToken)
     {
-        if (!FuturesOrderLinkIds.IsManaged(execution.OrderLinkId) ||
+        var isFunding = IsFundingExecution(execution);
+        if ((!FuturesOrderLinkIds.IsManaged(execution.OrderLinkId) && !isFunding) ||
             await _repository.FuturesFillExistsAsync(execution.ExecId, cancellationToken))
         {
             return;
@@ -132,21 +133,28 @@ public sealed class FuturesUserStreamWorker : BackgroundService
         var existing = await _repository.GetOrderByLinkIdAsync(execution.OrderLinkId, cancellationToken);
         var side = ParseSide(execution.Side);
         var reduceOnly = existing?.ReduceOnly == true || execution.OrderLinkId.StartsWith("flc", StringComparison.OrdinalIgnoreCase);
+        var action = isFunding ? FuturesTradeAction.Funding : ResolveAction(side, reduceOnly);
+        var realizedPnl = isFunding ? 0m : execution.ExecPnl - execution.ExecFee;
+        var funding = isFunding ? ResolveFundingPnl(execution) : 0m;
         await _repository.AddFuturesFillAsync(new FuturesFillRecord
         {
             ExecId = execution.ExecId,
-            OrderLinkId = execution.OrderLinkId,
+            OrderLinkId = string.IsNullOrWhiteSpace(execution.OrderLinkId) && isFunding
+                ? $"funding:{execution.ExecId}"
+                : execution.OrderLinkId,
             Symbol = execution.Symbol,
-            Action = ResolveAction(side, reduceOnly),
+            Action = action,
             Side = side,
             ExecType = string.IsNullOrWhiteSpace(execution.ExecType) ? "Trade" : execution.ExecType,
             Quantity = execution.ExecQty,
             Price = execution.ExecPrice,
             Fee = execution.ExecFee,
-            RealizedPnl = execution.ExecPnl,
-            Funding = 0m,
+            RealizedPnl = realizedPnl,
+            Funding = funding,
             CreatedAt = execution.ExecTime == DateTimeOffset.UnixEpoch ? DateTimeOffset.UtcNow : execution.ExecTime
         }, cancellationToken);
+        await ApplyFillLedgerToStateAsync(settings, cancellationToken);
+        await NotifyExecutionFillAsync(execution, action, realizedPnl, funding, cancellationToken);
 
         _logger.LogInformation(
             "Futures execution stream synced. Symbol: {Symbol}, OrderLinkId: {OrderLinkId}, ExecId: {ExecId}, Quantity: {Quantity}",
@@ -154,6 +162,23 @@ public sealed class FuturesUserStreamWorker : BackgroundService
             execution.OrderLinkId,
             execution.ExecId,
             execution.ExecQty);
+    }
+
+    private async Task NotifyExecutionFillAsync(
+        BybitExecutionSnapshot execution,
+        FuturesTradeAction action,
+        decimal realizedPnl,
+        decimal funding,
+        CancellationToken cancellationToken)
+    {
+        var kind = action == FuturesTradeAction.Funding
+            ? "funding"
+            : action is FuturesTradeAction.OpenLong or FuturesTradeAction.OpenShort
+                ? "entry fill"
+                : "exit fill";
+        await _notifier.NotifyAsync(
+            $"Futures {kind} synced.\nSymbol: `{execution.Symbol}`\nAction: `{action}`\nQty: `{execution.ExecQty}`\nPrice: `{execution.ExecPrice}`\nRealized PnL: `{realizedPnl}`\nFee: `{execution.ExecFee}`\nFunding: `{funding}`",
+            cancellationToken);
     }
 
     private async Task HandlePositionAsync(BybitPositionSnapshot snapshot, CancellationToken cancellationToken)
@@ -169,7 +194,7 @@ public sealed class FuturesUserStreamWorker : BackgroundService
         await ApplyPositionAsync(state, position, cancellationToken);
         try
         {
-            FuturesReconciliationService.ValidateMvpPosition(position);
+            FuturesReconciliationService.ValidateMvpPosition(position, AllowsShortPositions());
         }
         catch (InvalidOperationException exception)
         {
@@ -244,8 +269,35 @@ public sealed class FuturesUserStreamWorker : BackgroundService
     private async Task ApplyPositionAsync(BotState state, FuturesPositionSnapshot position, CancellationToken cancellationToken)
     {
         FuturesReconciliationService.ApplyPositionToState(state, position);
+        await ApplyFillLedgerToStateAsync(state, position.Symbol, cancellationToken);
         await _repository.SaveBotStateAsync(state, cancellationToken);
         await _repository.UpsertFuturesPositionAsync(position, _appOptions.TradingMode, cancellationToken);
+    }
+
+    private async Task ApplyFillLedgerToStateAsync(FuturesBotSettings settings, CancellationToken cancellationToken)
+    {
+        var state = await _repository.GetBotStateAsync(FuturesStateKeys.ForSymbol(settings.Symbol), cancellationToken);
+        if (state is null)
+        {
+            return;
+        }
+
+        await ApplyFillLedgerToStateAsync(state, settings.Symbol, cancellationToken);
+        await _repository.SaveBotStateAsync(state, cancellationToken);
+    }
+
+    private async Task ApplyFillLedgerToStateAsync(
+        BotState state,
+        string symbol,
+        CancellationToken cancellationToken)
+    {
+        var today = DateOnly.FromDateTime(DateTime.UtcNow);
+        var fills = await _repository.GetFuturesFillsAsync(symbol, FuturesFillLedger.QueryLimit, cancellationToken);
+        var ledger = FuturesFillLedger.Build(fills, today);
+        state.TotalRealizedPnl = ledger.TotalRealizedPnl + ledger.TotalFunding;
+        state.DailyRealizedPnl = ledger.DailyRealizedPnl + ledger.DailyFunding;
+        state.DailyPnlDate = today;
+        state.UpdatedAt = DateTimeOffset.UtcNow;
     }
 
     private async Task RecordRiskPauseAsync(
@@ -376,10 +428,26 @@ public sealed class FuturesUserStreamWorker : BackgroundService
     }
 
     private static FuturesTradeAction ResolveAction(TradeSide side, bool reduceOnly) =>
-        side == TradeSide.Buy && !reduceOnly ? FuturesTradeAction.OpenLong : FuturesTradeAction.CloseLong;
+        (side, reduceOnly) switch
+        {
+            (TradeSide.Buy, false) => FuturesTradeAction.OpenLong,
+            (TradeSide.Sell, false) => FuturesTradeAction.OpenShort,
+            (TradeSide.Buy, true) => FuturesTradeAction.CloseShort,
+            _ => FuturesTradeAction.CloseLong
+        };
 
     private static TradeSide ParseSide(string side) =>
         Enum.TryParse<TradeSide>(side, true, out var parsed) ? parsed : TradeSide.Buy;
+
+    private static bool IsFundingExecution(BybitExecutionSnapshot execution) =>
+        string.Equals(execution.ExecType, "Funding", StringComparison.OrdinalIgnoreCase);
+
+    private static decimal ResolveFundingPnl(BybitExecutionSnapshot execution) =>
+        execution.ExecPnl != 0m ? execution.ExecPnl : -Math.Abs(execution.ExecFee);
+
+    private bool AllowsShortPositions() =>
+        _appOptions.TradingMode == TradingMode.Paper ||
+        (_appOptions.TradingMode == TradingMode.Testnet && _futuresOptions.TestnetShortsEnabled);
 
     private static OrderStatus MapStatus(string orderStatus) =>
         orderStatus switch

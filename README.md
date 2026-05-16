@@ -66,14 +66,16 @@ Current scope:
 - `GridBotWorker` hard-fails non-spot runtime categories when the spot worker is registered. Futures profile category is controlled by `FUTURES_CATEGORY`.
 - In futures-only mode (`CATEGORY=linear` and `FUTURES_ENABLED=true`) the spot worker is not registered; with `CATEGORY=spot`, spot and futures workers can run side by side.
 
-Futures mainnet order placement is blocked by default. It is allowed only when `TRADING_MODE=mainnet`, `FUTURES_MAINNET_ENABLED=true`, and the explicit mainnet checklist flags confirm testnet soak, protective stops, restart recovery, emergency pause, and Telegram alerts.
+Futures mainnet order placement is blocked by default. It is allowed only when `TRADING_MODE=mainnet`, `FUTURES_MAINNET_ENABLED=true`, `FUTURES_MAINNET_ORDER_PLACEMENT_ENABLED=true`, and the explicit mainnet checklist flags confirm testnet soak, protective stops, restart recovery, emergency pause, and Telegram alerts.
 
 Example futures defaults:
 
 ```env
 FUTURES_ENABLED=true
 FUTURES_TESTNET_ENABLED=false
+FUTURES_TESTNET_SHORTS_ENABLED=false
 FUTURES_MAINNET_ENABLED=false
+FUTURES_MAINNET_ORDER_PLACEMENT_ENABLED=false
 FUTURES_CATEGORY=linear
 FUTURES_USER_STREAM_ENABLED=true
 LEVERAGE=2
@@ -111,7 +113,9 @@ FUTURES_MAINNET_CONFIRM_TELEGRAM_ALERTS=false
 BYBIT_PRIVATE_WS_URL=
 ```
 
-Cross margin, hedge mode, and shorts are deliberately rejected by the futures API until the second phase.
+Cross margin and hedge mode are deliberately rejected by the futures API until the second phase.
+Shorts are paper-only by default and can be enabled on testnet only with `FUTURES_TESTNET_SHORTS_ENABLED=true`.
+Mainnet order placement requires both `FUTURES_MAINNET_ENABLED=true` and `FUTURES_MAINNET_ORDER_PLACEMENT_ENABLED=true` plus the checklist flags.
 
 Testnet rollout checklist:
 

@@ -51,6 +51,7 @@ public sealed class BybitUserStreamClient : IBybitUserStreamClient
             {
                 using var socket = new ClientWebSocket();
                 var endpoint = new Uri(_options.ResolvePrivateWebSocketUrl());
+                _telemetry.MarkConnectAttempt();
                 await socket.ConnectAsync(endpoint, cancellationToken);
                 _telemetry.MarkConnected(endpoint.ToString());
                 _logger.LogInformation("Connected to Bybit private WebSocket: {Endpoint}", endpoint);
@@ -274,6 +275,8 @@ public sealed class BybitUserStreamClient : IBybitUserStreamClient
         UnrealizedPnl = GetDecimal(item, "unrealisedPnl"),
         RealizedPnl = GetDecimal(item, "cumRealisedPnl"),
         CurRealizedPnl = GetDecimal(item, "curRealisedPnl"),
+        TakeProfitPrice = GetDecimal(item, "takeProfit"),
+        StopLossPrice = GetDecimal(item, "stopLoss"),
         PositionStatus = string.IsNullOrWhiteSpace(GetString(item, "positionStatus")) ? "Normal" : GetString(item, "positionStatus"),
         PositionIdx = GetInt(item, "positionIdx"),
         TradeMode = GetInt(item, "tradeMode"),

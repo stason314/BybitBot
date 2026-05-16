@@ -33,36 +33,83 @@ public sealed class FuturesProtectionService
         FuturesPositionSnapshot position,
         CancellationToken cancellationToken)
     {
-        if (_appOptions.TradingMode == TradingMode.Paper || position.Size <= 0m || position.EntryPrice <= 0m)
+        if (position.Size <= 0m || position.EntryPrice <= 0m)
         {
             return;
         }
 
         var instrument = await _bybitRestClient.GetInstrumentInfoAsync(settings.Category, settings.Symbol, cancellationToken);
-        var stopLoss = instrument.RoundPrice(position.EntryPrice * (1m - settings.StopLossPercent / 100m));
-        var takeProfit = instrument.RoundPrice(position.EntryPrice * (1m + settings.TakeProfitPercent / 100m));
+        var stopLoss = ResolveStopLoss(settings, position, instrument);
+        var takeProfit = ResolveTakeProfit(settings, position, instrument);
         if (stopLoss <= 0m || takeProfit <= 0m)
         {
-            await RecordDecisionAsync(settings.Symbol, false, "Cannot restore futures protective stop: resolved SL/TP is invalid.", cancellationToken);
+            await RecordDecisionAsync("ProtectionFailed", settings.Symbol, false, "Cannot verify futures protective stop: resolved SL/TP is invalid.", cancellationToken);
             return;
         }
 
         var protectionKey = string.Join(
             ':',
+            _appOptions.TradingMode,
             settings.Symbol,
             position.PositionIdx,
+            position.Side,
             position.Size.ToString(CultureInfo.InvariantCulture),
             position.EntryPrice.ToString(CultureInfo.InvariantCulture),
             stopLoss.ToString(CultureInfo.InvariantCulture),
             takeProfit.ToString(CultureInfo.InvariantCulture));
-        if (_appliedProtectionKeys.TryGetValue(settings.Symbol, out var existingKey) &&
-            string.Equals(existingKey, protectionKey, StringComparison.Ordinal))
+        var protectionKeyCached = _appliedProtectionKeys.TryGetValue(settings.Symbol, out var existingKey) &&
+            string.Equals(existingKey, protectionKey, StringComparison.Ordinal);
+
+        if (_appOptions.TradingMode == TradingMode.Paper)
         {
+            if (protectionKeyCached)
+            {
+                return;
+            }
+
+            _appliedProtectionKeys[settings.Symbol] = protectionKey;
+            await RecordDecisionAsync(
+                "ProtectionVerify",
+                settings.Symbol,
+                true,
+                $"Paper protective SL/TP verified. Expected StopLoss={stopLoss}, TakeProfit={takeProfit}.",
+                cancellationToken);
             return;
+        }
+
+        if (_appOptions.TradingMode == TradingMode.Mainnet)
+        {
+            await RecordDecisionAsync("ProtectionFailed", settings.Symbol, false, "Mainnet protective SL/TP restore is blocked until the mainnet checklist is complete.", cancellationToken);
+            throw new InvalidOperationException("Mainnet protective SL/TP restore is blocked until the mainnet checklist is complete.");
         }
 
         try
         {
+            var remotePosition = await _bybitRestClient.GetPositionAsync(settings.Category, settings.Symbol, cancellationToken);
+            if (remotePosition is null || remotePosition.Size <= 0m)
+            {
+                await RecordDecisionAsync("ProtectionFailed", settings.Symbol, false, "Cannot verify futures protective stop: Bybit position is unavailable.", cancellationToken);
+                return;
+            }
+
+            if (Matches(remotePosition.StopLossPrice, stopLoss, instrument.TickSize) &&
+                Matches(remotePosition.TakeProfitPrice, takeProfit, instrument.TickSize))
+            {
+                _appliedProtectionKeys[settings.Symbol] = protectionKey;
+                if (protectionKeyCached)
+                {
+                    return;
+                }
+
+                await RecordDecisionAsync(
+                    "ProtectionVerify",
+                    settings.Symbol,
+                    true,
+                    $"Protective SL/TP verified. StopLoss={remotePosition.StopLossPrice}, TakeProfit={remotePosition.TakeProfitPrice}.",
+                    cancellationToken);
+                return;
+            }
+
             await _bybitRestClient.SetTradingStopAsync(new BybitSetTradingStopRequest
             {
                 Category = settings.Category,
@@ -76,9 +123,10 @@ public sealed class FuturesProtectionService
             }, cancellationToken);
             _appliedProtectionKeys[settings.Symbol] = protectionKey;
             await RecordDecisionAsync(
+                "ProtectionRestore",
                 settings.Symbol,
                 true,
-                $"Protective SL/TP restored. StopLoss={stopLoss}, TakeProfit={takeProfit}.",
+                $"Protective SL/TP restored. Expected StopLoss={stopLoss}, TakeProfit={takeProfit}. Previous StopLoss={remotePosition.StopLossPrice}, TakeProfit={remotePosition.TakeProfitPrice}.",
                 cancellationToken);
             _logger.LogInformation(
                 "Futures protective SL/TP restored. Symbol: {Symbol}, StopLoss: {StopLoss}, TakeProfit: {TakeProfit}",
@@ -89,6 +137,7 @@ public sealed class FuturesProtectionService
         catch (Exception exception)
         {
             await RecordDecisionAsync(
+                "ProtectionFailed",
                 settings.Symbol,
                 false,
                 $"Failed to restore futures protective SL/TP: {exception.Message}",
@@ -97,17 +146,48 @@ public sealed class FuturesProtectionService
         }
     }
 
-    private Task RecordDecisionAsync(string symbol, bool isAllowed, string reason, CancellationToken cancellationToken) =>
+    private Task RecordDecisionAsync(string source, string symbol, bool isAllowed, string reason, CancellationToken cancellationToken) =>
         _repository.AddFuturesRiskDecisionAsync(new FuturesRiskDecisionRecord
         {
             Symbol = symbol,
-            Source = "ProtectiveStop",
+            Source = source,
             IsAllowed = isAllowed,
             Reason = reason,
             Severity = (isAllowed ? RiskSeverity.Info : RiskSeverity.Critical).ToString(),
             SuggestedAction = (isAllowed ? RiskSuggestedAction.Allow : RiskSuggestedAction.PauseBot).ToString(),
             CreatedAt = DateTimeOffset.UtcNow
         }, cancellationToken);
+
+    private static decimal ResolveStopLoss(
+        FuturesBotSettings settings,
+        FuturesPositionSnapshot position,
+        BybitInstrumentInfo instrument) =>
+        IsShort(position.Side)
+            ? instrument.RoundPrice(position.EntryPrice * (1m + settings.StopLossPercent / 100m))
+            : instrument.RoundPrice(position.EntryPrice * (1m - settings.StopLossPercent / 100m));
+
+    private static decimal ResolveTakeProfit(
+        FuturesBotSettings settings,
+        FuturesPositionSnapshot position,
+        BybitInstrumentInfo instrument) =>
+        IsShort(position.Side)
+            ? instrument.RoundPrice(position.EntryPrice * (1m - settings.TakeProfitPercent / 100m))
+            : instrument.RoundPrice(position.EntryPrice * (1m + settings.TakeProfitPercent / 100m));
+
+    private static bool Matches(decimal actual, decimal expected, decimal tickSize)
+    {
+        if (actual <= 0m || expected <= 0m)
+        {
+            return false;
+        }
+
+        var tolerance = tickSize > 0m ? tickSize : 0.00000001m;
+        return Math.Abs(actual - expected) <= tolerance;
+    }
+
+    private static bool IsShort(string side) =>
+        string.Equals(side, "Sell", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(side, "Short", StringComparison.OrdinalIgnoreCase);
 
     private static string FormatDecimal(decimal value) =>
         value.ToString("0.####################", CultureInfo.InvariantCulture);
