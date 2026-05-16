@@ -26,6 +26,7 @@ public sealed class FuturesBotWorker : BackgroundService
     private readonly FuturesRiskManager _riskManager;
     private readonly FuturesRiskOptions _riskOptions;
     private readonly FuturesStrategyQualityOptions _strategyQualityOptions;
+    private readonly FuturesAutoConfigRecommender _recommender;
     private readonly FuturesStrategyRouter _strategyRouter;
     private readonly ILogger<FuturesBotWorker> _logger;
     private readonly ITelegramNotifier _notifier;
@@ -43,6 +44,7 @@ public sealed class FuturesBotWorker : BackgroundService
         FuturesProtectionService protectionService,
         FuturesReconciliationService reconciliationService,
         FuturesRiskManager riskManager,
+        FuturesAutoConfigRecommender recommender,
         FuturesStrategyRouter strategyRouter,
         IGridRepository repository,
         ITelegramNotifier notifier,
@@ -59,6 +61,7 @@ public sealed class FuturesBotWorker : BackgroundService
         _protectionService = protectionService;
         _reconciliationService = reconciliationService;
         _riskManager = riskManager;
+        _recommender = recommender;
         _strategyRouter = strategyRouter;
         _repository = repository;
         _notifier = notifier;
