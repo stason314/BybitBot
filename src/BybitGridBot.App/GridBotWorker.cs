@@ -2683,9 +2683,12 @@ public sealed class GridBotWorker : BackgroundService
                 continue;
             }
 
-            if (!await HasMinimumNetProfitAsync(TradeSide.Sell, state.AverageEntryPrice, level.Price, quantity, 0m, cancellationToken))
+            if (!await HasStrictUnparentedSellProfitAsync(state, level.Price, quantity, cancellationToken))
             {
-                _logger.LogInformation("Sell order at {Price} skipped because net profit is below minimum.", level.Price);
+                _logger.LogInformation(
+                    "Unparented grid sell at {Price} skipped because it does not clear strict profit checks from average entry {AverageEntryPrice}.",
+                    level.Price,
+                    state.AverageEntryPrice);
                 continue;
             }
 
@@ -4945,17 +4948,18 @@ public sealed class GridBotWorker : BackgroundService
         var entryPrice = state.AverageEntryPrice;
         var entryFee = 0m;
 
-        if (profile?.StrategyType is (TradingStrategyType.Dca
-                or TradingStrategyType.Combo
-                or TradingStrategyType.Btd
-                or TradingStrategyType.Hybrid) &&
-            !string.IsNullOrWhiteSpace(order.ParentOrderLinkId))
+        if (!string.IsNullOrWhiteSpace(order.ParentOrderLinkId))
         {
             var parentOrder = await _repository.GetOrderByLinkIdAsync(order.ParentOrderLinkId, cancellationToken);
             if (parentOrder is null ||
                 parentOrder.Side != TradeSide.Buy ||
                 parentOrder.FilledQuantity <= 0m)
             {
+                if (string.Equals(order.ParentOrderLinkId, ReduceOnlyExitMarker, StringComparison.Ordinal))
+                {
+                    return await HasStrictUnparentedSellProfitAsync(state, order.Price, remainingQuantity, cancellationToken);
+                }
+
                 _logger.LogInformation(
                     "Sell order {OrderLinkId} skipped because parent buy {ParentOrderLinkId} is missing or not filled.",
                     order.OrderLinkId,
@@ -4967,6 +4971,10 @@ public sealed class GridBotWorker : BackgroundService
             entryFee = parentOrder.FeePaid > 0m
                 ? parentOrder.FeePaid * decimal.Min(1m, remainingQuantity / parentOrder.FilledQuantity)
                 : 0m;
+        }
+        else if (!await HasStrictUnparentedSellProfitAsync(state, order.Price, remainingQuantity, cancellationToken))
+        {
+            return false;
         }
 
         var hasMinimumNetProfit = await HasMinimumNetProfitAsync(
@@ -4984,6 +4992,33 @@ public sealed class GridBotWorker : BackgroundService
         var expectedProfitPercent = ExpectedProfitFilter.CalculateLongRoundTripPercent(entryPrice, order.Price);
         return _expectedProfitFilter
             .Evaluate(_gridOptions, TradeSide.Sell, expectedProfitPercent, NormalizeOrderSource(order.StrategySource, order.ParentOrderLinkId))
+            .IsAllowed;
+    }
+
+    private async Task<bool> HasStrictUnparentedSellProfitAsync(
+        BotState state,
+        decimal sellPrice,
+        decimal quantity,
+        CancellationToken cancellationToken)
+    {
+        if (quantity <= 0m ||
+            state.AverageEntryPrice <= 0m ||
+            sellPrice <= state.AverageEntryPrice)
+        {
+            return false;
+        }
+
+        var exitFee = await EstimateFeeAsync(sellPrice * quantity, cancellationToken);
+        var entryFee = await EstimateFeeAsync(state.AverageEntryPrice * quantity, cancellationToken);
+        var netPnl = (sellPrice - state.AverageEntryPrice) * quantity - entryFee - exitFee;
+        if (netPnl <= 0m || netPnl < _gridOptions.MinNetProfitUsdt)
+        {
+            return false;
+        }
+
+        var expectedProfitPercent = ExpectedProfitFilter.CalculateLongRoundTripPercent(state.AverageEntryPrice, sellPrice);
+        return _expectedProfitFilter
+            .Evaluate(_gridOptions, TradeSide.Sell, expectedProfitPercent, GridSource)
             .IsAllowed;
     }
 
