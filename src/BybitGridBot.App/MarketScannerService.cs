@@ -96,6 +96,7 @@ public sealed class MarketScannerService : IMarketScannerService
             GeneratedAt = DateTimeOffset.UtcNow,
             Items = results
                 .OrderByDescending(item => item.Score)
+                .ThenByDescending(item => item.StrategyFitScore)
                 .ThenByDescending(item => item.Volume6hUsdt)
                 .ToArray()
         };
@@ -132,6 +133,11 @@ public sealed class MarketScannerService : IMarketScannerService
                 DateTimeOffset.UtcNow - order.FilledAt.Value <= TimeSpan.FromHours(12) &&
                 order.RealizedPnl < 0m)
             .Count();
+        var hasFilledTrades = recentOrders.Any(order => order.Status == OrderStatus.Filled);
+        var hasProfitableClosedTrade = recentOrders.Any(order =>
+            order.Side == TradeSide.Sell &&
+            order.Status == OrderStatus.Filled &&
+            order.RealizedPnl > order.FeePaid);
 
         var scanOptions = BuildScanGridOptions(category, instrument.Symbol, lastPrice, support, resistance, atr);
         var regime = _marketRegimeAnalyzer.Analyze(ordered);
@@ -162,9 +168,20 @@ public sealed class MarketScannerService : IMarketScannerService
             reasons.Add($"recent loss sells {recentLosses}");
         }
 
+        if (!hasFilledTrades)
+        {
+            score = decimal.Min(score, 85m);
+            reasons.Add("probation: no filled trade history");
+        }
+        else if (!hasProfitableClosedTrade)
+        {
+            score = decimal.Min(score, 90m);
+            reasons.Add("probation: no profitable closed cycle yet");
+        }
+
         score = Math.Clamp(decimal.Round(score, 2, MidpointRounding.AwayFromZero), 0m, 100m);
         var label = ResolveLabel(score, recommendation.StrategyType);
-        var orderSize = ResolveRecommendedOrderSize(score, scanOptions, instrument, recommendation.OrderSizeUsdt);
+        var orderSize = ResolveRecommendedOrderSize(score, scanOptions, instrument, recommendation.OrderSizeUsdt, hasProfitableClosedTrade);
         var settings = BuildSettings(category, instrument.Symbol, recommendation, orderSize);
 
         return new MarketScanItem
@@ -479,7 +496,12 @@ public sealed class MarketScannerService : IMarketScannerService
         };
     }
 
-    private static decimal ResolveRecommendedOrderSize(decimal score, GridOptions options, BybitInstrumentInfo instrument, decimal recommendedOrderSize)
+    private static decimal ResolveRecommendedOrderSize(
+        decimal score,
+        GridOptions options,
+        BybitInstrumentInfo instrument,
+        decimal recommendedOrderSize,
+        bool hasProfitableClosedTrade)
     {
         var multiplier = score switch
         {
@@ -492,6 +514,11 @@ public sealed class MarketScannerService : IMarketScannerService
         if (multiplier <= 0m)
         {
             return 0m;
+        }
+
+        if (!hasProfitableClosedTrade)
+        {
+            multiplier = decimal.Min(multiplier, 0.5m);
         }
 
         var baseSize = recommendedOrderSize > 0m ? recommendedOrderSize : options.OrderSizeUsdt;
