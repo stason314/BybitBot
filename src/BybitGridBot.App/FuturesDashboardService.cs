@@ -156,7 +156,12 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             RuntimeControls = runtimeControls,
             AggressiveMode = BuildAggressiveModeStatus(selectedSettings, recentFills, riskDecisions),
             StrategyQuality = BuildStrategyQuality(selectedSettings, riskDecisions),
-            AutoRecommendation = MapAutoRecommendation(recommendation),
+            AutoRecommendation = MapAutoRecommendation(
+                recommendation,
+                selectedSettings,
+                position,
+                _futuresOptions.AutoApplyRecommendation,
+                AllowsShortPositions()),
             StrategyActions = StrategyActions,
             ActiveOrders = activeOrders.Select(MapOrder).ToArray(),
             RecentOrders = recentOrders.Select(MapOrder).ToArray(),
@@ -201,21 +206,52 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             };
         }
 
-        var hasOpenPosition = false;
+        var position = new FuturesPositionSnapshot { Symbol = settings.Symbol, Category = settings.Category };
         try
         {
-            hasOpenPosition = _appOptions.TradingMode == TradingMode.Paper
-                ? ((await GetPaperPositionAsync(settings, cancellationToken))?.Size ?? 0m) > 0m
-                : ((await _bybitRestClient.GetPositionAsync(settings.Category, settings.Symbol, cancellationToken))?.Size ?? 0m) > 0m;
+            position = await ResolvePositionSnapshotAsync(settings, cancellationToken);
         }
         catch
         {
-            hasOpenPosition = false;
+            position = new FuturesPositionSnapshot { Symbol = settings.Symbol, Category = settings.Category };
         }
 
+        var hasOpenPosition = position.Size > 0m;
         var recommendation = _recommender.Recommend(settings, candles, hasOpenPosition);
+        if (!FuturesAutoRecommendationSafety.CanApply(recommendation, position, AllowsShortPositions(), out var blockReason))
+        {
+            await _repository.AddFuturesRiskDecisionAsync(new FuturesRiskDecisionRecord
+            {
+                Symbol = settings.Symbol,
+                Source = "AutoRecommendationSkipped",
+                IsAllowed = false,
+                Reason = blockReason,
+                Severity = RiskSeverity.Warning.ToString(),
+                SuggestedAction = RiskSuggestedAction.BlockNewOrders.ToString(),
+                CreatedAt = DateTimeOffset.UtcNow
+            }, cancellationToken);
+
+            return new UpdateSettingsResponse
+            {
+                Success = false,
+                Symbol = settings.Symbol,
+                Message = "Futures auto recommendation was not applied.",
+                Errors = [blockReason]
+            };
+        }
+
         var recommendedSettings = BuildRecommendedSettings(settings, recommendation);
         await _repository.SaveFuturesSettingsAsync(recommendedSettings, cancellationToken);
+        await _repository.AddFuturesRiskDecisionAsync(new FuturesRiskDecisionRecord
+        {
+            Symbol = settings.Symbol,
+            Source = "AutoRecommendationApply",
+            IsAllowed = true,
+            Reason = $"Applied futures auto recommendation: {recommendation.StrategyType}. {recommendation.Reason}",
+            Severity = RiskSeverity.Info.ToString(),
+            SuggestedAction = RiskSuggestedAction.Allow.ToString(),
+            CreatedAt = DateTimeOffset.UtcNow
+        }, cancellationToken);
 
         return new UpdateSettingsResponse
         {
@@ -1619,9 +1655,15 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
       byId('strategyQualityReason').textContent = `Last no-trade: ${quality.lastNoTradeReason || '-'}`;
     };
     const renderAutoRecommendation = (recommendation) => {
-      byId('autoRecommendationReason').textContent = recommendation.reason || '-';
+      const applyStatus = recommendation.canApply
+        ? `Can apply. Compatible for current position: ${recommendation.compatibleStrategyForPosition || '-'}`
+        : `Cannot apply: ${recommendation.applyBlockReason || '-'}`;
+      byId('autoRecommendationReason').textContent = `${recommendation.reason || '-'} ${applyStatus}`;
       byId('autoRecommendationStats').innerHTML = [
         ['Strategy', escapeHtml(recommendation.strategyType)],
+        ['Auto Apply', recommendation.autoApplyEnabled ? 'On' : 'Off'],
+        ['Apply Gate', recommendation.canApply ? 'Allowed' : 'Blocked'],
+        ['Compatible Strategy', escapeHtml(recommendation.compatibleStrategyForPosition || '-')],
         ['Leverage', `${formatNumber(recommendation.leverage)}x`],
         ['Max Notional', formatNumber(recommendation.maxNotionalUsdt)],
         ['Max Margin', formatNumber(recommendation.maxMarginUsdt)],
@@ -2691,6 +2733,10 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         string.Equals(side, "Sell", StringComparison.OrdinalIgnoreCase) ||
         string.Equals(side, "Short", StringComparison.OrdinalIgnoreCase);
 
+    private bool AllowsShortPositions() =>
+        _appOptions.TradingMode == TradingMode.Paper ||
+        (_appOptions.TradingMode == TradingMode.Testnet && _futuresOptions.TestnetShortsEnabled);
+
     private async Task<IReadOnlyList<Candle>> GetAnalysisCandlesAsync(
         FuturesBotSettings settings,
         CancellationToken cancellationToken)
@@ -2710,27 +2756,50 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         }
     }
 
-    private static FuturesAutoRecommendationView MapAutoRecommendation(FuturesAutoConfigRecommendation recommendation) => new()
+    private static FuturesAutoRecommendationView MapAutoRecommendation(
+        FuturesAutoConfigRecommendation recommendation,
+        FuturesBotSettings settings,
+        FuturesPositionView position,
+        bool autoApplyEnabled,
+        bool shortsAllowed)
     {
-        StrategyType = FormatEnum(recommendation.StrategyType),
-        Reason = recommendation.Reason,
-        Leverage = recommendation.Leverage,
-        MarginMode = FormatEnum(recommendation.MarginMode),
-        PositionMode = FormatEnum(recommendation.PositionMode),
-        Direction = FormatEnum(recommendation.Direction),
-        MaxNotionalUsdt = recommendation.MaxNotionalUsdt,
-        MaxMarginUsdt = recommendation.MaxMarginUsdt,
-        StopLossPercent = recommendation.StopLossPercent,
-        TakeProfitPercent = recommendation.TakeProfitPercent,
-        LiquidationBufferPercent = recommendation.LiquidationBufferPercent,
-        StrategyConfigJson = recommendation.StrategyConfigJson,
-        LastPrice = recommendation.Metrics.LastPrice,
-        MovePercent = recommendation.Metrics.MovePercent,
-        AtrPercent = recommendation.Metrics.AtrPercent,
-        DrawdownPercent = recommendation.Metrics.DrawdownPercent,
-        Support = recommendation.Metrics.Support,
-        Resistance = recommendation.Metrics.Resistance
-    };
+        var positionSnapshot = new FuturesPositionSnapshot
+        {
+            Symbol = settings.Symbol,
+            Category = settings.Category,
+            Side = position.Side,
+            Size = position.Size
+        };
+        var canApply = FuturesAutoRecommendationSafety.CanApply(recommendation, positionSnapshot, shortsAllowed, out var blockReason);
+        var compatibleStrategy = position.Size > 0m
+            ? FuturesAutoRecommendationSafety.ResolveCompatibleStrategy(settings.StrategyType, position.Side)
+            : settings.StrategyType;
+        return new FuturesAutoRecommendationView
+        {
+            StrategyType = FormatEnum(recommendation.StrategyType),
+            Reason = recommendation.Reason,
+            Leverage = recommendation.Leverage,
+            MarginMode = FormatEnum(recommendation.MarginMode),
+            PositionMode = FormatEnum(recommendation.PositionMode),
+            Direction = FormatEnum(recommendation.Direction),
+            MaxNotionalUsdt = recommendation.MaxNotionalUsdt,
+            MaxMarginUsdt = recommendation.MaxMarginUsdt,
+            StopLossPercent = recommendation.StopLossPercent,
+            TakeProfitPercent = recommendation.TakeProfitPercent,
+            LiquidationBufferPercent = recommendation.LiquidationBufferPercent,
+            StrategyConfigJson = recommendation.StrategyConfigJson,
+            AutoApplyEnabled = autoApplyEnabled,
+            CanApply = canApply,
+            ApplyBlockReason = canApply ? "-" : blockReason,
+            CompatibleStrategyForPosition = FormatEnum(compatibleStrategy),
+            LastPrice = recommendation.Metrics.LastPrice,
+            MovePercent = recommendation.Metrics.MovePercent,
+            AtrPercent = recommendation.Metrics.AtrPercent,
+            DrawdownPercent = recommendation.Metrics.DrawdownPercent,
+            Support = recommendation.Metrics.Support,
+            Resistance = recommendation.Metrics.Resistance
+        };
+    }
 
     private static FuturesBotSettings BuildRecommendedSettings(
         FuturesBotSettings currentSettings,

@@ -333,7 +333,7 @@ public sealed class FuturesBotWorker : BackgroundService
             return settings;
         }
 
-        if (!CanApplyAutoRecommendation(recommendation, position, out var blockReason))
+        if (!FuturesAutoRecommendationSafety.CanApply(recommendation, position, AllowsShortPositions(), out var blockReason))
         {
             await RecordThrottledRiskDecisionAsync(
                 settings.Symbol,
@@ -372,33 +372,6 @@ public sealed class FuturesBotWorker : BackgroundService
         return recommendedSettings;
     }
 
-    private bool CanApplyAutoRecommendation(
-        FuturesAutoConfigRecommendation recommendation,
-        FuturesPositionSnapshot position,
-        out string reason)
-    {
-        if (recommendation.Direction != FuturesDirection.LongOnly && !AllowsShortPositions())
-        {
-            reason = $"Auto recommendation {recommendation.StrategyType}/{recommendation.Direction} requires paper mode or FUTURES_TESTNET_SHORTS_ENABLED=true.";
-            return false;
-        }
-
-        if (position.Size > 0m && IsLong(position.Side) && IsShortOnlyStrategy(recommendation.StrategyType))
-        {
-            reason = $"Open Buy position is incompatible with auto recommendation {recommendation.StrategyType}. Close long before switching short.";
-            return false;
-        }
-
-        if (position.Size > 0m && IsShort(position.Side) && IsLongOnlyStrategy(recommendation.StrategyType))
-        {
-            reason = $"Open Sell position is incompatible with auto recommendation {recommendation.StrategyType}. Close short before switching long.";
-            return false;
-        }
-
-        reason = string.Empty;
-        return true;
-    }
-
     private async Task RecordPositionStrategyGuardIfNeededAsync(
         FuturesBotSettings settings,
         FuturesAutoConfigRecommendation recommendation,
@@ -410,14 +383,12 @@ public sealed class FuturesBotWorker : BackgroundService
             return;
         }
 
-        var incompatible = IsShort(position.Side) && IsLongOnlyStrategy(settings.StrategyType) ||
-            IsLong(position.Side) && IsShortOnlyStrategy(settings.StrategyType);
-        if (!incompatible)
+        if (!FuturesAutoRecommendationSafety.IsPositionIncompatible(settings, position))
         {
             return;
         }
 
-        var compatible = ResolveCompatibleStrategy(settings.StrategyType, position.Side);
+        var compatible = FuturesAutoRecommendationSafety.ResolveCompatibleStrategy(settings.StrategyType, position.Side);
         var reason = $"Position side {position.Side} is incompatible with {settings.StrategyType}. Using {compatible} for this cycle. Switch to a compatible strategy or close the position first. Auto recommendation available: {recommendation.StrategyType}.";
         await RecordThrottledRiskDecisionAsync(
             settings.Symbol,
@@ -1000,45 +971,10 @@ public sealed class FuturesBotWorker : BackgroundService
         current.TakeProfitPercent != updated.TakeProfitPercent ||
         current.LiquidationBufferPercent != updated.LiquidationBufferPercent;
 
-    private static FuturesStrategyType ResolveCompatibleStrategy(FuturesStrategyType strategyType, string positionSide)
-    {
-        if (IsShort(positionSide) && IsLongOnlyStrategy(strategyType))
-        {
-            return strategyType switch
-            {
-                FuturesStrategyType.GridLongOnly => FuturesStrategyType.GridShortOnly,
-                FuturesStrategyType.Breakout => FuturesStrategyType.BreakdownShort,
-                _ => FuturesStrategyType.TrendFollowShortOnly
-            };
-        }
-
-        if (IsLong(positionSide) && IsShortOnlyStrategy(strategyType))
-        {
-            return strategyType switch
-            {
-                FuturesStrategyType.GridShortOnly => FuturesStrategyType.GridLongOnly,
-                FuturesStrategyType.BreakdownShort => FuturesStrategyType.Breakout,
-                _ => FuturesStrategyType.TrendFollow
-            };
-        }
-
-        return strategyType;
-    }
-
-    private static bool IsLongOnlyStrategy(FuturesStrategyType strategyType) =>
-        strategyType is FuturesStrategyType.TrendFollow or FuturesStrategyType.Breakout or FuturesStrategyType.GridLongOnly;
-
-    private static bool IsShortOnlyStrategy(FuturesStrategyType strategyType) =>
-        strategyType is FuturesStrategyType.TrendFollowShortOnly or FuturesStrategyType.BreakdownShort or FuturesStrategyType.GridShortOnly;
-
     private static decimal CalculateUnrealizedPnl(string side, decimal size, decimal entryPrice, decimal currentPrice) =>
         IsShort(side)
             ? (entryPrice - currentPrice) * size
             : (currentPrice - entryPrice) * size;
-
-    private static bool IsLong(string side) =>
-        string.Equals(side, "Buy", StringComparison.OrdinalIgnoreCase) ||
-        string.Equals(side, "Long", StringComparison.OrdinalIgnoreCase);
 
     private static bool IsShort(string side) =>
         string.Equals(side, "Sell", StringComparison.OrdinalIgnoreCase) ||
