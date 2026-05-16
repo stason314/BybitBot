@@ -72,7 +72,9 @@ public sealed class FuturesPreflightService
                     throw new InvalidOperationException("Futures pre-flight requires one-way positionIdx=0.");
                 }
 
-                if (position.Size > 0m && string.Equals(position.Side, "Sell", StringComparison.OrdinalIgnoreCase))
+                if (position.Size > 0m &&
+                    string.Equals(position.Side, "Sell", StringComparison.OrdinalIgnoreCase) &&
+                    !AllowsShorts(settings))
                 {
                     throw new InvalidOperationException("Futures pre-flight does not allow an existing short position.");
                 }
@@ -126,9 +128,9 @@ public sealed class FuturesPreflightService
             throw new InvalidOperationException("Futures pre-flight supports only one-way mode.");
         }
 
-        if (settings.Direction != FuturesDirection.LongOnly)
+        if (settings.Direction != FuturesDirection.LongOnly && !AllowsShorts(settings))
         {
-            throw new InvalidOperationException("Futures pre-flight supports only long-only direction.");
+            throw new InvalidOperationException("Futures pre-flight supports short direction only with FUTURES_TESTNET_SHORTS_ENABLED=true.");
         }
 
         if (settings.Leverage <= 0m)
@@ -166,6 +168,10 @@ public sealed class FuturesPreflightService
     }
 
     private static string FormatDecimal(decimal value) => value.ToString(CultureInfo.InvariantCulture);
+
+    private bool AllowsShorts(FuturesBotSettings settings) =>
+        _futuresOptions.TestnetShortsEnabled &&
+        settings.Direction is FuturesDirection.ShortOnly or FuturesDirection.LongShort;
 
     private Task AddPreflightDecisionAsync(string symbol, bool isAllowed, string reason, CancellationToken cancellationToken) =>
         _repository.AddFuturesRiskDecisionAsync(new FuturesRiskDecisionRecord

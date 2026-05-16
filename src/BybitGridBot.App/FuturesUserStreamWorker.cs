@@ -133,6 +133,9 @@ public sealed class FuturesUserStreamWorker : BackgroundService
         var existing = await _repository.GetOrderByLinkIdAsync(execution.OrderLinkId, cancellationToken);
         var side = ParseSide(execution.Side);
         var reduceOnly = existing?.ReduceOnly == true || execution.OrderLinkId.StartsWith("flc", StringComparison.OrdinalIgnoreCase);
+        var action = isFunding ? FuturesTradeAction.Funding : ResolveAction(side, reduceOnly);
+        var realizedPnl = isFunding ? 0m : execution.ExecPnl - execution.ExecFee;
+        var funding = isFunding ? ResolveFundingPnl(execution) : 0m;
         await _repository.AddFuturesFillAsync(new FuturesFillRecord
         {
             ExecId = execution.ExecId,
@@ -140,17 +143,18 @@ public sealed class FuturesUserStreamWorker : BackgroundService
                 ? $"funding:{execution.ExecId}"
                 : execution.OrderLinkId,
             Symbol = execution.Symbol,
-            Action = isFunding ? FuturesTradeAction.Funding : ResolveAction(side, reduceOnly),
+            Action = action,
             Side = side,
             ExecType = string.IsNullOrWhiteSpace(execution.ExecType) ? "Trade" : execution.ExecType,
             Quantity = execution.ExecQty,
             Price = execution.ExecPrice,
             Fee = execution.ExecFee,
-            RealizedPnl = isFunding ? 0m : execution.ExecPnl - execution.ExecFee,
-            Funding = isFunding ? ResolveFundingPnl(execution) : 0m,
+            RealizedPnl = realizedPnl,
+            Funding = funding,
             CreatedAt = execution.ExecTime == DateTimeOffset.UnixEpoch ? DateTimeOffset.UtcNow : execution.ExecTime
         }, cancellationToken);
         await ApplyFillLedgerToStateAsync(settings, cancellationToken);
+        await NotifyExecutionFillAsync(execution, action, realizedPnl, funding, cancellationToken);
 
         _logger.LogInformation(
             "Futures execution stream synced. Symbol: {Symbol}, OrderLinkId: {OrderLinkId}, ExecId: {ExecId}, Quantity: {Quantity}",
@@ -158,6 +162,23 @@ public sealed class FuturesUserStreamWorker : BackgroundService
             execution.OrderLinkId,
             execution.ExecId,
             execution.ExecQty);
+    }
+
+    private async Task NotifyExecutionFillAsync(
+        BybitExecutionSnapshot execution,
+        FuturesTradeAction action,
+        decimal realizedPnl,
+        decimal funding,
+        CancellationToken cancellationToken)
+    {
+        var kind = action == FuturesTradeAction.Funding
+            ? "funding"
+            : action is FuturesTradeAction.OpenLong or FuturesTradeAction.OpenShort
+                ? "entry fill"
+                : "exit fill";
+        await _notifier.NotifyAsync(
+            $"Futures {kind} synced.\nSymbol: `{execution.Symbol}`\nAction: `{action}`\nQty: `{execution.ExecQty}`\nPrice: `{execution.ExecPrice}`\nRealized PnL: `{realizedPnl}`\nFee: `{execution.ExecFee}`\nFunding: `{funding}`",
+            cancellationToken);
     }
 
     private async Task HandlePositionAsync(BybitPositionSnapshot snapshot, CancellationToken cancellationToken)
@@ -173,7 +194,7 @@ public sealed class FuturesUserStreamWorker : BackgroundService
         await ApplyPositionAsync(state, position, cancellationToken);
         try
         {
-            FuturesReconciliationService.ValidateMvpPosition(position);
+            FuturesReconciliationService.ValidateMvpPosition(position, AllowsShortPositions());
         }
         catch (InvalidOperationException exception)
         {
@@ -423,6 +444,10 @@ public sealed class FuturesUserStreamWorker : BackgroundService
 
     private static decimal ResolveFundingPnl(BybitExecutionSnapshot execution) =>
         execution.ExecPnl != 0m ? execution.ExecPnl : -Math.Abs(execution.ExecFee);
+
+    private bool AllowsShortPositions() =>
+        _appOptions.TradingMode == TradingMode.Paper ||
+        (_appOptions.TradingMode == TradingMode.Testnet && _futuresOptions.TestnetShortsEnabled);
 
     private static OrderStatus MapStatus(string orderStatus) =>
         orderStatus switch

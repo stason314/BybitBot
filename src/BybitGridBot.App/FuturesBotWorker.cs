@@ -73,9 +73,10 @@ public sealed class FuturesBotWorker : BackgroundService
             return;
         }
 
-        if (_appOptions.TradingMode == TradingMode.Mainnet && !_futuresOptions.MainnetEnabled)
+        if (_appOptions.TradingMode == TradingMode.Mainnet &&
+            (!_futuresOptions.MainnetEnabled || !_futuresOptions.MainnetOrderPlacementEnabled))
         {
-            throw new InvalidOperationException("Futures mainnet is blocked. Set FUTURES_MAINNET_ENABLED=true only after the mainnet checklist is complete.");
+            throw new InvalidOperationException("Futures mainnet is blocked. Set FUTURES_MAINNET_ENABLED=true and FUTURES_MAINNET_ORDER_PLACEMENT_ENABLED=true only after the mainnet checklist is complete.");
         }
 
         if (_appOptions.TradingMode == TradingMode.Testnet && !_futuresOptions.TestnetEnabled)
@@ -179,6 +180,7 @@ public sealed class FuturesBotWorker : BackgroundService
         }
 
         var accountRisk = await ResolveAccountRiskSnapshotAsync(settings, state, position, cancellationToken);
+        await UpdateEquityDrawdownAsync(state, accountRisk.AccountEquityUsdt, cancellationToken);
         var openPositionCount = await CountOpenFuturesPositionsAsync(profiles, cancellationToken);
         var decision = _strategyRouter.Decide(new FuturesStrategyContext
         {
@@ -283,6 +285,7 @@ public sealed class FuturesBotWorker : BackgroundService
                 intent.Action,
                 result.IsPaper,
                 result.Message);
+            await NotifyOrderSubmissionAsync(settings.Symbol, intent.Action, result.Order, result.Position, result.IsPaper, cancellationToken);
         }
 
         if (decision.TradeIntents.Count == 0)
@@ -290,6 +293,44 @@ public sealed class FuturesBotWorker : BackgroundService
             await ApplyPositionSnapshotToStateAsync(settings, state, position, cancellationToken);
             await _repository.UpsertFuturesPositionAsync(position, _appOptions.TradingMode, cancellationToken);
         }
+    }
+
+    private async Task UpdateEquityDrawdownAsync(
+        BotState state,
+        decimal accountEquityUsdt,
+        CancellationToken cancellationToken)
+    {
+        if (accountEquityUsdt <= 0m)
+        {
+            return;
+        }
+
+        state.PeakEquityUsdt = state.PeakEquityUsdt <= 0m
+            ? accountEquityUsdt
+            : decimal.Max(state.PeakEquityUsdt, accountEquityUsdt);
+        state.CurrentDrawdownUsdt = decimal.Max(0m, state.PeakEquityUsdt - accountEquityUsdt);
+        state.CurrentDrawdownPercent = state.PeakEquityUsdt > 0m
+            ? state.CurrentDrawdownUsdt / state.PeakEquityUsdt * 100m
+            : 0m;
+        state.UpdatedAt = DateTimeOffset.UtcNow;
+        await _repository.SaveBotStateAsync(state, cancellationToken);
+    }
+
+    private async Task NotifyOrderSubmissionAsync(
+        string symbol,
+        FuturesTradeAction action,
+        GridOrder order,
+        FuturesPositionSnapshot position,
+        bool isPaper,
+        CancellationToken cancellationToken)
+    {
+        var kind = action is FuturesTradeAction.OpenLong or FuturesTradeAction.OpenShort
+            ? "entry"
+            : "exit";
+        var verb = isPaper ? "executed" : "submitted";
+        await _notifier.NotifyAsync(
+            $"Futures {kind} {verb}.\nSymbol: `{symbol}`\nAction: `{action}`\nQty: `{order.Quantity}`\nFilled: `{order.FilledQuantity}`\nAvg: `{order.AverageFillPrice}`\nRealized PnL: `{order.RealizedPnl}`\nPosition: `{position.Side} {position.Size}`",
+            cancellationToken);
     }
 
     private async Task ApplyPositionSnapshotToStateAsync(
@@ -766,12 +807,16 @@ public sealed class FuturesBotWorker : BackgroundService
         if (!string.Equals(settings.Category, "linear", StringComparison.OrdinalIgnoreCase) ||
             settings.MarginMode != FuturesMarginMode.Isolated ||
             settings.PositionMode != FuturesPositionMode.OneWay ||
-            (settings.Direction != FuturesDirection.LongOnly && _appOptions.TradingMode != TradingMode.Paper) ||
+            (settings.Direction != FuturesDirection.LongOnly && !AllowsShortPositions()) ||
             settings.Leverage > _futuresOptions.MvpMaxLeverage)
         {
-            throw new InvalidOperationException("Futures worker supports shorts only in paper mode; live/testnet remain linear, isolated, one-way, long-only within the leverage cap.");
+            throw new InvalidOperationException("Futures worker supports shorts only in paper mode or with FUTURES_TESTNET_SHORTS_ENABLED=true on testnet; live remains linear, isolated, one-way, long-only within the leverage cap.");
         }
     }
+
+    private bool AllowsShortPositions() =>
+        _appOptions.TradingMode == TradingMode.Paper ||
+        (_appOptions.TradingMode == TradingMode.Testnet && _futuresOptions.TestnetShortsEnabled);
 
     private static decimal CalculateUnrealizedPnl(string side, decimal size, decimal entryPrice, decimal currentPrice) =>
         IsShort(side)

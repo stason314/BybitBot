@@ -11,17 +11,20 @@ public sealed class FuturesReconciliationService
     private readonly AppOptions _appOptions;
     private readonly IBybitRestClient _bybitRestClient;
     private readonly FuturesProtectionService _protectionService;
+    private readonly FuturesOptions _futuresOptions;
     private readonly ILogger<FuturesReconciliationService> _logger;
     private readonly IGridRepository _repository;
 
     public FuturesReconciliationService(
         IOptions<AppOptions> appOptions,
+        IOptions<FuturesOptions> futuresOptions,
         IBybitRestClient bybitRestClient,
         FuturesProtectionService protectionService,
         IGridRepository repository,
         ILogger<FuturesReconciliationService> logger)
     {
         _appOptions = appOptions.Value;
+        _futuresOptions = futuresOptions.Value;
         _bybitRestClient = bybitRestClient;
         _protectionService = protectionService;
         _repository = repository;
@@ -104,7 +107,7 @@ public sealed class FuturesReconciliationService
                 Leverage = settings.Leverage
             }
             : MapPosition(settings, bybitPosition, fallbackMarkPrice);
-        ValidateMvpPosition(position);
+        ValidateMvpPosition(position, AllowsShortPositions());
         ApplyPositionToState(state, position);
         await ApplyFillLedgerToStateAsync(settings, state, cancellationToken);
         await _repository.SaveBotStateAsync(state, cancellationToken);
@@ -378,18 +381,24 @@ public sealed class FuturesReconciliationService
         state.UpdatedAt = DateTimeOffset.UtcNow;
     }
 
-    public static void ValidateMvpPosition(FuturesPositionSnapshot position)
+    public static void ValidateMvpPosition(FuturesPositionSnapshot position, bool allowShort = false)
     {
         if (position.PositionIdx != 0)
         {
             throw new InvalidOperationException("Futures worker MVP requires live positionIdx=0.");
         }
 
-        if (position.Size > 0m && string.Equals(position.Side, "Sell", StringComparison.OrdinalIgnoreCase))
+        if (!allowShort &&
+            position.Size > 0m &&
+            string.Equals(position.Side, "Sell", StringComparison.OrdinalIgnoreCase))
         {
             throw new InvalidOperationException("Futures worker MVP does not manage short positions.");
         }
     }
+
+    private bool AllowsShortPositions() =>
+        _appOptions.TradingMode == TradingMode.Paper ||
+        (_appOptions.TradingMode == TradingMode.Testnet && _futuresOptions.TestnetShortsEnabled);
 
     private static TradeSide ParseSide(string side) =>
         Enum.TryParse<TradeSide>(side, true, out var parsed) ? parsed : TradeSide.Buy;

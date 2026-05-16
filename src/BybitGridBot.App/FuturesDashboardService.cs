@@ -1,6 +1,7 @@
 using System.Text.Json;
 using BybitGridBot.Bybit;
 using BybitGridBot.Domain;
+using BybitGridBot.Notifications;
 using BybitGridBot.Risk;
 using BybitGridBot.Storage;
 using BybitGridBot.Strategy;
@@ -15,6 +16,8 @@ public interface IFuturesDashboardService
     Task<UpdateSettingsResponse> UpdateSettingsAsync(UpdateFuturesSettingsRequest request, CancellationToken cancellationToken);
     Task<UpdateSettingsResponse> DeleteSettingsAsync(string symbol, CancellationToken cancellationToken);
     Task<UpdateSettingsResponse> SetProfileEnabledAsync(string symbol, bool enabled, CancellationToken cancellationToken);
+    Task<UpdateSettingsResponse> PauseProfileAsync(string symbol, CancellationToken cancellationToken);
+    Task<UpdateSettingsResponse> ResumeProfileAsync(string symbol, CancellationToken cancellationToken);
     Task<UpdateSettingsResponse> ClosePositionAsync(string symbol, CancellationToken cancellationToken);
     Task<UpdateSettingsResponse> OpenPaperTestPositionAsync(string symbol, CancellationToken cancellationToken);
     Task<UpdateSettingsResponse> OpenPaperTestShortPositionAsync(string symbol, CancellationToken cancellationToken);
@@ -40,7 +43,9 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
     private readonly FuturesOptions _futuresOptions;
     private readonly FuturesRiskManager _riskManager;
     private readonly FuturesRiskOptions _riskOptions;
+    private readonly FuturesStrategyQualityOptions _strategyQualityOptions;
     private readonly FuturesAutoConfigRecommender _recommender;
+    private readonly ITelegramNotifier _notifier;
     private readonly IGridRepository _repository;
 
     public FuturesDashboardService(
@@ -50,8 +55,10 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         FuturesExecutionService executionService,
         IOptions<FuturesOptions> futuresOptions,
         IOptions<FuturesRiskOptions> riskOptions,
+        IOptions<FuturesStrategyQualityOptions> strategyQualityOptions,
         FuturesRiskManager riskManager,
         FuturesAutoConfigRecommender recommender,
+        ITelegramNotifier notifier,
         IGridRepository repository)
     {
         _bybitRestClient = bybitRestClient;
@@ -60,8 +67,10 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         _executionService = executionService;
         _futuresOptions = futuresOptions.Value;
         _riskOptions = riskOptions.Value;
+        _strategyQualityOptions = strategyQualityOptions.Value;
         _riskManager = riskManager;
         _recommender = recommender;
+        _notifier = notifier;
         _repository = repository;
     }
 
@@ -107,6 +116,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         var lastPreflight = riskDecisions.FirstOrDefault(decision => string.Equals(decision.Source, "Preflight", StringComparison.OrdinalIgnoreCase));
         var recentFills = await _repository.GetFuturesFillsAsync(selectedSettings.Symbol, FuturesFillLedger.QueryLimit, cancellationToken);
         var fillLedger = FuturesFillLedger.Build(recentFills, DateOnly.FromDateTime(DateTime.UtcNow));
+        var runtimeControls = await BuildRuntimeControlsAsync(profiles, state, cancellationToken);
 
         return new FuturesDashboardResponse
         {
@@ -141,7 +151,9 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             TestnetSoak = BuildTestnetSoakStatus(position, activeOrders, recentOrders, recentFills, riskDecisions),
             ProtectionStatus = BuildProtectionStatus(selectedSettings, position, bybitPositionSnapshot, riskDecisions),
             UserStreamStatus = BuildUserStreamStatus(),
+            RuntimeControls = runtimeControls,
             AggressiveMode = BuildAggressiveModeStatus(selectedSettings, recentFills, riskDecisions),
+            StrategyQuality = BuildStrategyQuality(selectedSettings, riskDecisions),
             AutoRecommendation = MapAutoRecommendation(recommendation),
             StrategyActions = StrategyActions,
             ActiveOrders = activeOrders.Select(MapOrder).ToArray(),
@@ -358,6 +370,98 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             AggressiveMinSecondsBetweenEntries = current.AggressiveMinSecondsBetweenEntries,
             AggressiveMaxConsecutiveLosses = current.AggressiveMaxConsecutiveLosses,
             UpdatedAt = DateTimeOffset.UtcNow
+        };
+    }
+
+    public async Task<UpdateSettingsResponse> PauseProfileAsync(string symbol, CancellationToken cancellationToken)
+    {
+        var normalizedSymbol = NormalizeSymbol(symbol);
+        var settings = await _repository.GetFuturesSettingsAsync(normalizedSymbol, cancellationToken);
+        if (settings is null)
+        {
+            return new UpdateSettingsResponse
+            {
+                Success = false,
+                Symbol = normalizedSymbol,
+                Message = "Futures profile not found.",
+                Errors = [$"Futures profile {normalizedSymbol} does not exist."]
+            };
+        }
+
+        var state = await EnsureFuturesStateAsync(settings, 0m, cancellationToken);
+        var reason = "Manual futures emergency pause from UI.";
+        state.IsPaused = true;
+        state.PauseReason = reason;
+        state.UpdatedAt = DateTimeOffset.UtcNow;
+        await _repository.SaveBotStateAsync(state, cancellationToken);
+        await _repository.AddFuturesRiskDecisionAsync(new FuturesRiskDecisionRecord
+        {
+            Symbol = settings.Symbol,
+            Source = "ManualEmergencyPause",
+            IsAllowed = false,
+            Reason = reason,
+            Severity = RiskSeverity.Critical.ToString(),
+            SuggestedAction = RiskSuggestedAction.PauseBot.ToString(),
+            CreatedAt = DateTimeOffset.UtcNow
+        }, cancellationToken);
+        await _notifier.NotifyAsync($"Futures emergency pause enabled from UI.\nSymbol: `{settings.Symbol}`", cancellationToken);
+
+        return new UpdateSettingsResponse
+        {
+            Success = true,
+            Symbol = normalizedSymbol,
+            Message = $"Futures emergency pause enabled for {normalizedSymbol}."
+        };
+    }
+
+    public async Task<UpdateSettingsResponse> ResumeProfileAsync(string symbol, CancellationToken cancellationToken)
+    {
+        var normalizedSymbol = NormalizeSymbol(symbol);
+        if (_riskOptions.EmergencyPause)
+        {
+            return new UpdateSettingsResponse
+            {
+                Success = false,
+                Symbol = normalizedSymbol,
+                Message = "Futures emergency pause is enabled by env.",
+                Errors = ["Set FUTURES_EMERGENCY_PAUSE=false before resuming from UI."]
+            };
+        }
+
+        var settings = await _repository.GetFuturesSettingsAsync(normalizedSymbol, cancellationToken);
+        if (settings is null)
+        {
+            return new UpdateSettingsResponse
+            {
+                Success = false,
+                Symbol = normalizedSymbol,
+                Message = "Futures profile not found.",
+                Errors = [$"Futures profile {normalizedSymbol} does not exist."]
+            };
+        }
+
+        var state = await EnsureFuturesStateAsync(settings, 0m, cancellationToken);
+        state.IsPaused = false;
+        state.PauseReason = null;
+        state.UpdatedAt = DateTimeOffset.UtcNow;
+        await _repository.SaveBotStateAsync(state, cancellationToken);
+        await _repository.AddFuturesRiskDecisionAsync(new FuturesRiskDecisionRecord
+        {
+            Symbol = settings.Symbol,
+            Source = "ManualResume",
+            IsAllowed = true,
+            Reason = "Manual futures resume from UI.",
+            Severity = RiskSeverity.Info.ToString(),
+            SuggestedAction = RiskSuggestedAction.Allow.ToString(),
+            CreatedAt = DateTimeOffset.UtcNow
+        }, cancellationToken);
+        await _notifier.NotifyAsync($"Futures profile resumed from UI.\nSymbol: `{settings.Symbol}`", cancellationToken);
+
+        return new UpdateSettingsResponse
+        {
+            Success = true,
+            Symbol = normalizedSymbol,
+            Message = $"Futures profile resumed for {normalizedSymbol}."
         };
     }
 
@@ -928,12 +1032,15 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         <div id="runtimeStatus" class="actions"></div>
         <div class="actions">
           <button type="button" id="toggleProfile">Toggle</button>
+          <button type="button" class="danger" id="emergencyPause">Emergency Pause</button>
+          <button type="button" id="resumeProfile">Resume</button>
           <button type="button" class="primary" id="paperTestEntry">Paper Test Entry</button>
           <button type="button" class="primary" id="paperTestShortEntry">Paper Short Entry</button>
           <button type="button" class="danger" id="closePosition">Close Position</button>
           <button type="button" class="danger" id="cancelFuturesOrders">Cancel Orders</button>
         </div>
       </div>
+      <div class="stats" id="runtimeGuardStats" style="margin-bottom:0;margin-top:12px;"></div>
       <div class="status" id="controlStatus"></div>
     </section>
 
@@ -971,6 +1078,15 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
       <div class="stats" id="protectionStats" style="margin-bottom:0;margin-top:12px;"></div>
       <div class="subtle" id="protectionReason" style="margin-top:12px;"></div>
       <div class="stats" id="userStreamStats" style="margin-bottom:0;margin-top:12px;"></div>
+    </section>
+
+    <section class="panel" style="margin-bottom:18px;">
+      <div class="actions" style="justify-content:space-between;">
+        <h2 style="margin:0;">Strategy Quality</h2>
+        <span class="subtle">No-trade, filter, and risk diagnostics</span>
+      </div>
+      <div class="stats" id="strategyQualityStats" style="margin-bottom:0;"></div>
+      <div class="subtle" id="strategyQualityReason" style="margin-top:12px;"></div>
     </section>
 
     <section class="panel" style="margin-bottom:18px;">
@@ -1268,12 +1384,25 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
       resetPaperStats.title = data.tradingMode === 'Paper'
         ? 'Reset paper account PnL and futures diagnostic history for the selected symbol.'
         : 'Reset Stats is available only when TRADING_MODE=Paper.';
+      const runtime = data.runtimeControls || {};
+      byId('resumeProfile').disabled = Boolean(runtime.envEmergencyPauseEnabled) || !Boolean(runtime.profilePaused);
+      byId('emergencyPause').disabled = Boolean(runtime.profilePaused);
       byId('runtimeStatus').innerHTML = [
         `<span class="chip">${escapeHtml(data.tradingMode)}</span>`,
         `<span class="chip">${data.futuresEnabled ? 'Futures enabled' : 'Futures disabled'}</span>`,
         `<span class="chip">${data.settings.enabled ? 'Profile enabled' : 'Profile disabled'}</span>`,
+        `<span class="chip">${runtime.envEmergencyPauseEnabled ? 'Env emergency pause' : 'Env pause off'}</span>`,
+        `<span class="chip">${runtime.profilePaused ? 'Profile paused' : 'Profile running'}</span>`,
         `<span class="chip">${preflight ? escapeHtml(preflight.isAllowed ? 'Preflight ok' : 'Preflight blocked') : 'No preflight'}</span>`
       ].join('');
+      byId('runtimeGuardStats').innerHTML = [
+        ['Pause Reason', runtime.pauseReason || '-'],
+        ['Daily PnL / Max Loss', `${formatPnl(runtime.dailyRealizedPnl)} / ${formatNumber(runtime.maxDailyLossUsdt)} (${formatNumber(runtime.maxDailyLossEquityPercent)}%)`],
+        ['Peak Equity', formatNumber(runtime.peakEquityUsdt)],
+        ['Drawdown', `${formatPnl(-Math.abs(Number(runtime.currentDrawdownUsdt || 0)))} / ${formatPnl(-Math.abs(Number(runtime.currentDrawdownPercent || 0)))}%`],
+        ['Max Drawdown %', formatNumber(runtime.maxDrawdownEquityPercent)],
+        ['Open Positions', `${formatNumber(runtime.openPositionCount)} / ${formatNumber(runtime.maxOpenPositions)}`]
+      ].map(([label, value]) => `<div class="stat"><div class="label">${label}</div><div class="value">${value}</div></div>`).join('');
       if (preflight) {
         setControlStatus(
           preflight.isAllowed ? 'ok' : 'error',
@@ -1330,8 +1459,10 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
       paperAccount: latest?.paperAccount,
       pnlStats: latest?.pnlStats,
       testnetSoak: latest?.testnetSoak,
+      runtimeControls: latest?.runtimeControls,
       userStreamStatus: latest?.userStreamStatus,
       aggressiveMode: latest?.aggressiveMode,
+      strategyQuality: latest?.strategyQuality,
       position: latest?.position,
       activeOrders: latest?.activeOrders || [],
       recentOrders: recentOrdersForHours(hours),
@@ -1470,6 +1601,19 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
       byId('aggressiveMinSecondsBetweenEntries').value = latest?.settings?.aggressiveMinSecondsBetweenEntries ?? 60;
       byId('aggressiveMaxConsecutiveLosses').value = latest?.settings?.aggressiveMaxConsecutiveLosses ?? 2;
     };
+    const renderStrategyQuality = (quality) => {
+      byId('strategyQualityStats').innerHTML = [
+        ['Strategy', quality.strategyType || '-'],
+        ['Direction', quality.direction || '-'],
+        ['ATR Max %', formatNumber(quality.maxEntryAtrPercent)],
+        ['BTC Risk-Off', quality.btcRiskOffEnabled ? `on (${formatNumber(quality.btcRiskOffMovePercent)}%)` : 'off'],
+        ['Stop Cooldown', `${formatNumber(quality.stopLossCooldownMinutes)}m`],
+        ['No Trade', formatNumber(quality.noTradeReasonCount)],
+        ['Filter Blocks', formatNumber(quality.strategyFilterBlockCount)],
+        ['Risk Blocks', formatNumber(quality.riskBlockCount)]
+      ].map(([label, value]) => `<div class="stat"><div class="label">${label}</div><div class="value">${escapeHtml(value)}</div></div>`).join('');
+      byId('strategyQualityReason').textContent = `Last no-trade: ${quality.lastNoTradeReason || '-'}`;
+    };
     const renderAutoRecommendation = (recommendation) => {
       byId('autoRecommendationReason').textContent = recommendation.reason || '-';
       byId('autoRecommendationStats').innerHTML = [
@@ -1500,6 +1644,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
       renderPaperAccount(data.paperAccount || {}, data.pnlStats || {});
       renderRuntime(data);
       renderAggressiveMode(data.aggressiveMode || {});
+      renderStrategyQuality(data.strategyQuality || {});
       renderOrders(data.activeOrders || []);
       renderRecentOrders(data.recentOrders || []);
       renderRiskDecisions(data.riskDecisions || []);
@@ -1624,6 +1769,22 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
       if (!symbol) return;
       const enabled = !(latest?.settings?.enabled ?? true);
       const response = await fetch(`/api/futures/settings/${encodeURIComponent(symbol)}/enabled?enabled=${enabled}`, { method: 'POST' });
+      const result = await response.json();
+      setControlStatus(response.ok ? 'ok' : 'error', response.ok ? result.message : (result.errors?.join(' | ') || result.message), symbol);
+      await load(true);
+    });
+    byId('emergencyPause').addEventListener('click', async () => {
+      const symbol = selectedSymbol || latest?.settings?.symbol;
+      if (!symbol) return;
+      const response = await fetch(`/api/futures/settings/${encodeURIComponent(symbol)}/pause`, { method: 'POST' });
+      const result = await response.json();
+      setControlStatus(response.ok ? 'ok' : 'error', response.ok ? result.message : (result.errors?.join(' | ') || result.message), symbol);
+      await load(true);
+    });
+    byId('resumeProfile').addEventListener('click', async () => {
+      const symbol = selectedSymbol || latest?.settings?.symbol;
+      if (!symbol) return;
+      const response = await fetch(`/api/futures/settings/${encodeURIComponent(symbol)}/resume`, { method: 'POST' });
       const result = await response.json();
       setControlStatus(response.ok ? 'ok' : 'error', response.ok ? result.message : (result.errors?.join(' | ') || result.message), symbol);
       await load(true);
@@ -2080,6 +2241,68 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             DisconnectCount = snapshot.DisconnectCount,
             ConnectAttemptCount = snapshot.ConnectAttemptCount,
             LastError = snapshot.LastError ?? "-"
+        };
+    }
+
+    private FuturesStrategyQualityView BuildStrategyQuality(
+        FuturesBotSettings settings,
+        IReadOnlyCollection<FuturesRiskDecisionRecord> riskDecisions)
+    {
+        var noTradeDecisions = riskDecisions
+            .Where(decision => IsNoTradeDecision(decision.Source))
+            .ToArray();
+        var filterBlocks = riskDecisions.Count(decision =>
+            string.Equals(decision.Source, "StrategyFilter", StringComparison.OrdinalIgnoreCase));
+        var riskBlocks = riskDecisions.Count(decision =>
+            string.Equals(decision.Source, "Risk", StringComparison.OrdinalIgnoreCase) &&
+            !decision.IsAllowed);
+
+        return new FuturesStrategyQualityView
+        {
+            StrategyType = settings.StrategyType.ToString(),
+            Direction = settings.Direction.ToString(),
+            MaxEntryAtrPercent = _strategyQualityOptions.MaxEntryAtrPercent,
+            BtcRiskOffEnabled = _strategyQualityOptions.BtcRiskOffEnabled,
+            BtcRiskOffMovePercent = _strategyQualityOptions.BtcRiskOffMovePercent,
+            StopLossCooldownMinutes = _strategyQualityOptions.StopLossCooldownMinutes,
+            NoTradeReasonCount = noTradeDecisions.Length,
+            StrategyFilterBlockCount = filterBlocks,
+            RiskBlockCount = riskBlocks,
+            LastNoTradeReason = noTradeDecisions
+                .OrderByDescending(decision => decision.CreatedAt)
+                .FirstOrDefault()?.Reason ?? "-"
+        };
+    }
+
+    private async Task<FuturesRuntimeControlsView> BuildRuntimeControlsAsync(
+        IReadOnlyCollection<FuturesBotSettings> profiles,
+        BotState? state,
+        CancellationToken cancellationToken)
+    {
+        var openPositions = 0;
+        foreach (var profile in profiles.Where(static profile => profile.Enabled))
+        {
+            var position = await _repository.GetFuturesPositionAsync(profile.Symbol, cancellationToken);
+            if (position?.Size > 0m)
+            {
+                openPositions++;
+            }
+        }
+
+        return new FuturesRuntimeControlsView
+        {
+            EnvEmergencyPauseEnabled = _riskOptions.EmergencyPause,
+            ProfilePaused = state?.IsPaused ?? false,
+            PauseReason = state?.PauseReason ?? "-",
+            DailyRealizedPnl = state?.DailyRealizedPnl ?? 0m,
+            MaxDailyLossUsdt = _riskOptions.MaxDailyLossUsdt,
+            MaxDailyLossEquityPercent = _riskOptions.MaxDailyLossEquityPercent,
+            PeakEquityUsdt = state?.PeakEquityUsdt ?? 0m,
+            CurrentDrawdownUsdt = state?.CurrentDrawdownUsdt ?? 0m,
+            CurrentDrawdownPercent = state?.CurrentDrawdownPercent ?? 0m,
+            MaxDrawdownEquityPercent = _riskOptions.MaxDrawdownEquityPercent,
+            OpenPositionCount = openPositions,
+            MaxOpenPositions = _riskOptions.MaxOpenPositions
         };
     }
 

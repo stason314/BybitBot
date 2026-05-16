@@ -50,6 +50,26 @@ public sealed class FuturesIntegrationSafetyTests
     }
 
     [Fact]
+    public void FuturesOpenShortRequest_IsAllowedOnTestnetBehindFlag()
+    {
+        var service = CreateExecutionService(
+            TradingMode.Testnet,
+            new FuturesOptions
+            {
+                TestnetEnabled = true,
+                TestnetShortsEnabled = true,
+                MvpMaxLeverage = 2m
+            });
+
+        var request = service.CreateBybitRequest(
+            Settings(direction: FuturesDirection.ShortOnly),
+            Intent(FuturesTradeAction.OpenShort, stopLossPrice: 110m));
+
+        Assert.Equal("Sell", request.Side);
+        Assert.False(request.ReduceOnly.GetValueOrDefault());
+    }
+
+    [Fact]
     public void DailyLossBlocksOpenLong_ButAllowsCloseLong()
     {
         var manager = new FuturesRiskManager();
@@ -173,6 +193,7 @@ public sealed class FuturesIntegrationSafetyTests
         };
         var service = new FuturesReconciliationService(
             Options.Create(new AppOptions { TradingMode = TradingMode.Testnet }),
+            Options.Create(new FuturesOptions { TestnetEnabled = true }),
             bybitClient,
             new FuturesProtectionService(
                 Options.Create(new AppOptions { TradingMode = TradingMode.Testnet }),
@@ -212,6 +233,7 @@ public sealed class FuturesIntegrationSafetyTests
         };
         var service = new FuturesReconciliationService(
             Options.Create(new AppOptions { TradingMode = TradingMode.Testnet }),
+            Options.Create(new FuturesOptions { TestnetEnabled = true }),
             bybitClient,
             new FuturesProtectionService(
                 Options.Create(new AppOptions { TradingMode = TradingMode.Testnet }),

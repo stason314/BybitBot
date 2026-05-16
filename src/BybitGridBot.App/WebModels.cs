@@ -386,7 +386,11 @@ public sealed class FuturesDashboardResponse
 
     public required FuturesUserStreamStatusView UserStreamStatus { get; init; }
 
+    public required FuturesRuntimeControlsView RuntimeControls { get; init; }
+
     public required FuturesAggressiveModeView AggressiveMode { get; init; }
+
+    public required FuturesStrategyQualityView StrategyQuality { get; init; }
 
     public required FuturesAutoRecommendationView AutoRecommendation { get; init; }
 
@@ -515,6 +519,56 @@ public sealed class FuturesAggressiveModeView
     public required string LastBlockReason { get; init; }
 
     public required string LastNoTradeReason { get; init; }
+}
+
+public sealed class FuturesRuntimeControlsView
+{
+    public bool EnvEmergencyPauseEnabled { get; init; }
+
+    public bool ProfilePaused { get; init; }
+
+    public string PauseReason { get; init; } = "-";
+
+    public decimal DailyRealizedPnl { get; init; }
+
+    public decimal MaxDailyLossUsdt { get; init; }
+
+    public decimal MaxDailyLossEquityPercent { get; init; }
+
+    public decimal PeakEquityUsdt { get; init; }
+
+    public decimal CurrentDrawdownUsdt { get; init; }
+
+    public decimal CurrentDrawdownPercent { get; init; }
+
+    public decimal MaxDrawdownEquityPercent { get; init; }
+
+    public int OpenPositionCount { get; init; }
+
+    public int MaxOpenPositions { get; init; }
+}
+
+public sealed class FuturesStrategyQualityView
+{
+    public required string StrategyType { get; init; }
+
+    public required string Direction { get; init; }
+
+    public decimal MaxEntryAtrPercent { get; init; }
+
+    public bool BtcRiskOffEnabled { get; init; }
+
+    public decimal BtcRiskOffMovePercent { get; init; }
+
+    public int StopLossCooldownMinutes { get; init; }
+
+    public int NoTradeReasonCount { get; init; }
+
+    public int StrategyFilterBlockCount { get; init; }
+
+    public int RiskBlockCount { get; init; }
+
+    public string LastNoTradeReason { get; init; } = "-";
 }
 
 public sealed class FuturesOrderView
