@@ -387,6 +387,13 @@ public sealed class GridOptions
     [Range(typeof(decimal), "-100", "1000")]
     public decimal FastProtectiveExitFloorPercent { get; init; } = 0.2m;
 
+    [ConfigurationKeyName("REDUCE_ONLY_FORCE_EXIT_ON_DRAWDOWN")]
+    public bool ReduceOnlyForceExitOnDrawdown { get; init; } = true;
+
+    [ConfigurationKeyName("REDUCE_ONLY_FORCE_EXIT_DRAWDOWN_PERCENT")]
+    [Range(typeof(decimal), "0", "1000")]
+    public decimal ReduceOnlyForceExitDrawdownPercent { get; init; } = 2m;
+
     [ConfigurationKeyName("ENABLE_NO_TRADE_REASON_TRACKING")]
     public bool EnableNoTradeReasonTracking { get; init; } = true;
 

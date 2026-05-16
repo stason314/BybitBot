@@ -365,6 +365,12 @@ public sealed class GridDashboardService : IGridDashboardService
     {
         var score = 50m;
         var reasons = new List<string>();
+        var isPausedStrategy = profile.StrategyType is TradingStrategyType.NoTrade or TradingStrategyType.Pause;
+        if (isPausedStrategy)
+        {
+            score -= 20m;
+            reasons.Add($"strategy paused {profile.StrategyType}");
+        }
 
         if (market.VolatilityPercent >= 0.8m && market.VolatilityPercent <= 8m)
         {
@@ -409,6 +415,13 @@ public sealed class GridDashboardService : IGridDashboardService
                 order.Status == OrderStatus.Filled &&
                 (order.FilledAt ?? order.UpdatedAt) >= now.AddHours(-48))
             .ToArray();
+        var filledTradesCount = orders.Count(order => order.Status == OrderStatus.Filled);
+        if (filledTradesCount == 0)
+        {
+            score -= 10m;
+            reasons.Add("no filled trades yet");
+        }
+
         var recentWinRate = recentClosed.Length == 0
             ? 0m
             : recentClosed.Count(order => order.RealizedPnl > order.FeePaid) / (decimal)recentClosed.Length * 100m;
@@ -448,12 +461,12 @@ public sealed class GridDashboardService : IGridDashboardService
         var currentDrawdownPercent = CalculatePairCurrentDrawdownPercent(state, market.LastPrice);
         if (currentDrawdownPercent >= 3m)
         {
-            score -= 15m;
+            score -= 25m;
             reasons.Add($"position drawdown {currentDrawdownPercent:0.##}%");
         }
         else if (currentDrawdownPercent >= 1m)
         {
-            score -= 6m;
+            score -= 10m;
             reasons.Add($"position drawdown {currentDrawdownPercent:0.##}%");
         }
 
@@ -464,6 +477,12 @@ public sealed class GridDashboardService : IGridDashboardService
             {
                 score -= reasonPenalty;
                 reasons.Add($"no-trade {lastNoTradeReason.ReasonCode}");
+            }
+
+            if (now - lastNoTradeReason.CreatedAt >= TimeSpan.FromHours(1))
+            {
+                score -= 5m;
+                reasons.Add("stale no-trade reason");
             }
         }
 
@@ -2753,18 +2772,20 @@ public sealed class GridDashboardService : IGridDashboardService
         OrderSourceContext sourceContext,
         IReadOnlyDictionary<string, string> sourceLabels)
     {
+        var source = sourceLabels.TryGetValue(order.OrderLinkId, out var sourceLabel)
+            ? sourceLabel
+            : ResolveOrderSource(order, sourceContext);
+
         return new DashboardOrderItem
         {
             OrderLinkId = order.OrderLinkId,
             BybitOrderId = order.BybitOrderId,
             ParentOrderLinkId = order.ParentOrderLinkId,
             OrderGroup = ResolveOrderGroup(order),
-            LadderRole = ResolveLadderRole(order),
+            LadderRole = ResolveLadderRole(order, source),
             Symbol = order.Symbol,
             Side = order.Side.ToString(),
-            Source = sourceLabels.TryGetValue(order.OrderLinkId, out var sourceLabel)
-                ? sourceLabel
-                : ResolveOrderSource(order, sourceContext),
+            Source = source,
             Price = order.Price,
             Quantity = order.Quantity,
             FilledQuantity = order.FilledQuantity,
@@ -2782,10 +2803,17 @@ public sealed class GridDashboardService : IGridDashboardService
             ? order.ParentOrderLinkId
             : null;
 
-    private static string? ResolveLadderRole(GridOrder order) =>
-        order.Side == TradeSide.Sell && !string.IsNullOrWhiteSpace(order.ParentOrderLinkId)
-            ? "TP ladder"
-            : null;
+    private static string? ResolveLadderRole(GridOrder order, string source)
+    {
+        if (order.Side != TradeSide.Sell || string.IsNullOrWhiteSpace(order.ParentOrderLinkId))
+        {
+            return null;
+        }
+
+        return source.Contains("Grid", StringComparison.OrdinalIgnoreCase)
+            ? "Grid follow-up"
+            : "TP ladder";
+    }
 
     private static DashboardNoTradeReason MapNoTradeReason(NoTradeReasonRecord reason, DateTimeOffset now)
     {

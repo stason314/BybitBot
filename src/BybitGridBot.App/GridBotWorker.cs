@@ -2419,18 +2419,25 @@ public sealed class GridBotWorker : BackgroundService
         IReadOnlyCollection<GridOrder> activeOrders,
         decimal currentPrice,
         string reason,
-        CancellationToken cancellationToken) =>
-        await ApplyReduceOnlyProtectionAsync(
+        CancellationToken cancellationToken)
+    {
+        var forceExit = ShouldForceReduceOnlyExitOnDrawdown(state, currentPrice);
+        var resolvedReason = forceExit
+            ? $"{reason}; reduce-only-drawdown-exit: drawdown={CalculatePositionDrawdownPercent(state, currentPrice):0.####}%"
+            : reason;
+
+        return await ApplyReduceOnlyProtectionAsync(
             profile,
             state,
             levels,
             instrument,
             activeOrders,
             currentPrice,
-            reason,
+            resolvedReason,
             null,
-            false,
+            forceExit,
             cancellationToken);
+    }
 
     private async Task<IReadOnlyList<GridOrder>> ApplyReduceOnlyProtectionAsync(
         GridBotSettings? profile,
@@ -2461,6 +2468,14 @@ public sealed class GridBotWorker : BackgroundService
         if (forceExit)
         {
             foreach (var order in activeOrders.Where(order => order.IsActive && order.Side == TradeSide.Sell).ToArray())
+            {
+                await CancelManagedOrderAsync(order, cancellationToken);
+                cancelledSellCount++;
+            }
+        }
+        else if (ShouldCleanupTpLadderSells(profile, reason))
+        {
+            foreach (var order in activeOrders.Where(IsActiveTakeProfitLadderSell).ToArray())
             {
                 await CancelManagedOrderAsync(order, cancellationToken);
                 cancelledSellCount++;
@@ -2562,6 +2577,34 @@ public sealed class GridBotWorker : BackgroundService
         return createdSellCount;
     }
 
+    private bool ShouldForceReduceOnlyExitOnDrawdown(BotState state, decimal currentPrice) =>
+        _gridOptions.ReduceOnlyForceExitOnDrawdown &&
+        CalculatePositionDrawdownPercent(state, currentPrice) >= _gridOptions.ReduceOnlyForceExitDrawdownPercent;
+
+    private static decimal CalculatePositionDrawdownPercent(BotState state, decimal currentPrice)
+    {
+        if (state.BaseAssetQuantity <= 0m || state.AverageEntryPrice <= 0m || currentPrice <= 0m || currentPrice >= state.AverageEntryPrice)
+        {
+            return 0m;
+        }
+
+        return (state.AverageEntryPrice - currentPrice) / state.AverageEntryPrice * 100m;
+    }
+
+    private static bool ShouldCleanupTpLadderSells(GridBotSettings? profile, string reason) =>
+        profile?.StrategyType == TradingStrategyType.ReduceOnly ||
+        reason.Contains("danger", StringComparison.OrdinalIgnoreCase) ||
+        reason.Contains("dump", StringComparison.OrdinalIgnoreCase) ||
+        reason.Contains("protective", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsActiveTakeProfitLadderSell(GridOrder order) =>
+        order.IsActive &&
+        order.Side == TradeSide.Sell &&
+        !string.IsNullOrWhiteSpace(order.ParentOrderLinkId) &&
+        !string.Equals(order.ParentOrderLinkId, ReduceOnlyExitMarker, StringComparison.Ordinal) &&
+        !string.Equals(order.ParentOrderLinkId, SignalExitMarker, StringComparison.Ordinal) &&
+        !string.Equals(order.ParentOrderLinkId, TrendExitMarker, StringComparison.Ordinal);
+
     private IReadOnlyList<decimal> BuildReduceOnlySellLevels(
         IReadOnlyList<GridLevel> levels,
         decimal currentPrice,
@@ -2600,7 +2643,6 @@ public sealed class GridBotWorker : BackgroundService
         CancellationToken cancellationToken)
     {
         var buyLevels = _strategy.GetBuyLevels(levels, currentPrice).OrderByDescending(level => level.Price).ToArray();
-        var sellLevels = _strategy.GetSellLevels(levels, currentPrice).OrderBy(level => level.Price).ToArray();
         var buyOrderSizeMultiplier = await GetPairScoreOrderSizeMultiplierAsync(state, cancellationToken);
 
         foreach (var level in buyLevels)
@@ -2657,59 +2699,6 @@ public sealed class GridBotWorker : BackgroundService
             var decision = new StrategyExecutionDecision
             {
                 OrderIntents = [new OrderIntent(TradeSide.Buy, level.Price, quantity, StrategySource: ResolveGridSource(profile), ExpectedProfitPercent: buyExpectedProfitPercent)]
-            };
-            var createdOrders = await ExecuteStrategyDecisionAsync(decision, cancellationToken);
-            if (createdOrders.Count == 0)
-            {
-                continue;
-            }
-
-            var createdOrder = createdOrders[0];
-            activeOrders = activeOrders.Append(createdOrder).ToArray();
-        }
-
-        foreach (var level in sellLevels)
-        {
-            if (HasActiveOrderAtLevel(activeOrders, level.Price) ||
-                await _repository.GetActiveOrderAtLevelAsync(_gridOptions.Symbol, TradeSide.Sell, level.Price, cancellationToken) is not null)
-            {
-                continue;
-            }
-
-            var orderSizeUsdt = GetOrderSizeUsdt(TradeSide.Sell, level.Price, state);
-            var quantity = instrument.RoundQuantity(orderSizeUsdt / level.Price);
-            if (quantity <= 0m || quantity < instrument.MinOrderQty)
-            {
-                continue;
-            }
-
-            if (!await HasStrictUnparentedSellProfitAsync(state, level.Price, quantity, cancellationToken))
-            {
-                _logger.LogInformation(
-                    "Unparented grid sell at {Price} skipped because it does not clear strict profit checks from average entry {AverageEntryPrice}.",
-                    level.Price,
-                    state.AverageEntryPrice);
-                continue;
-            }
-
-            var sellExpectedProfitPercent = ExpectedProfitFilter.CalculateLongRoundTripPercent(state.AverageEntryPrice, level.Price);
-
-            var availableBase = GetAvailableBaseBalance(state, activeOrders, wallet);
-            if (availableBase < quantity)
-            {
-                _logger.LogInformation("Sell order at {Price} skipped because base asset inventory is insufficient.", level.Price);
-                continue;
-            }
-
-            _logger.LogInformation(
-                "Risk decision for {Symbol}: Allow sell at {Price}. Capital allocation requested: 0 USDT, available base: {AvailableBase}.",
-                _gridOptions.Symbol,
-                level.Price,
-                availableBase);
-
-            var decision = new StrategyExecutionDecision
-            {
-                OrderIntents = [new OrderIntent(TradeSide.Sell, level.Price, quantity, StrategySource: ResolveGridSource(profile), ExpectedProfitPercent: sellExpectedProfitPercent)]
             };
             var createdOrders = await ExecuteStrategyDecisionAsync(decision, cancellationToken);
             if (createdOrders.Count == 0)
@@ -4307,6 +4296,12 @@ public sealed class GridBotWorker : BackgroundService
         }
 
         var now = DateTimeOffset.UtcNow;
+        var filledTradesCount = orders.Count(order => order.Status == OrderStatus.Filled);
+        if (filledTradesCount == 0)
+        {
+            score -= 10m;
+        }
+
         var recentClosed = orders
             .Where(order => order.Side == TradeSide.Sell &&
                 order.Status == OrderStatus.Filled &&
@@ -4331,12 +4326,16 @@ public sealed class GridBotWorker : BackgroundService
             var drawdownPercent = state.LastObservedPrice.Value >= state.AverageEntryPrice
                 ? 0m
                 : (state.AverageEntryPrice - state.LastObservedPrice.Value) / state.AverageEntryPrice * 100m;
-            score -= drawdownPercent >= 3m ? 15m : drawdownPercent >= 1m ? 6m : 0m;
+            score -= drawdownPercent >= 3m ? 25m : drawdownPercent >= 1m ? 10m : 0m;
         }
 
         if (lastNoTradeReason is not null)
         {
             score -= GetPairScoreNoTradePenalty(lastNoTradeReason.ReasonCode);
+            if (now - lastNoTradeReason.CreatedAt >= TimeSpan.FromHours(1))
+            {
+                score -= 5m;
+            }
         }
 
         return decimal.Max(0m, decimal.Min(100m, decimal.Round(score, 2, MidpointRounding.AwayFromZero)));
