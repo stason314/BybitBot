@@ -65,6 +65,11 @@ public sealed class FuturesTrendFollowLongOnly : IFuturesStrategy
             return FuturesLongOnlySignals.CloseLong(context, "exit-signal");
         }
 
+        if (FuturesLongOnlySignals.ShouldTakePartialProfit(context, signal))
+        {
+            return FuturesLongOnlySignals.CloseLong(context, "partial-take-profit", quantityMultiplier: 0.5m);
+        }
+
         if (FuturesLongOnlySignals.ShouldOpenAggressiveTestLong(context, signal))
         {
             return FuturesLongOnlySignals.OpenLong(context);
@@ -97,6 +102,11 @@ public sealed class FuturesBreakoutLongOnly : IFuturesStrategy
             return FuturesLongOnlySignals.CloseLong(context, "exit-signal");
         }
 
+        if (FuturesLongOnlySignals.ShouldTakePartialProfit(context, signal))
+        {
+            return FuturesLongOnlySignals.CloseLong(context, "partial-take-profit", quantityMultiplier: 0.5m);
+        }
+
         if (FuturesLongOnlySignals.ShouldOpenAggressiveTestLong(context, signal))
         {
             return FuturesLongOnlySignals.OpenLong(context);
@@ -127,6 +137,11 @@ public sealed class FuturesGridLongOnly : IFuturesStrategy
         if (FuturesLongOnlySignals.ShouldCloseOpenLong(context, signal))
         {
             return FuturesLongOnlySignals.CloseLong(context, "exit-signal");
+        }
+
+        if (FuturesLongOnlySignals.ShouldTakePartialProfit(context, signal))
+        {
+            return FuturesLongOnlySignals.CloseLong(context, "partial-take-profit", quantityMultiplier: 0.5m);
         }
 
         if (FuturesLongOnlySignals.ShouldOpenAggressiveTestLong(context, signal))
@@ -162,6 +177,11 @@ public sealed class FuturesTrendFollowShortOnly : IFuturesStrategy
             return FuturesShortOnlySignals.CloseShort(context, "exit-signal");
         }
 
+        if (FuturesShortOnlySignals.ShouldTakePartialProfit(context, signal))
+        {
+            return FuturesShortOnlySignals.CloseShort(context, "partial-take-profit", quantityMultiplier: 0.5m);
+        }
+
         if (FuturesShortOnlySignals.ShouldOpenAggressiveTestShort(context, signal))
         {
             return FuturesShortOnlySignals.OpenShort(context);
@@ -194,6 +214,11 @@ public sealed class FuturesBreakdownShortOnly : IFuturesStrategy
             return FuturesShortOnlySignals.CloseShort(context, "exit-signal");
         }
 
+        if (FuturesShortOnlySignals.ShouldTakePartialProfit(context, signal))
+        {
+            return FuturesShortOnlySignals.CloseShort(context, "partial-take-profit", quantityMultiplier: 0.5m);
+        }
+
         if (FuturesShortOnlySignals.ShouldOpenAggressiveTestShort(context, signal))
         {
             return FuturesShortOnlySignals.OpenShort(context);
@@ -224,6 +249,11 @@ public sealed class FuturesGridShortOnly : IFuturesStrategy
         if (FuturesShortOnlySignals.ShouldCloseOpenShort(context, signal))
         {
             return FuturesShortOnlySignals.CloseShort(context, "exit-signal");
+        }
+
+        if (FuturesShortOnlySignals.ShouldTakePartialProfit(context, signal))
+        {
+            return FuturesShortOnlySignals.CloseShort(context, "partial-take-profit", quantityMultiplier: 0.5m);
         }
 
         if (FuturesShortOnlySignals.ShouldOpenAggressiveTestShort(context, signal))
@@ -278,17 +308,45 @@ internal static class FuturesLongOnlySignals
             signal.MovePercent < -1m;
     }
 
+    public static bool ShouldTakePartialProfit(FuturesStrategyContext context, FuturesLongOnlySignal signal)
+    {
+        if (context.Position.Size <= 0m || !IsLong(context.Position.Side) || context.Position.EntryPrice <= 0m)
+        {
+            return false;
+        }
+
+        if (!CanPartialClose(context.Position.Size, context.Instrument))
+        {
+            return false;
+        }
+
+        var profitPercent = (context.CurrentPrice - context.Position.EntryPrice) / context.Position.EntryPrice * 100m;
+        var retracementFromResistance = signal.Resistance > 0m
+            ? (signal.Resistance - context.CurrentPrice) / signal.Resistance * 100m
+            : 0m;
+        var adaptiveTakeProfit = decimal.Min(context.Settings.TakeProfitPercent, 1.2m);
+        return profitPercent >= adaptiveTakeProfit ||
+            (profitPercent >= 0.6m && retracementFromResistance >= 0.35m);
+    }
+
     public static bool ShouldOpenAggressiveTestLong(FuturesStrategyContext context, FuturesLongOnlySignal signal) =>
         context.Settings.AggressiveModeEnabled &&
         context.Settings.AggressiveModeKind == FuturesAggressiveModeKind.Test &&
         !FuturesShortOnlySignals.IsShort(context.Position.Side) &&
-        signal.MovePercent > -1.2m;
+        signal.MovePercent > -1.2m &&
+        !IsLongScaleInAfterRejection(context, signal);
 
     public static FuturesStrategyDecision OpenLong(FuturesStrategyContext context)
     {
         if (FuturesShortOnlySignals.IsShort(context.Position.Side))
         {
             return FuturesShortOnlySignals.CloseShort(context, "position-side-recovery");
+        }
+
+        if (FuturesLongOnlySignals.TryAnalyze(context, out var signal) &&
+            IsLongScaleInAfterRejection(context, signal))
+        {
+            return FuturesStrategyDecision.Empty("Futures long scale-in blocked after rejection from resistance.");
         }
 
         var entryIntent = FuturesStrategyIntentFactory.OpenLong(
@@ -300,18 +358,69 @@ internal static class FuturesLongOnlySignals
             : FuturesStrategyDecision.Empty("Futures entry quantity is below instrument precision.");
     }
 
-    public static FuturesStrategyDecision CloseLong(FuturesStrategyContext context, string reason) => new()
+    public static FuturesStrategyDecision CloseLong(
+        FuturesStrategyContext context,
+        string reason,
+        decimal quantityMultiplier = 1m) => new()
     {
         TradeIntents =
         [
             FuturesStrategyIntentFactory.CloseLong(
                 context.Settings,
-                context.Position,
+                ScalePositionQuantity(context.Position, quantityMultiplier),
                 context.CurrentPrice,
                 context.Instrument,
                 reason)
         ]
     };
+
+    private static bool IsLongScaleInAfterRejection(FuturesStrategyContext context, FuturesLongOnlySignal signal)
+    {
+        var range = signal.Range <= 0m ? context.Instrument.TickSize : signal.Range;
+        var rejectionFromResistance = signal.Resistance - context.CurrentPrice;
+        return context.Position.Size > 0m &&
+            context.CurrentPrice < signal.Resistance - range * 0.35m &&
+            rejectionFromResistance / context.CurrentPrice * 100m >= 0.35m;
+    }
+
+    private static FuturesPositionSnapshot ScalePositionQuantity(FuturesPositionSnapshot position, decimal multiplier)
+    {
+        if (multiplier >= 1m)
+        {
+            return position;
+        }
+
+        return new FuturesPositionSnapshot
+        {
+            Symbol = position.Symbol,
+            Category = position.Category,
+            Side = position.Side,
+            Size = decimal.Max(0m, position.Size * decimal.Max(0.01m, multiplier)),
+            EntryPrice = position.EntryPrice,
+            MarkPrice = position.MarkPrice,
+            LiquidationPrice = position.LiquidationPrice,
+            PositionValueUsdt = position.PositionValueUsdt,
+            MarginUsedUsdt = position.MarginUsedUsdt,
+            Leverage = position.Leverage,
+            UnrealizedPnl = position.UnrealizedPnl,
+            RealizedPnl = position.RealizedPnl,
+            Funding = position.Funding,
+            PositionIdx = position.PositionIdx,
+            UpdatedAt = position.UpdatedAt
+        };
+    }
+
+    private static bool CanPartialClose(decimal positionSize, FuturesInstrumentRules instrument)
+    {
+        var minCloseQuantity = instrument.MinOrderQty;
+        var step = instrument.QtyStep > 0m ? instrument.QtyStep : instrument.BasePrecision;
+        if (step > 0m)
+        {
+            minCloseQuantity = decimal.Max(minCloseQuantity, step);
+        }
+
+        return minCloseQuantity > 0m && positionSize >= minCloseQuantity * 2m;
+    }
 
     private static bool IsLong(string side) =>
         string.Equals(side, "Buy", StringComparison.OrdinalIgnoreCase) ||
@@ -343,17 +452,45 @@ internal static class FuturesShortOnlySignals
             signal.MovePercent > 1m;
     }
 
+    public static bool ShouldTakePartialProfit(FuturesStrategyContext context, FuturesLongOnlySignal signal)
+    {
+        if (context.Position.Size <= 0m || !IsShort(context.Position.Side) || context.Position.EntryPrice <= 0m)
+        {
+            return false;
+        }
+
+        if (!CanPartialClose(context.Position.Size, context.Instrument))
+        {
+            return false;
+        }
+
+        var profitPercent = (context.Position.EntryPrice - context.CurrentPrice) / context.Position.EntryPrice * 100m;
+        var reboundFromSupport = signal.Support > 0m
+            ? (context.CurrentPrice - signal.Support) / signal.Support * 100m
+            : 0m;
+        var adaptiveTakeProfit = decimal.Min(context.Settings.TakeProfitPercent, 1.2m);
+        return profitPercent >= adaptiveTakeProfit ||
+            (profitPercent >= 0.6m && reboundFromSupport >= 0.35m);
+    }
+
     public static bool ShouldOpenAggressiveTestShort(FuturesStrategyContext context, FuturesLongOnlySignal signal) =>
         context.Settings.AggressiveModeEnabled &&
         context.Settings.AggressiveModeKind == FuturesAggressiveModeKind.Test &&
         !IsLong(context.Position.Side) &&
-        signal.MovePercent < 1.2m;
+        signal.MovePercent < 1.2m &&
+        !IsShortScaleInAfterRebound(context, signal);
 
     public static FuturesStrategyDecision OpenShort(FuturesStrategyContext context)
     {
         if (IsLong(context.Position.Side))
         {
             return FuturesLongOnlySignals.CloseLong(context, "position-side-recovery");
+        }
+
+        if (TryAnalyze(context, out var signal) &&
+            IsShortScaleInAfterRebound(context, signal))
+        {
+            return FuturesStrategyDecision.Empty("Futures short scale-in blocked after rebound from support.");
         }
 
         var entryIntent = FuturesStrategyIntentFactory.OpenShort(
@@ -365,18 +502,69 @@ internal static class FuturesShortOnlySignals
             : FuturesStrategyDecision.Empty("Futures short entry quantity is below instrument precision.");
     }
 
-    public static FuturesStrategyDecision CloseShort(FuturesStrategyContext context, string reason) => new()
+    public static FuturesStrategyDecision CloseShort(
+        FuturesStrategyContext context,
+        string reason,
+        decimal quantityMultiplier = 1m) => new()
     {
         TradeIntents =
         [
             FuturesStrategyIntentFactory.CloseShort(
                 context.Settings,
-                context.Position,
+                ScalePositionQuantity(context.Position, quantityMultiplier),
                 context.CurrentPrice,
                 context.Instrument,
                 reason)
         ]
     };
+
+    private static bool IsShortScaleInAfterRebound(FuturesStrategyContext context, FuturesLongOnlySignal signal)
+    {
+        var range = signal.Range <= 0m ? context.Instrument.TickSize : signal.Range;
+        var reboundFromSupport = context.CurrentPrice - signal.Support;
+        return context.Position.Size > 0m &&
+            context.CurrentPrice > signal.Support + range * 0.35m &&
+            reboundFromSupport / context.CurrentPrice * 100m >= 0.35m;
+    }
+
+    private static FuturesPositionSnapshot ScalePositionQuantity(FuturesPositionSnapshot position, decimal multiplier)
+    {
+        if (multiplier >= 1m)
+        {
+            return position;
+        }
+
+        return new FuturesPositionSnapshot
+        {
+            Symbol = position.Symbol,
+            Category = position.Category,
+            Side = position.Side,
+            Size = decimal.Max(0m, position.Size * decimal.Max(0.01m, multiplier)),
+            EntryPrice = position.EntryPrice,
+            MarkPrice = position.MarkPrice,
+            LiquidationPrice = position.LiquidationPrice,
+            PositionValueUsdt = position.PositionValueUsdt,
+            MarginUsedUsdt = position.MarginUsedUsdt,
+            Leverage = position.Leverage,
+            UnrealizedPnl = position.UnrealizedPnl,
+            RealizedPnl = position.RealizedPnl,
+            Funding = position.Funding,
+            PositionIdx = position.PositionIdx,
+            UpdatedAt = position.UpdatedAt
+        };
+    }
+
+    private static bool CanPartialClose(decimal positionSize, FuturesInstrumentRules instrument)
+    {
+        var minCloseQuantity = instrument.MinOrderQty;
+        var step = instrument.QtyStep > 0m ? instrument.QtyStep : instrument.BasePrecision;
+        if (step > 0m)
+        {
+            minCloseQuantity = decimal.Max(minCloseQuantity, step);
+        }
+
+        return minCloseQuantity > 0m && positionSize >= minCloseQuantity * 2m;
+    }
 
     public static bool IsShort(string side) =>
         string.Equals(side, "Sell", StringComparison.OrdinalIgnoreCase) ||

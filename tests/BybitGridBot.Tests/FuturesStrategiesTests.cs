@@ -173,6 +173,63 @@ public sealed class FuturesStrategiesTests
     }
 
     [Fact]
+    public void FuturesGridShortOnly_TakesPartialProfitBeforeWideTakeProfit()
+    {
+        var decision = new FuturesGridShortOnly().Decide(Context(
+            currentPrice: 87.44m,
+            positionSize: 0.2m,
+            entryPrice: 88.82m,
+            positionSide: "Sell",
+            direction: FuturesDirection.ShortOnly,
+            tickSize: 0.01m,
+            qtyStep: 0.1m,
+            minOrderQty: 0.1m,
+            candles: SolCandles()));
+
+        var intent = Assert.Single(decision.TradeIntents);
+        Assert.Equal(FuturesTradeAction.CloseShort, intent.Action);
+        Assert.Equal("partial-take-profit", intent.Reason);
+        Assert.Equal(0.1m, intent.Quantity);
+    }
+
+    [Fact]
+    public void FuturesGridShortOnly_DoesNotPartialCloseBelowMinimumRemainingSize()
+    {
+        var decision = new FuturesGridShortOnly().Decide(Context(
+            currentPrice: 87.44m,
+            positionSize: 0.1m,
+            entryPrice: 88.82m,
+            positionSide: "Sell",
+            direction: FuturesDirection.ShortOnly,
+            tickSize: 0.01m,
+            qtyStep: 0.1m,
+            minOrderQty: 0.1m,
+            candles: SolCandles()));
+
+        Assert.Empty(decision.TradeIntents);
+    }
+
+    [Fact]
+    public void FuturesTrendFollowShortOnly_BlocksScaleInAfterReboundFromSupport()
+    {
+        var decision = new FuturesTrendFollowShortOnly().Decide(Context(
+            currentPrice: 87.44m,
+            positionSize: 0.1m,
+            entryPrice: 88.82m,
+            positionSide: "Sell",
+            direction: FuturesDirection.ShortOnly,
+            aggressiveModeEnabled: true,
+            aggressiveModeKind: FuturesAggressiveModeKind.Test,
+            tickSize: 0.01m,
+            qtyStep: 0.1m,
+            minOrderQty: 0.1m,
+            candles: SolCandles()));
+
+        Assert.Empty(decision.TradeIntents);
+        Assert.Equal("Futures short scale-in blocked after rebound from support.", decision.Reason);
+    }
+
+    [Fact]
     public void FuturesReduceOnly_ClosesOpenShort()
     {
         var decision = new FuturesReduceOnly().Decide(Context(
@@ -198,7 +255,8 @@ public sealed class FuturesStrategiesTests
         decimal minOrderQty = 0.001m,
         decimal minOrderAmount = 5m,
         bool aggressiveModeEnabled = false,
-        FuturesAggressiveModeKind aggressiveModeKind = FuturesAggressiveModeKind.Normal) => new()
+        FuturesAggressiveModeKind aggressiveModeKind = FuturesAggressiveModeKind.Normal,
+        IReadOnlyList<Candle>? candles = null) => new()
     {
         Settings = new FuturesBotSettings
         {
@@ -217,7 +275,7 @@ public sealed class FuturesStrategiesTests
             AggressiveModeEnabled = aggressiveModeEnabled,
             AggressiveModeKind = aggressiveModeKind
         },
-        Candles = Candles(),
+        Candles = candles ?? Candles(),
         CurrentPrice = currentPrice,
         Position = new FuturesPositionSnapshot
         {
@@ -258,6 +316,19 @@ public sealed class FuturesStrategiesTests
             {
                 var open = 50000m + index;
                 return new Candle(start.AddMinutes(index), open, open + 120m, open - 40m, open + 20m, 1m, open);
+            })
+            .ToArray();
+    }
+
+    private static IReadOnlyList<Candle> SolCandles()
+    {
+        var start = DateTimeOffset.UtcNow.AddMinutes(-60);
+        return Enumerable.Range(0, 60)
+            .Select(index =>
+            {
+                var open = 88.28m - index * 0.01m;
+                var close = index == 59 ? 87.44m : open - 0.01m;
+                return new Candle(start.AddMinutes(index), open, 88.43m, 86.65m, close, 1m, close);
             })
             .ToArray();
     }

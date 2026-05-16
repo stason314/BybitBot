@@ -75,7 +75,7 @@ public sealed class FuturesRiskManager
                 return Block("FUTURES_MAX_MARGIN_USDT limit reached.", RiskSeverity.Warning, RiskSuggestedAction.BlockNewOrders);
             }
 
-            if (projectedMargin > context.AvailableMarginUsdt)
+            if (context.Intent.InitialMarginUsdt > context.AvailableMarginUsdt)
             {
                 return Block("Insufficient available futures margin.", RiskSeverity.Warning, RiskSuggestedAction.BlockNewOrders);
             }

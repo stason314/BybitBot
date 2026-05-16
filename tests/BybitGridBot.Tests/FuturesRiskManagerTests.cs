@@ -82,6 +82,35 @@ public sealed class FuturesRiskManagerTests
     }
 
     [Fact]
+    public void Evaluate_AllowsScaleInWhenNewOrderFitsRemainingMargin()
+    {
+        var decision = new FuturesRiskManager().Evaluate(Context(
+            riskOptions: Options(maxNotionalUsdt: 20m, maxMarginUsdt: 10m),
+            position: new FuturesPositionSnapshot
+            {
+                Symbol = "SOLUSDT",
+                Category = "linear",
+                Side = "Sell",
+                Size = 0.1m,
+                EntryPrice = 88.82m,
+                MarkPrice = 87.45m,
+                PositionValueUsdt = 8.745m,
+                MarginUsedUsdt = 4.3725m,
+                Leverage = 2m
+            },
+            intent: Intent(
+                action: FuturesTradeAction.OpenShort,
+                price: 87.45m,
+                quantity: 0.1m,
+                leverage: 2m,
+                stopLossPrice: 89.2m,
+                liquidationPrice: 131.175m),
+            availableMarginUsdt: 5.6275m));
+
+        Assert.True(decision.IsAllowed);
+    }
+
+    [Fact]
     public void Evaluate_BlocksLeverageAboveLimit()
     {
         var decision = new FuturesRiskManager().Evaluate(Context(
@@ -199,6 +228,7 @@ public sealed class FuturesRiskManagerTests
         decimal accountEquityUsdt = 1000m,
         decimal currentDrawdownUsdt = 0m,
         decimal currentDrawdownPercent = 0m,
+        decimal availableMarginUsdt = 1000m,
         int openPositionCount = 0) => new()
     {
         RiskOptions = riskOptions ?? Options(),
@@ -212,7 +242,7 @@ public sealed class FuturesRiskManagerTests
             Leverage = 2m
         },
         MarkPrice = 50000m,
-        AvailableMarginUsdt = 1000m,
+        AvailableMarginUsdt = availableMarginUsdt,
         DailyRealizedPnl = dailyRealizedPnl,
         TotalRealizedPnl = totalRealizedPnl,
         AccountEquityUsdt = accountEquityUsdt,
