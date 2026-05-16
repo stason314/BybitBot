@@ -62,6 +62,7 @@ public sealed class GridBotWorker : BackgroundService
     private readonly IGridTradingStrategy _strategy;
     private readonly Dictionary<string, CachedFeeRate> _feeRates = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, DateTimeOffset> _lastTimedAutoApplyChecks = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, ReduceOnlyExitVerification> _reduceOnlyExitVerifications = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, GridOptions> _runningProfiles = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, GridBotSettings> _runningSettings = new(StringComparer.OrdinalIgnoreCase);
     private GridOptions _gridOptions;
@@ -71,6 +72,11 @@ public sealed class GridBotWorker : BackgroundService
     private readonly record struct SignalPositionSnapshot(decimal Quantity, decimal AverageEntryPrice);
 
     private readonly record struct SpotAccountRiskSnapshot(decimal EquityUsdt, decimal ExposureUsdt, int ActiveBuyOrders);
+
+    private readonly record struct ReduceOnlyExitVerification(
+        decimal ExpectedBaseQuantity,
+        DateTimeOffset RequestedAt,
+        int Attempts);
 
     private readonly record struct TrendFollowingSignal(
         bool ShouldBuy,
@@ -2456,6 +2462,7 @@ public sealed class GridBotWorker : BackgroundService
             _gridOptions.Symbol,
             reason,
             forceExit);
+        var forceExitAttempt = VerifyReduceOnlyForceExitProgress(state);
 
         var cancelledBuyCount = 0;
         foreach (var order in activeOrders.Where(order => order.IsActive && order.Side == TradeSide.Buy).ToArray())
@@ -2489,7 +2496,15 @@ public sealed class GridBotWorker : BackgroundService
         var wallet = _appOptions.TradingMode == TradingMode.Paper
             ? null
             : await _bybitRestClient.GetWalletBalanceAsync(cancellationToken, _quoteAsset, _baseAsset);
-        var createdSellCount = await EnsureReduceOnlySellOrdersAsync(profile, state, levels, instrument, remainingOrders, wallet, currentPrice, maxSellQuantity, forceExit, cancellationToken);
+        var createdSellCount = await EnsureReduceOnlySellOrdersAsync(profile, state, levels, instrument, remainingOrders, wallet, currentPrice, maxSellQuantity, forceExit, forceExitAttempt, cancellationToken);
+        if (forceExit && createdSellCount > 0 && state.BaseAssetQuantity > 0m)
+        {
+            _reduceOnlyExitVerifications[_gridOptions.Symbol] = new ReduceOnlyExitVerification(
+                state.BaseAssetQuantity,
+                DateTimeOffset.UtcNow,
+                forceExitAttempt);
+        }
+
         if (cancelledBuyCount > 0 || cancelledSellCount > 0 || createdSellCount > 0)
         {
             await _notifier.NotifyAsync(
@@ -2510,6 +2525,7 @@ public sealed class GridBotWorker : BackgroundService
         decimal currentPrice,
         decimal? maxSellQuantity,
         bool forceExit,
+        int forceExitAttempt,
         CancellationToken cancellationToken)
     {
         if (state.BaseAssetQuantity <= 0m)
@@ -2530,7 +2546,7 @@ public sealed class GridBotWorker : BackgroundService
 
         var createdSellCount = 0;
         var sellLevels = forceExit
-            ? new[] { instrument.RoundPrice(currentPrice * (1m - SignalMarketLikeLimitBufferPercent / 100m)) }
+            ? new[] { instrument.RoundPrice(currentPrice * (1m - GetReduceOnlyForceExitOffsetPercent(forceExitAttempt) / 100m)) }
             : BuildReduceOnlySellLevels(levels, currentPrice, state.AverageEntryPrice).ToArray();
         foreach (var price in sellLevels)
         {
@@ -2581,6 +2597,47 @@ public sealed class GridBotWorker : BackgroundService
     private bool ShouldForceReduceOnlyExitOnDrawdown(BotState state, decimal currentPrice) =>
         _gridOptions.ReduceOnlyForceExitOnDrawdown &&
         CalculatePositionDrawdownPercent(state, currentPrice) >= _gridOptions.ReduceOnlyForceExitDrawdownPercent;
+
+    private int VerifyReduceOnlyForceExitProgress(BotState state)
+    {
+        if (!_reduceOnlyExitVerifications.TryGetValue(_gridOptions.Symbol, out var pending))
+        {
+            return 0;
+        }
+
+        if (state.BaseAssetQuantity <= 0m || state.BaseAssetQuantity < pending.ExpectedBaseQuantity * 0.995m)
+        {
+            _reduceOnlyExitVerifications.Remove(_gridOptions.Symbol);
+            _logger.LogInformation(
+                "ReduceOnly force-exit verification passed for {Symbol}. Base quantity moved from {ExpectedBaseQuantity} to {CurrentBaseQuantity}.",
+                _gridOptions.Symbol,
+                pending.ExpectedBaseQuantity,
+                state.BaseAssetQuantity);
+            return 0;
+        }
+
+        var minWait = TimeSpan.FromSeconds(Math.Max(1, _gridOptions.BotLoopIntervalSeconds));
+        if (DateTimeOffset.UtcNow - pending.RequestedAt < minWait)
+        {
+            return pending.Attempts;
+        }
+
+        var nextAttempt = Math.Min(5, pending.Attempts + 1);
+        _reduceOnlyExitVerifications[_gridOptions.Symbol] = pending with
+        {
+            RequestedAt = DateTimeOffset.UtcNow,
+            Attempts = nextAttempt
+        };
+        _logger.LogWarning(
+            "ReduceOnly force-exit verification failed for {Symbol}. Base quantity is still {CurrentBaseQuantity}; increasing exit offset attempt to {Attempt}.",
+            _gridOptions.Symbol,
+            state.BaseAssetQuantity,
+            nextAttempt);
+        return nextAttempt;
+    }
+
+    private static decimal GetReduceOnlyForceExitOffsetPercent(int attempt) =>
+        decimal.Min(0.5m, SignalMarketLikeLimitBufferPercent * (1m + Math.Max(0, attempt)));
 
     private static decimal CalculatePositionDrawdownPercent(BotState state, decimal currentPrice)
     {
