@@ -4448,37 +4448,8 @@ public sealed class GridBotWorker : BackgroundService
             return 0m;
         }
 
-        var multiplier = score >= 75m
-            ? _gridOptions.PairScoreHotMultiplier
-            : score >= 60m
-                ? _gridOptions.PairScoreGoodMultiplier
-                : score >= 40m
-                    ? _gridOptions.PairScoreNeutralMultiplier
-                    : _gridOptions.PairScoreAvoidMultiplier;
         var profitStats = CalculatePairProfitStats(orders);
-        if (profitStats.ProfitableClosedSellCount == 0)
-        {
-            multiplier = decimal.Min(multiplier, _gridOptions.PairScoreProbationMultiplier);
-        }
-        else if (profitStats.ProfitableClosedSellCount == 1 ||
-                 profitStats.CurrentProfitStreak < Math.Max(1, _gridOptions.PairScoreProfitStreakTrades))
-        {
-            multiplier = decimal.Min(multiplier, _gridOptions.PairScoreFirstProfitMultiplier);
-        }
-        else
-        {
-            multiplier = decimal.Min(multiplier, _gridOptions.PairScoreProfitStreakMultiplier);
-        }
-
-        if (profitStats.LatestClosedSellWasLoss)
-        {
-            multiplier = decimal.Min(multiplier, _gridOptions.PairScoreRecentLossMaxMultiplier);
-        }
-
-        if (state.DailyRealizedPnl < 0m)
-        {
-            multiplier = decimal.Min(multiplier, _gridOptions.PairScoreNegativeDailyMaxMultiplier);
-        }
+        var multiplier = ResolvePairScoreStreakMultiplier(profitStats, state.DailyRealizedPnl);
 
         var topPairGate = await ResolveTopPairGateAsync(state, score, profitStats, cancellationToken);
         if (!topPairGate.IsAllowed)
@@ -4633,6 +4604,29 @@ public sealed class GridBotWorker : BackgroundService
     private static decimal ApplyPairScoreOrderSizeMultiplier(decimal orderSizeUsdt, decimal multiplier) =>
         decimal.Max(0m, orderSizeUsdt * decimal.Max(0m, multiplier));
 
+    private decimal ResolvePairScoreStreakMultiplier(PairProfitStats profitStats, decimal dailyPnl)
+    {
+        var multiplier = profitStats.CurrentProfitStreak switch
+        {
+            <= 0 => _gridOptions.PairScoreProbationMultiplier,
+            <= 2 => _gridOptions.PairScoreFirstProfitMultiplier,
+            <= 4 => _gridOptions.PairScoreStreak3Multiplier,
+            _ => _gridOptions.PairScoreStreak5Multiplier
+        };
+
+        if (profitStats.LatestClosedSellWasLoss)
+        {
+            multiplier = decimal.Min(multiplier, _gridOptions.PairScoreRecentLossMaxMultiplier);
+        }
+
+        if (dailyPnl < 0m)
+        {
+            multiplier = decimal.Min(multiplier, _gridOptions.PairScoreNegativeDailyMaxMultiplier);
+        }
+
+        return decimal.Max(0m, multiplier);
+    }
+
     private async Task<TopPairGateResult> ResolveTopPairGateAsync(
         BotState state,
         decimal score,
@@ -4666,9 +4660,14 @@ public sealed class GridBotWorker : BackgroundService
             return 0m;
         }
 
-        if (state.DailyRealizedPnl < 0m || profitStats.LatestClosedSellWasLoss)
+        if (profitStats.LatestClosedSellWasLoss)
         {
-            return _gridOptions.NonTopPairMultiplier;
+            return _gridOptions.PairScoreRecentLossMaxMultiplier;
+        }
+
+        if (state.DailyRealizedPnl < 0m)
+        {
+            return _gridOptions.PairScoreNegativeDailyMaxMultiplier;
         }
 
         return profitStats.ProfitableClosedSellCount == 0

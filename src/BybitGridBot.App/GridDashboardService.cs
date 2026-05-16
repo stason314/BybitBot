@@ -898,27 +898,7 @@ public sealed class GridDashboardService : IGridDashboardService
             return 0m;
         }
 
-        var multiplier = score >= 75m
-            ? gridOptions.PairScoreHotMultiplier
-            : score >= 60m
-                ? gridOptions.PairScoreGoodMultiplier
-                : gridOptions.PairScoreNeutralMultiplier;
-        if (profitStats.ProfitableClosedSellCount == 0)
-        {
-            multiplier = decimal.Min(multiplier, gridOptions.PairScoreProbationMultiplier);
-            reasons.Add("probation size until first profitable cycle");
-        }
-        else if (profitStats.ProfitableClosedSellCount == 1 ||
-                 profitStats.CurrentProfitStreak < gridOptions.PairScoreProfitStreakTrades)
-        {
-            multiplier = decimal.Min(multiplier, gridOptions.PairScoreFirstProfitMultiplier);
-            reasons.Add("profit-first size until streak improves");
-        }
-        else
-        {
-            multiplier = decimal.Min(multiplier, gridOptions.PairScoreProfitStreakMultiplier);
-            reasons.Add($"profit streak {profitStats.CurrentProfitStreak}");
-        }
+        var multiplier = ResolveDashboardStreakMultiplier(profitStats, gridOptions, reasons);
 
         if (profitStats.LatestClosedSellWasLoss)
         {
@@ -933,6 +913,39 @@ public sealed class GridDashboardService : IGridDashboardService
         }
 
         return multiplier;
+    }
+
+    private static decimal ResolveDashboardStreakMultiplier(
+        DashboardPairProfitStats profitStats,
+        GridOptions gridOptions,
+        List<string> reasons)
+    {
+        var multiplier = profitStats.CurrentProfitStreak switch
+        {
+            <= 0 => gridOptions.PairScoreProbationMultiplier,
+            <= 2 => gridOptions.PairScoreFirstProfitMultiplier,
+            <= 4 => gridOptions.PairScoreStreak3Multiplier,
+            _ => gridOptions.PairScoreStreak5Multiplier
+        };
+
+        if (profitStats.CurrentProfitStreak <= 0)
+        {
+            reasons.Add("profit streak 0 size");
+        }
+        else if (profitStats.CurrentProfitStreak <= 2)
+        {
+            reasons.Add($"profit streak {profitStats.CurrentProfitStreak} base size");
+        }
+        else if (profitStats.CurrentProfitStreak <= 4)
+        {
+            reasons.Add($"profit streak {profitStats.CurrentProfitStreak} boost");
+        }
+        else
+        {
+            reasons.Add($"profit streak {profitStats.CurrentProfitStreak} max boost");
+        }
+
+        return decimal.Max(0m, multiplier);
     }
 
     private IReadOnlyList<DashboardPairScoreItem> ApplyDashboardTopPairGate(
@@ -998,9 +1011,14 @@ public sealed class GridDashboardService : IGridDashboardService
             return 0m;
         }
 
-        if (candidate.DailyPnl < 0m || candidate.ProfitStats.LatestClosedSellWasLoss)
+        if (candidate.ProfitStats.LatestClosedSellWasLoss)
         {
-            return _defaultGridOptions.NonTopPairMultiplier;
+            return _defaultGridOptions.PairScoreRecentLossMaxMultiplier;
+        }
+
+        if (candidate.DailyPnl < 0m)
+        {
+            return _defaultGridOptions.PairScoreNegativeDailyMaxMultiplier;
         }
 
         return candidate.ProfitStats.ProfitableClosedSellCount == 0

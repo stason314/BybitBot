@@ -110,6 +110,14 @@ public sealed class GridOptions
     [Range(typeof(decimal), "0", "1000")]
     public decimal PairScoreProfitStreakMultiplier { get; init; } = 1.4m;
 
+    [ConfigurationKeyName("PAIR_SCORE_STREAK3_MULTIPLIER")]
+    [Range(typeof(decimal), "0", "1000")]
+    public decimal PairScoreStreak3Multiplier { get; init; } = 1.5m;
+
+    [ConfigurationKeyName("PAIR_SCORE_STREAK5_MULTIPLIER")]
+    [Range(typeof(decimal), "0", "1000")]
+    public decimal PairScoreStreak5Multiplier { get; init; } = 1.8m;
+
     [ConfigurationKeyName("PAIR_SCORE_PROFIT_STREAK_TRADES")]
     [Range(1, 1000)]
     public int PairScoreProfitStreakTrades { get; init; } = 3;

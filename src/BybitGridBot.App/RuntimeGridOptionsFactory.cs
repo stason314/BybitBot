@@ -56,6 +56,8 @@ internal static class RuntimeGridOptionsFactory
             PairScoreProbationMultiplier = defaults.PairScoreProbationMultiplier,
             PairScoreFirstProfitMultiplier = defaults.PairScoreFirstProfitMultiplier,
             PairScoreProfitStreakMultiplier = defaults.PairScoreProfitStreakMultiplier,
+            PairScoreStreak3Multiplier = defaults.PairScoreStreak3Multiplier,
+            PairScoreStreak5Multiplier = defaults.PairScoreStreak5Multiplier,
             PairScoreProfitStreakTrades = defaults.PairScoreProfitStreakTrades,
             PairScoreNegativeDailyMaxMultiplier = defaults.PairScoreNegativeDailyMaxMultiplier,
             PairScoreRecentLossMaxMultiplier = defaults.PairScoreRecentLossMaxMultiplier,
