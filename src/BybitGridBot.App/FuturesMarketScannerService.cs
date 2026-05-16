@@ -208,7 +208,7 @@ public sealed class FuturesMarketScannerService : IFuturesMarketScannerService
         MaxNotionalUsdt = ResolveMaxNotional(),
         MaxMarginUsdt = ResolveMaxMargin(ResolveMaxNotional(), _futuresOptions.Leverage),
         StopLossPercent = 2m,
-        TakeProfitPercent = 4m,
+        TakeProfitPercent = 6m,
         LiquidationBufferPercent = _riskOptions.MinLiquidationBufferPercent,
         ReduceOnlyEnabled = true,
         AggressiveModeEnabled = _futuresOptions.AggressiveModeEnabled,

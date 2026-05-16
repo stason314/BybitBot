@@ -1265,7 +1265,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
       maxNotionalUsdt: 100,
       maxMarginUsdt: 50,
       stopLossPercent: 2,
-      takeProfitPercent: 4,
+      takeProfitPercent: 6,
       liquidationBufferPercent: 15,
       reduceOnlyEnabled: true,
       aggressiveModeEnabled: false,
@@ -3301,6 +3301,10 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         if (request.TakeProfitPercent <= 0m)
         {
             errors.Add("Take profit percent must be positive.");
+        }
+        else if (request.StopLossPercent > 0m && request.TakeProfitPercent < request.StopLossPercent * 3m)
+        {
+            errors.Add("Futures take profit must be at least 3x stop loss for 3:1 risk/reward.");
         }
 
         if (request.LiquidationBufferPercent < 0m)

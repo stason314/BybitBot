@@ -18,6 +18,7 @@ public sealed class FuturesAutoConfigRecommenderTests
         Assert.Equal(FuturesMarginMode.Isolated, recommendation.MarginMode);
         Assert.Equal(FuturesPositionMode.OneWay, recommendation.PositionMode);
         Assert.True(recommendation.ReduceOnlyEnabled);
+        Assert.True(recommendation.TakeProfitPercent >= recommendation.StopLossPercent * 3m);
         Assert.Contains("reduceOnlyOnExit", recommendation.StrategyConfigJson, StringComparison.Ordinal);
     }
 
@@ -100,7 +101,7 @@ public sealed class FuturesAutoConfigRecommenderTests
         MaxNotionalUsdt = 100m,
         MaxMarginUsdt = 50m,
         StopLossPercent = 2m,
-        TakeProfitPercent = 4m,
+        TakeProfitPercent = 6m,
         LiquidationBufferPercent = 15m,
         ReduceOnlyEnabled = true
     };

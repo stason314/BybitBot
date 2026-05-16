@@ -1091,7 +1091,7 @@ public sealed class UpdateFuturesSettingsRequest
 
     public decimal StopLossPercent { get; init; } = 2m;
 
-    public decimal TakeProfitPercent { get; init; } = 4m;
+    public decimal TakeProfitPercent { get; init; } = 6m;
 
     public decimal LiquidationBufferPercent { get; init; } = 15m;
 

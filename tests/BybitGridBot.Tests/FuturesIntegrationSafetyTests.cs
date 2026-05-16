@@ -416,7 +416,7 @@ public sealed class FuturesIntegrationSafetyTests
         MaxNotionalUsdt = 100m,
         MaxMarginUsdt = 50m,
         StopLossPercent = 1m,
-        TakeProfitPercent = 2m,
+        TakeProfitPercent = 3m,
         LiquidationBufferPercent = 15m
     };
 

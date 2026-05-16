@@ -5,6 +5,7 @@ namespace BybitGridBot.Strategy;
 
 public sealed class FuturesAutoConfigRecommender
 {
+    private const decimal MinimumRiskRewardRatio = 3m;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     public FuturesAutoConfigRecommendation Recommend(
@@ -43,7 +44,7 @@ public sealed class FuturesAutoConfigRecommender
 
         var recommendedLeverage = RecommendLeverage(currentSettings.Leverage, atrPercent);
         var stopLossPercent = RecommendStopLoss(currentSettings.StopLossPercent, atrPercent);
-        var takeProfitPercent = decimal.Max(stopLossPercent * 1.8m, currentSettings.TakeProfitPercent);
+        var takeProfitPercent = decimal.Max(stopLossPercent * MinimumRiskRewardRatio, currentSettings.TakeProfitPercent);
         var exposureMultiplier = RecommendExposureMultiplier(atrPercent);
         var modeEntryMultiplier = 1m;
         var maxNotional = decimal.Max(1m, currentSettings.MaxNotionalUsdt);
@@ -164,7 +165,7 @@ public sealed class FuturesAutoConfigRecommender
         var resolvedMaxNotional = decimal.Max(1m, maxNotionalUsdt ?? currentSettings.MaxNotionalUsdt);
         var resolvedMaxMargin = decimal.Max(1m, maxMarginUsdt ?? currentSettings.MaxMarginUsdt);
         var resolvedStopLoss = decimal.Max(0.1m, stopLossPercent ?? currentSettings.StopLossPercent);
-        var resolvedTakeProfit = decimal.Max(resolvedStopLoss, takeProfitPercent ?? currentSettings.TakeProfitPercent);
+        var resolvedTakeProfit = decimal.Max(resolvedStopLoss * MinimumRiskRewardRatio, takeProfitPercent ?? currentSettings.TakeProfitPercent);
 
         return new FuturesAutoConfigRecommendation
         {
