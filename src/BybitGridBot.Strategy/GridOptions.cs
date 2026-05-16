@@ -86,6 +86,14 @@ public sealed class GridOptions
     [Range(typeof(decimal), "0.00000001", "1000")]
     public decimal PairScoreAvoidMultiplier { get; init; } = 0.5m;
 
+    [ConfigurationKeyName("PAIR_SCORE_GLOBAL_ACTIVE_BUY_CAP_USDT")]
+    [Range(typeof(decimal), "0", "999999999")]
+    public decimal PairScoreGlobalActiveBuyCapUsdt { get; init; } = 0m;
+
+    [ConfigurationKeyName("PAIR_SCORE_MAX_HOT_PAIRS")]
+    [Range(0, 1000)]
+    public int PairScoreMaxHotPairs { get; init; } = 5;
+
     [ConfigurationKeyName("STOP_LOWER_PRICE")]
     public decimal StopLowerPrice { get; init; } = 0.09m;
 

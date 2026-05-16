@@ -4372,6 +4372,44 @@ public sealed class GridBotWorker : BackgroundService
                     ? _gridOptions.PairScoreNeutralMultiplier
                     : _gridOptions.PairScoreAvoidMultiplier;
 
+        if (score >= 75m && _gridOptions.PairScoreMaxHotPairs > 0)
+        {
+            var hotRank = await GetPairScoreRankAsync(score, cancellationToken);
+            if (hotRank > _gridOptions.PairScoreMaxHotPairs)
+            {
+                multiplier = decimal.Min(multiplier, 1m);
+                _logger.LogInformation(
+                    "Pair score boost skipped for {Symbol}: Hot rank {Rank} is outside top {MaxHotPairs}.",
+                    _gridOptions.Symbol,
+                    hotRank,
+                    _gridOptions.PairScoreMaxHotPairs);
+            }
+        }
+
+        if (_gridOptions.PairScoreGlobalActiveBuyCapUsdt > 0m)
+        {
+            var activeBuyNotional = await CalculateGlobalActiveBuyNotionalAsync(cancellationToken);
+            if (activeBuyNotional >= _gridOptions.PairScoreGlobalActiveBuyCapUsdt)
+            {
+                await RecordNoTradeReasonAsync(
+                    ResolveCurrentProfile(),
+                    NoTradeReason.CapitalRejected,
+                    $"PAIR_SCORE_GLOBAL_ACTIVE_BUY_CAP_USDT reached. Active buy notional={activeBuyNotional:0.####}, cap={_gridOptions.PairScoreGlobalActiveBuyCapUsdt:0.####}.",
+                    cancellationToken);
+                _logger.LogInformation(
+                    "Pair score capital cap blocks new buy sizing for {Symbol}. Active buy notional: {ActiveBuyNotional}, cap: {Cap}.",
+                    _gridOptions.Symbol,
+                    activeBuyNotional,
+                    _gridOptions.PairScoreGlobalActiveBuyCapUsdt);
+                return 0m;
+            }
+
+            if (activeBuyNotional > 0m && activeBuyNotional >= _gridOptions.PairScoreGlobalActiveBuyCapUsdt * 0.8m)
+            {
+                multiplier = decimal.Min(multiplier, 1m);
+            }
+        }
+
         if (multiplier != 1m)
         {
             _logger.LogInformation(
@@ -4386,6 +4424,48 @@ public sealed class GridBotWorker : BackgroundService
 
     private static decimal ApplyPairScoreOrderSizeMultiplier(decimal orderSizeUsdt, decimal multiplier) =>
         decimal.Max(0m, orderSizeUsdt * decimal.Max(0m, multiplier));
+
+    private async Task<int> GetPairScoreRankAsync(decimal currentScore, CancellationToken cancellationToken)
+    {
+        var profiles = await _repository.GetRuntimeSettingsProfilesAsync(cancellationToken);
+        var higherRankedCount = 0;
+        foreach (var profile in profiles.Where(profile =>
+                     string.Equals(profile.Category, "spot", StringComparison.OrdinalIgnoreCase) &&
+                     !string.Equals(profile.Symbol, _gridOptions.Symbol, StringComparison.OrdinalIgnoreCase)))
+        {
+            var state = await _repository.GetBotStateAsync(profile.Symbol, cancellationToken);
+            if (state is null)
+            {
+                continue;
+            }
+
+            var orders = await _repository.GetOrdersAsync(profile.Symbol, cancellationToken);
+            var lastNoTradeReason = (await _repository.GetNoTradeReasonsAsync(profile.Symbol, 1, cancellationToken)).FirstOrDefault();
+            var score = CalculateCapitalPairScore(state, orders, lastNoTradeReason);
+            if (score > currentScore ||
+                (score == currentScore && string.Compare(profile.Symbol, _gridOptions.Symbol, StringComparison.OrdinalIgnoreCase) < 0))
+            {
+                higherRankedCount++;
+            }
+        }
+
+        return higherRankedCount + 1;
+    }
+
+    private async Task<decimal> CalculateGlobalActiveBuyNotionalAsync(CancellationToken cancellationToken)
+    {
+        var profiles = await _repository.GetRuntimeSettingsProfilesAsync(cancellationToken);
+        var activeBuyNotional = 0m;
+        foreach (var profile in profiles.Where(profile => string.Equals(profile.Category, "spot", StringComparison.OrdinalIgnoreCase)))
+        {
+            var activeOrders = await _repository.GetActiveOrdersAsync(profile.Symbol, cancellationToken);
+            activeBuyNotional += activeOrders
+                .Where(order => order.Side == TradeSide.Buy)
+                .Sum(order => Math.Max(0m, order.Quantity - order.FilledQuantity) * order.Price);
+        }
+
+        return activeBuyNotional;
+    }
 
     private static decimal CalculateCapitalPairScore(
         BotState state,
@@ -4459,6 +4539,7 @@ public sealed class GridBotWorker : BackgroundService
         NoTradeReason.HighVolatility => 20m,
         NoTradeReason.MaxPositionReached => 15m,
         NoTradeReason.PriceOutsideRange => 12m,
+        NoTradeReason.UnparentedSellCleanup => 12m,
         NoTradeReason.ExpectedProfitTooLow => 10m,
         NoTradeReason.ScoreTooLow => 8m,
         NoTradeReason.UnknownMarketPhase => 6m,
