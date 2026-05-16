@@ -60,9 +60,9 @@ public sealed class FuturesTrendFollowLongOnly : IFuturesStrategy
             return FuturesStrategyDecision.Empty("Futures trend-follow market data unavailable.");
         }
 
-        if (FuturesLongOnlySignals.ShouldCloseOpenLong(context, signal))
+        if (FuturesLongOnlySignals.TryResolveCloseOpenLongReason(context, signal, out var closeReason))
         {
-            return FuturesLongOnlySignals.CloseLong(context, "exit-signal");
+            return FuturesLongOnlySignals.CloseLong(context, closeReason);
         }
 
         if (FuturesLongOnlySignals.ShouldTakePartialProfit(context, signal))
@@ -97,9 +97,9 @@ public sealed class FuturesBreakoutLongOnly : IFuturesStrategy
             return FuturesStrategyDecision.Empty("Futures breakout market data unavailable.");
         }
 
-        if (FuturesLongOnlySignals.ShouldCloseOpenLong(context, signal))
+        if (FuturesLongOnlySignals.TryResolveCloseOpenLongReason(context, signal, out var closeReason))
         {
-            return FuturesLongOnlySignals.CloseLong(context, "exit-signal");
+            return FuturesLongOnlySignals.CloseLong(context, closeReason);
         }
 
         if (FuturesLongOnlySignals.ShouldTakePartialProfit(context, signal))
@@ -134,9 +134,9 @@ public sealed class FuturesGridLongOnly : IFuturesStrategy
             return FuturesStrategyDecision.Empty("Futures grid market data unavailable.");
         }
 
-        if (FuturesLongOnlySignals.ShouldCloseOpenLong(context, signal))
+        if (FuturesLongOnlySignals.TryResolveCloseOpenLongReason(context, signal, out var closeReason))
         {
-            return FuturesLongOnlySignals.CloseLong(context, "exit-signal");
+            return FuturesLongOnlySignals.CloseLong(context, closeReason);
         }
 
         if (FuturesLongOnlySignals.ShouldTakePartialProfit(context, signal))
@@ -172,9 +172,9 @@ public sealed class FuturesTrendFollowShortOnly : IFuturesStrategy
             return FuturesStrategyDecision.Empty("Futures short trend-follow market data unavailable.");
         }
 
-        if (FuturesShortOnlySignals.ShouldCloseOpenShort(context, signal))
+        if (FuturesShortOnlySignals.TryResolveCloseOpenShortReason(context, signal, out var closeReason))
         {
-            return FuturesShortOnlySignals.CloseShort(context, "exit-signal");
+            return FuturesShortOnlySignals.CloseShort(context, closeReason);
         }
 
         if (FuturesShortOnlySignals.ShouldTakePartialProfit(context, signal))
@@ -209,9 +209,9 @@ public sealed class FuturesBreakdownShortOnly : IFuturesStrategy
             return FuturesStrategyDecision.Empty("Futures breakdown market data unavailable.");
         }
 
-        if (FuturesShortOnlySignals.ShouldCloseOpenShort(context, signal))
+        if (FuturesShortOnlySignals.TryResolveCloseOpenShortReason(context, signal, out var closeReason))
         {
-            return FuturesShortOnlySignals.CloseShort(context, "exit-signal");
+            return FuturesShortOnlySignals.CloseShort(context, closeReason);
         }
 
         if (FuturesShortOnlySignals.ShouldTakePartialProfit(context, signal))
@@ -246,9 +246,9 @@ public sealed class FuturesGridShortOnly : IFuturesStrategy
             return FuturesStrategyDecision.Empty("Futures short grid market data unavailable.");
         }
 
-        if (FuturesShortOnlySignals.ShouldCloseOpenShort(context, signal))
+        if (FuturesShortOnlySignals.TryResolveCloseOpenShortReason(context, signal, out var closeReason))
         {
-            return FuturesShortOnlySignals.CloseShort(context, "exit-signal");
+            return FuturesShortOnlySignals.CloseShort(context, closeReason);
         }
 
         if (FuturesShortOnlySignals.ShouldTakePartialProfit(context, signal))
@@ -294,8 +294,12 @@ internal static class FuturesLongOnlySignals
         return true;
     }
 
-    public static bool ShouldCloseOpenLong(FuturesStrategyContext context, FuturesLongOnlySignal signal)
+    public static bool TryResolveCloseOpenLongReason(
+        FuturesStrategyContext context,
+        FuturesLongOnlySignal signal,
+        out string reason)
     {
+        reason = string.Empty;
         if (context.Position.Size <= 0m || !IsLong(context.Position.Side))
         {
             return false;
@@ -303,9 +307,25 @@ internal static class FuturesLongOnlySignals
 
         var stopPrice = context.Position.EntryPrice * (1m - context.Settings.StopLossPercent / 100m);
         var takeProfitPrice = context.Position.EntryPrice * (1m + context.Settings.TakeProfitPercent / 100m);
-        return context.CurrentPrice <= stopPrice ||
-            context.CurrentPrice >= takeProfitPrice ||
-            signal.MovePercent < -1m;
+        if (context.CurrentPrice <= stopPrice)
+        {
+            reason = "stop-loss";
+            return true;
+        }
+
+        if (context.CurrentPrice >= takeProfitPrice)
+        {
+            reason = "take-profit";
+            return true;
+        }
+
+        if (signal.MovePercent < -1m)
+        {
+            reason = "exit-signal";
+            return true;
+        }
+
+        return false;
     }
 
     public static bool ShouldTakePartialProfit(FuturesStrategyContext context, FuturesLongOnlySignal signal)
@@ -438,8 +458,12 @@ internal static class FuturesShortOnlySignals
     public static bool TryAnalyze(FuturesStrategyContext context, out FuturesLongOnlySignal signal) =>
         FuturesLongOnlySignals.TryAnalyze(context, out signal);
 
-    public static bool ShouldCloseOpenShort(FuturesStrategyContext context, FuturesLongOnlySignal signal)
+    public static bool TryResolveCloseOpenShortReason(
+        FuturesStrategyContext context,
+        FuturesLongOnlySignal signal,
+        out string reason)
     {
+        reason = string.Empty;
         if (context.Position.Size <= 0m || !IsShort(context.Position.Side))
         {
             return false;
@@ -447,9 +471,25 @@ internal static class FuturesShortOnlySignals
 
         var stopPrice = context.Position.EntryPrice * (1m + context.Settings.StopLossPercent / 100m);
         var takeProfitPrice = context.Position.EntryPrice * (1m - context.Settings.TakeProfitPercent / 100m);
-        return context.CurrentPrice >= stopPrice ||
-            context.CurrentPrice <= takeProfitPrice ||
-            signal.MovePercent > 1m;
+        if (context.CurrentPrice >= stopPrice)
+        {
+            reason = "stop-loss";
+            return true;
+        }
+
+        if (context.CurrentPrice <= takeProfitPrice)
+        {
+            reason = "take-profit";
+            return true;
+        }
+
+        if (signal.MovePercent > 1m)
+        {
+            reason = "exit-signal";
+            return true;
+        }
+
+        return false;
     }
 
     public static bool ShouldTakePartialProfit(FuturesStrategyContext context, FuturesLongOnlySignal signal)

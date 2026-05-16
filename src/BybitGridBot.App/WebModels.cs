@@ -536,11 +536,25 @@ public sealed class FuturesMarketScanItem
 
     public decimal Resistance { get; init; }
 
+    public decimal StrategyFitScore { get; init; }
+
+    public required string StrategyFitName { get; init; }
+
     public decimal GridFitScore { get; init; }
 
     public decimal TrendFitScore { get; init; }
 
     public decimal BreakoutFitScore { get; init; }
+
+    public decimal GridLongFitScore { get; init; }
+
+    public decimal GridShortFitScore { get; init; }
+
+    public decimal TrendLongFitScore { get; init; }
+
+    public decimal TrendShortFitScore { get; init; }
+
+    public decimal BreakdownFitScore { get; init; }
 
     public required IReadOnlyList<string> Reasons { get; init; }
 

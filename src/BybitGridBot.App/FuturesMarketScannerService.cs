@@ -139,12 +139,19 @@ public sealed class FuturesMarketScannerService : IFuturesMarketScannerService
             ? 0.1875m
             : 0.25m;
         var entryNotional = decimal.Round(decimal.Min(maxNotional, maxNotional * entryMultiplier), 4, MidpointRounding.AwayFromZero);
-        var reasons = new List<string>(fit.Reasons);
-        ScoreSpread(spreadPercent, reasons, out var spreadScore);
-        ScoreVolume(volume6hUsdt, ticker.Turnover24h, reasons, out var volumeScore);
-        ScoreVolatility(atrPercent, volatilityPercent, reasons, out var volatilityScore);
         var fitScore = ResolveBestFitScore(fit, strategy);
-        var score = Math.Clamp(decimal.Round(fitScore * 0.55m + spreadScore + volumeScore + volatilityScore, 2, MidpointRounding.AwayFromZero), 0m, 100m);
+        var reasons = new List<string>(fit.Reasons);
+        var score = 50m;
+        ScoreSpread(spreadPercent, ref score, reasons);
+        ScoreVolume(volume6hUsdt, ticker.Turnover24h, ref score, reasons);
+        ScoreVolatility(atrPercent, volatilityPercent, ref score, reasons);
+        ScoreMomentum(momentumPercent, strategy, ref score, reasons);
+        ScoreRangeQuality(fit, strategy, volatilityPercent, momentumPercent, ref score, reasons);
+        ScoreRecommendationAlignment(recommendation, strategy, direction, ref score, reasons);
+        ScoreStrategyFit(strategy, fitScore, ref score, reasons);
+        ScoreDirectionalRisk(ordered, momentumPercent, strategy, ref score, reasons);
+        ScoreMinimumOrder(instrument, maxNotional, ref score, reasons);
+        score = Math.Clamp(decimal.Round(score, 2, MidpointRounding.AwayFromZero), 0m, 100m);
         var label = ResolveLabel(score, strategy);
         var settings = BuildSettings(
             instrument.Symbol,
@@ -175,9 +182,16 @@ public sealed class FuturesMarketScannerService : IFuturesMarketScannerService
             Volume6hUsdt = decimal.Round(volume6hUsdt, 2, MidpointRounding.AwayFromZero),
             Support = decimal.Round(support, 8, MidpointRounding.AwayFromZero),
             Resistance = decimal.Round(resistance, 8, MidpointRounding.AwayFromZero),
-            GridFitScore = decimal.Max(fit.GridLongOnlyScore, fit.GridShortOnlyScore),
-            TrendFitScore = decimal.Max(fit.TrendFollowScore, fit.TrendFollowShortOnlyScore),
-            BreakoutFitScore = decimal.Max(fit.BreakoutScore, fit.BreakdownShortScore),
+            StrategyFitScore = decimal.Round(fitScore, 2, MidpointRounding.AwayFromZero),
+            StrategyFitName = strategy.ToString(),
+            GridFitScore = decimal.Round(decimal.Max(fit.GridLongOnlyScore, fit.GridShortOnlyScore), 2, MidpointRounding.AwayFromZero),
+            TrendFitScore = decimal.Round(decimal.Max(fit.TrendFollowScore, fit.TrendFollowShortOnlyScore), 2, MidpointRounding.AwayFromZero),
+            BreakoutFitScore = decimal.Round(decimal.Max(fit.BreakoutScore, fit.BreakdownShortScore), 2, MidpointRounding.AwayFromZero),
+            GridLongFitScore = decimal.Round(fit.GridLongOnlyScore, 2, MidpointRounding.AwayFromZero),
+            GridShortFitScore = decimal.Round(fit.GridShortOnlyScore, 2, MidpointRounding.AwayFromZero),
+            TrendLongFitScore = decimal.Round(fit.TrendFollowScore, 2, MidpointRounding.AwayFromZero),
+            TrendShortFitScore = decimal.Round(fit.TrendFollowShortOnlyScore, 2, MidpointRounding.AwayFromZero),
+            BreakdownFitScore = decimal.Round(fit.BreakdownShortScore, 2, MidpointRounding.AwayFromZero),
             Reasons = reasons,
             Settings = settings
         };
@@ -344,6 +358,13 @@ public sealed class FuturesMarketScannerService : IFuturesMarketScannerService
         EntryNotionalUsdt = 0m,
         LastPrice = ticker.LastPrice,
         SpreadPercent = CalculateSpreadPercent(ticker),
+        StrategyFitScore = 0m,
+        StrategyFitName = "Pause",
+        GridLongFitScore = 0m,
+        GridShortFitScore = 0m,
+        TrendLongFitScore = 0m,
+        TrendShortFitScore = 0m,
+        BreakdownFitScore = 0m,
         Reasons = [reason],
         Settings = new UpdateFuturesSettingsRequest
         {
@@ -355,65 +376,249 @@ public sealed class FuturesMarketScannerService : IFuturesMarketScannerService
         }
     };
 
-    private static void ScoreSpread(decimal spreadPercent, List<string> reasons, out decimal score)
+    private static void ScoreSpread(decimal spreadPercent, ref decimal score, List<string> reasons)
     {
         if (spreadPercent <= 0.05m)
         {
-            score = 14m;
+            score += 14m;
             reasons.Add($"spread tight {spreadPercent:0.###}%");
             return;
         }
 
         if (spreadPercent <= 0.15m)
         {
-            score = 5m;
+            score += 5m;
             reasons.Add($"spread acceptable {spreadPercent:0.###}%");
             return;
         }
 
-        score = -25m;
+        score -= 25m;
         reasons.Add($"spread wide {spreadPercent:0.###}%");
     }
 
-    private static void ScoreVolume(decimal volume6hUsdt, decimal turnover24h, List<string> reasons, out decimal score)
+    private static void ScoreVolume(decimal volume6hUsdt, decimal turnover24h, ref decimal score, List<string> reasons)
     {
         if (volume6hUsdt >= 1_000_000m || turnover24h >= 5_000_000m)
         {
-            score = 14m;
+            score += 14m;
             reasons.Add($"volume strong ${volume6hUsdt:0}");
             return;
         }
 
         if (volume6hUsdt >= 100_000m)
         {
-            score = 6m;
+            score += 6m;
             reasons.Add($"volume ok ${volume6hUsdt:0}");
             return;
         }
 
-        score = -12m;
+        score -= 12m;
         reasons.Add($"volume weak ${volume6hUsdt:0}");
     }
 
-    private static void ScoreVolatility(decimal atrPercent, decimal volatilityPercent, List<string> reasons, out decimal score)
+    private static void ScoreVolatility(decimal atrPercent, decimal volatilityPercent, ref decimal score, List<string> reasons)
     {
         if (atrPercent is >= 0.08m and <= 1.5m && volatilityPercent is >= 0.8m and <= 14m)
         {
-            score = 12m;
+            score += 12m;
             reasons.Add($"volatility tradable ATR {atrPercent:0.###}%");
             return;
         }
 
         if (atrPercent > 2m || volatilityPercent > 18m)
         {
-            score = -16m;
+            score -= 16m;
             reasons.Add($"volatility dangerous {volatilityPercent:0.##}%");
             return;
         }
 
-        score = -5m;
+        score -= 5m;
         reasons.Add($"volatility weak ATR {atrPercent:0.###}%");
     }
+
+    private static void ScoreMomentum(
+        decimal momentumPercent,
+        FuturesStrategyType strategy,
+        ref decimal score,
+        List<string> reasons)
+    {
+        var directionalMomentum = IsShortStrategy(strategy) ? -momentumPercent : momentumPercent;
+        if (strategy is FuturesStrategyType.GridLongOnly or FuturesStrategyType.GridShortOnly)
+        {
+            if (Math.Abs(momentumPercent) <= 4m)
+            {
+                score += 6m;
+                reasons.Add($"grid momentum contained {momentumPercent:0.##}%");
+            }
+            else
+            {
+                score -= 10m;
+                reasons.Add($"grid momentum stretched {momentumPercent:0.##}%");
+            }
+
+            return;
+        }
+
+        if (directionalMomentum is >= 0.4m and <= 6m)
+        {
+            score += 8m;
+            reasons.Add($"directional momentum {directionalMomentum:0.##}%");
+        }
+        else if (directionalMomentum > 9m)
+        {
+            score -= 8m;
+            reasons.Add($"directional move extended {directionalMomentum:0.##}%");
+        }
+        else if (directionalMomentum <= -0.8m)
+        {
+            score -= 12m;
+            reasons.Add($"momentum against strategy {directionalMomentum:0.##}%");
+        }
+    }
+
+    private static void ScoreRangeQuality(
+        FuturesStrategyFitResult fit,
+        FuturesStrategyType strategy,
+        decimal volatilityPercent,
+        decimal momentumPercent,
+        ref decimal score,
+        List<string> reasons)
+    {
+        if (strategy is FuturesStrategyType.GridLongOnly or FuturesStrategyType.GridShortOnly)
+        {
+            if (fit.RangePercent >= 1m &&
+                fit.MeanReversionCrosses >= 6 &&
+                Math.Abs(momentumPercent) <= decimal.Max(0.75m, fit.RangePercent * 0.55m))
+            {
+                score += 10m;
+                reasons.Add("grid range quality strong");
+            }
+            else if (fit.MaxDirectionalStreak >= 7)
+            {
+                score -= 10m;
+                reasons.Add($"grid directional streak risk {fit.MaxDirectionalStreak}");
+            }
+
+            return;
+        }
+
+        if (volatilityPercent >= 1m && fit.MaxDirectionalStreak >= 3)
+        {
+            score += 5m;
+            reasons.Add("trend structure visible");
+        }
+    }
+
+    private static void ScoreRecommendationAlignment(
+        FuturesAutoConfigRecommendation recommendation,
+        FuturesStrategyType strategy,
+        FuturesDirection direction,
+        ref decimal score,
+        List<string> reasons)
+    {
+        if (recommendation.StrategyType is FuturesStrategyType.Pause)
+        {
+            score -= 25m;
+            reasons.Add("auto selector Pause");
+            return;
+        }
+
+        if (recommendation.StrategyType == strategy && recommendation.Direction == direction)
+        {
+            score += 10m;
+            reasons.Add($"auto selector agrees {strategy}");
+            return;
+        }
+
+        if (recommendation.Direction != direction)
+        {
+            score -= 8m;
+            reasons.Add($"auto selector direction mismatch {recommendation.Direction}");
+            return;
+        }
+
+        score += 3m;
+        reasons.Add($"auto selector same direction {recommendation.StrategyType}");
+    }
+
+    private static void ScoreStrategyFit(
+        FuturesStrategyType strategy,
+        decimal fitScore,
+        ref decimal score,
+        List<string> reasons)
+    {
+        if (fitScore >= 75m)
+        {
+            score += 20m;
+            reasons.Add($"{strategy} candle fit strong {fitScore:0}");
+        }
+        else if (fitScore >= 60m)
+        {
+            score += 10m;
+            reasons.Add($"{strategy} candle fit good {fitScore:0}");
+        }
+        else if (fitScore >= 45m)
+        {
+            reasons.Add($"{strategy} candle fit neutral {fitScore:0}");
+        }
+        else if (fitScore >= 30m)
+        {
+            score -= 12m;
+            reasons.Add($"{strategy} candle fit weak {fitScore:0}");
+        }
+        else
+        {
+            score -= 25m;
+            reasons.Add($"{strategy} candle fit poor {fitScore:0}");
+        }
+    }
+
+    private static void ScoreDirectionalRisk(
+        IReadOnlyList<Candle> candles,
+        decimal momentumPercent,
+        FuturesStrategyType strategy,
+        ref decimal score,
+        List<string> reasons)
+    {
+        var last = candles[^1];
+        var lastMove = last.Open > 0m ? (last.Close - last.Open) / last.Open * 100m : 0m;
+        if (IsShortStrategy(strategy))
+        {
+            if (lastMove >= 2.5m || momentumPercent >= 8m)
+            {
+                score -= 25m;
+                reasons.Add($"short squeeze risk last {lastMove:0.##}%");
+            }
+
+            return;
+        }
+
+        if (lastMove <= -2.5m || momentumPercent <= -8m)
+        {
+            score -= 25m;
+            reasons.Add($"long dump risk last {lastMove:0.##}%");
+        }
+    }
+
+    private static void ScoreMinimumOrder(
+        BybitInstrumentInfo instrument,
+        decimal maxNotional,
+        ref decimal score,
+        List<string> reasons)
+    {
+        if (instrument.MinOrderAmount <= 0m || instrument.MinOrderAmount <= maxNotional)
+        {
+            score += 4m;
+            reasons.Add("minimum order fits profile");
+            return;
+        }
+
+        score -= 40m;
+        reasons.Add($"minimum order {instrument.MinOrderAmount:0.####} exceeds max notional {maxNotional:0.####}");
+    }
+
+    private static bool IsShortStrategy(FuturesStrategyType strategy) =>
+        strategy is FuturesStrategyType.GridShortOnly or FuturesStrategyType.TrendFollowShortOnly or FuturesStrategyType.BreakdownShort;
 
     private static string ResolveLabel(decimal score, FuturesStrategyType strategyType)
     {

@@ -987,6 +987,26 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
     tr[data-symbol] { cursor: pointer; }
     tr.selected { background: rgba(23,102,78,0.08); }
     .table-wrap { overflow: auto; }
+    .futures-market-scan-table-wrap {
+      --futures-market-scan-row-height: 72px;
+      max-height: calc(44px + (var(--futures-market-scan-row-height) * 6));
+      overflow: auto;
+      overscroll-behavior: contain;
+    }
+    .futures-market-scan-table-wrap th {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      background: var(--panel);
+      box-shadow: 0 1px 0 rgba(32,35,31,0.1);
+    }
+    .futures-market-scan-table-wrap th,
+    .futures-market-scan-table-wrap td {
+      padding: 10px 8px;
+    }
+    .futures-market-scan-table-wrap tbody tr {
+      height: var(--futures-market-scan-row-height);
+    }
     .status { min-height: 22px; color: var(--muted); margin-top: 12px; }
     .status.ok { color: var(--accent); }
     .status.error { color: var(--danger); }
@@ -1137,11 +1157,11 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         </div>
       </div>
       <div class="status" id="futuresMarketScanStatus">Scanner has not run yet.</div>
-      <div class="table-wrap">
+      <div class="table-wrap futures-market-scan-table-wrap">
         <table>
           <thead>
             <tr>
-              <th>Symbol</th><th>Score</th><th>Strategy</th><th>Entry</th><th>Price</th><th>ATR</th><th>Fit Grid / Trend / BO</th><th>6h Volume</th><th>Support / Resistance</th><th>Reasons</th><th>Action</th>
+              <th>Symbol</th><th>Score</th><th>Strategy</th><th>Fit</th><th>Entry</th><th>Price</th><th>ATR</th><th>6h Volume</th><th>Support / Resistance</th><th>Reasons</th><th>Action</th>
             </tr>
           </thead>
           <tbody id="futuresMarketScanRows"></tbody>
@@ -1382,10 +1402,12 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
                 <td><strong>${escapeHtml(item.symbol)}</strong><br><span class="subtle">${escapeHtml(item.category)}</span></td>
                 <td><strong>${formatNumber(item.score)}</strong><br><span class="subtle">${escapeHtml(item.label)}</span></td>
                 <td>${escapeHtml(item.recommendedStrategy)}<br><span class="subtle">${escapeHtml(item.recommendedDirection)}</span></td>
+                <td title="Grid L/S ${formatNumber(item.gridLongFitScore)} / ${formatNumber(item.gridShortFitScore)}; Trend L/S ${formatNumber(item.trendLongFitScore)} / ${formatNumber(item.trendShortFitScore)}; BO/BD ${formatNumber(item.breakoutFitScore)} / ${formatNumber(item.breakdownFitScore)}">
+                  <strong>${formatNumber(item.strategyFitScore)}</strong><br><span class="subtle">${escapeHtml(item.strategyFitName || 'Fit')}</span>
+                </td>
                 <td>${formatNumber(item.entryNotionalUsdt)} USDT</td>
                 <td>${formatNumber(item.lastPrice)}</td>
                 <td>${formatNumber(item.atrPercent)}%</td>
-                <td>${formatNumber(item.gridFitScore)} / ${formatNumber(item.trendFitScore)} / ${formatNumber(item.breakoutFitScore)}</td>
                 <td>${formatNumber(item.volume6hUsdt)}</td>
                 <td>${formatNumber(item.support)} / ${formatNumber(item.resistance)}</td>
                 <td>${escapeHtml((item.reasons || []).join('; '))}</td>
