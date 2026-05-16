@@ -146,6 +146,50 @@ public sealed class FuturesRiskManagerTests
         Assert.True(decision.IsAllowed);
     }
 
+    [Fact]
+    public void Evaluate_BlocksOppositeShortExposureInOneWayMode()
+    {
+        var decision = new FuturesRiskManager().Evaluate(Context(
+            position: new FuturesPositionSnapshot
+            {
+                Symbol = "BTCUSDT",
+                Category = "linear",
+                Side = "Buy",
+                Size = 0.01m,
+                EntryPrice = 50000m,
+                MarkPrice = 50000m,
+                PositionValueUsdt = 500m,
+                MarginUsedUsdt = 250m,
+                Leverage = 2m
+            },
+            intent: Intent(action: FuturesTradeAction.OpenShort, liquidationPrice: 75000m)));
+
+        Assert.False(decision.IsAllowed);
+        Assert.Contains("opposite exposure", decision.Reason, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Evaluate_BlocksCloseShortAgainstLongPosition()
+    {
+        var decision = new FuturesRiskManager().Evaluate(Context(
+            position: new FuturesPositionSnapshot
+            {
+                Symbol = "BTCUSDT",
+                Category = "linear",
+                Side = "Buy",
+                Size = 0.01m,
+                EntryPrice = 50000m,
+                MarkPrice = 50000m,
+                PositionValueUsdt = 500m,
+                MarginUsedUsdt = 250m,
+                Leverage = 2m
+            },
+            intent: Intent(action: FuturesTradeAction.CloseShort, quantity: 0.01m, stopLossPrice: null)));
+
+        Assert.False(decision.IsAllowed);
+        Assert.Contains("CloseShort", decision.Reason, StringComparison.Ordinal);
+    }
+
     private static FuturesRiskEvaluationContext Context(
         FuturesRiskOptions? riskOptions = null,
         FuturesTradeIntent? intent = null,
