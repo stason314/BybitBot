@@ -33,6 +33,8 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
     [
         nameof(FuturesTradeAction.OpenLong),
         nameof(FuturesTradeAction.CloseLong),
+        nameof(FuturesTradeAction.OpenShort),
+        nameof(FuturesTradeAction.CloseShort),
         nameof(FuturesTradeAction.ReduceOnlyClose)
     ];
 
@@ -1392,11 +1394,13 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         `<span class="chip">${data.futuresEnabled ? 'Futures enabled' : 'Futures disabled'}</span>`,
         `<span class="chip">${data.settings.enabled ? 'Profile enabled' : 'Profile disabled'}</span>`,
         `<span class="chip">${runtime.envEmergencyPauseEnabled ? 'Env emergency pause' : 'Env pause off'}</span>`,
+        `<span class="chip">${runtime.autoApplyRecommendationEnabled ? 'Auto apply on' : 'Auto apply off'}</span>`,
         `<span class="chip">${runtime.profilePaused ? 'Profile paused' : 'Profile running'}</span>`,
         `<span class="chip">${preflight ? escapeHtml(preflight.isAllowed ? 'Preflight ok' : 'Preflight blocked') : 'No preflight'}</span>`
       ].join('');
       byId('runtimeGuardStats').innerHTML = [
         ['Pause Reason', runtime.pauseReason || '-'],
+        ['Auto Apply Recommendation', runtime.autoApplyRecommendationEnabled ? 'On' : 'Off'],
         ['Daily PnL / Max Loss', `${formatPnl(runtime.dailyRealizedPnl)} / ${formatNumber(runtime.maxDailyLossUsdt)} (${formatNumber(runtime.maxDailyLossEquityPercent)}%)`],
         ['Peak Equity', formatNumber(runtime.peakEquityUsdt)],
         ['Drawdown', `${formatPnl(-Math.abs(Number(runtime.currentDrawdownUsdt || 0)))} / ${formatPnl(-Math.abs(Number(runtime.currentDrawdownPercent || 0)))}%`],
@@ -2133,7 +2137,9 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
 
     private static bool IsNoTradeDecision(string source) =>
         string.Equals(source, "AggressiveNoTrade", StringComparison.OrdinalIgnoreCase) ||
-        string.Equals(source, "StrategyNoTrade", StringComparison.OrdinalIgnoreCase);
+        string.Equals(source, "StrategyNoTrade", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(source, "PositionStrategyGuard", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(source, "AutoRecommendationSkipped", StringComparison.OrdinalIgnoreCase);
 
     private static bool IsProtectionDecision(string source) =>
         string.Equals(source, "ProtectionVerify", StringComparison.OrdinalIgnoreCase) ||
@@ -2292,6 +2298,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         return new FuturesRuntimeControlsView
         {
             EnvEmergencyPauseEnabled = _riskOptions.EmergencyPause,
+            AutoApplyRecommendationEnabled = _futuresOptions.AutoApplyRecommendation,
             ProfilePaused = state?.IsPaused ?? false,
             PauseReason = state?.PauseReason ?? "-",
             DailyRealizedPnl = state?.DailyRealizedPnl ?? 0m,

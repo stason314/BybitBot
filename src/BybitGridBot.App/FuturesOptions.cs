@@ -45,6 +45,9 @@ public sealed class FuturesOptions
     [ConfigurationKeyName("FUTURES_AGGRESSIVE_MODE_ENABLED")]
     public bool AggressiveModeEnabled { get; init; } = false;
 
+    [ConfigurationKeyName("FUTURES_AUTO_APPLY_RECOMMENDATION")]
+    public bool AutoApplyRecommendation { get; init; } = false;
+
     [ConfigurationKeyName("FUTURES_AGGRESSIVE_MODE_KIND")]
     public string AggressiveModeKind { get; init; } = "normal";
 

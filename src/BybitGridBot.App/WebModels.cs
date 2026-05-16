@@ -566,6 +566,8 @@ public sealed class FuturesRuntimeControlsView
 {
     public bool EnvEmergencyPauseEnabled { get; init; }
 
+    public bool AutoApplyRecommendationEnabled { get; init; }
+
     public bool ProfilePaused { get; init; }
 
     public string PauseReason { get; init; } = "-";
