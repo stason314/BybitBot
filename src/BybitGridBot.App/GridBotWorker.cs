@@ -3884,6 +3884,11 @@ public sealed class GridBotWorker : BackgroundService
                 pnlDelta);
         }
 
+        await RecordNoTradeReasonAsync(
+            profile,
+            NoTradeReason.ScoreTooLow,
+            $"Pair score penalty active after loss sell {order.OrderLinkId}. Realized PnL delta: {pnlDelta}.",
+            cancellationToken);
         await DisableAggressiveModeAfterStopLossAsync(profile, state, order, pnlDelta, source, now, cancellationToken);
     }
 
@@ -4308,6 +4313,14 @@ public sealed class GridBotWorker : BackgroundService
         {
             var winRate = recentClosed.Count(order => order.RealizedPnl > order.FeePaid) / (decimal)recentClosed.Length * 100m;
             score += winRate >= 50m ? 12m : -12m;
+        }
+
+        var recentLossSell = recentClosed
+            .Where(order => (order.FilledAt ?? order.UpdatedAt) >= now.AddHours(-6))
+            .Any(order => order.RealizedPnl <= order.FeePaid);
+        if (recentLossSell)
+        {
+            score -= 18m;
         }
 
         if (state.BaseAssetQuantity > 0m && state.AverageEntryPrice > 0m && state.LastObservedPrice is > 0m)

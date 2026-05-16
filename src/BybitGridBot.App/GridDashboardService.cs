@@ -423,6 +423,15 @@ public sealed class GridDashboardService : IGridDashboardService
             reasons.Add($"recent win rate {recentWinRate:0.#}%");
         }
 
+        var recentLossSell = recentClosed
+            .Where(order => (order.FilledAt ?? order.UpdatedAt) >= now.AddHours(-6))
+            .Any(order => order.RealizedPnl <= order.FeePaid);
+        if (recentLossSell)
+        {
+            score -= 18m;
+            reasons.Add("recent loss sell penalty");
+        }
+
         var dailyPnl = state?.DailyRealizedPnl ?? 0m;
         var totalPnl = state?.TotalRealizedPnl ?? 0m;
         if (dailyPnl > 0m || totalPnl > 0m)
