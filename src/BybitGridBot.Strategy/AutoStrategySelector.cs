@@ -39,6 +39,7 @@ public sealed class AutoStrategySelector
         var stopUpper = CeilingToStep(upper + stopPadding, step);
         var orderSize = RecommendOrderSize(currentOptions, regime);
         var signal = _signalAnalyzer.Analyze(ordered);
+        var bullishOverextended = IsBullishOverextended(signal);
         var metrics = new AutoConfigMetrics
         {
             AtrPercent = decimal.Round(atrPercent, 4, MidpointRounding.AwayFromZero),
@@ -127,6 +128,22 @@ public sealed class AutoStrategySelector
                 metrics);
         }
 
+        if (bullishOverextended && regime.Regime is not (MarketRegimeType.Danger or MarketRegimeType.LowVolatility))
+        {
+            var cautiousOrderSize = RecommendActiveOrderSize(currentOptions, orderSize * 0.5m);
+            return Build(
+                TradingStrategyType.Combo,
+                $"Bullish move is overextended near the upper band. Avoid BTD chase; use smaller Combo size or wait for pullback. RSI: {signal.Rsi:0.####}, Bollinger: {signal.BollingerPosition:0.####}.",
+                lower,
+                upper,
+                step,
+                cautiousOrderSize,
+                stopLower,
+                stopUpper,
+                BuildComboConfig(cautiousOrderSize, currentOptions.MinOrderSizeUsdt, lower),
+                metrics);
+        }
+
         return regime.Regime switch
         {
             MarketRegimeType.Danger => Build(
@@ -211,6 +228,8 @@ public sealed class AutoStrategySelector
         bool aggressiveModeActive = true)
     {
         var baseline = Recommend(currentOptions, regime, candles);
+        var signal = _signalAnalyzer.Analyze(candles);
+        var bullishOverextended = IsBullishOverextended(signal);
         var strategyType = StrategyForPhase(phase, currentOptions.SpotOnly);
         var aggressiveUnknownFallback = aggressiveModeActive &&
             phase.Phase == MarketPhase.Unknown &&
@@ -228,6 +247,10 @@ public sealed class AutoStrategySelector
              phase.Score < decimal.Max(currentOptions.StrategyMinScore, currentOptions.MinStrategyScore)))
         {
             strategyType = TradingStrategyType.NoTrade;
+        }
+        else if (strategyType == TradingStrategyType.Btd && bullishOverextended)
+        {
+            strategyType = TradingStrategyType.Combo;
         }
 
         var orderSize = strategyType switch
@@ -248,7 +271,7 @@ public sealed class AutoStrategySelector
 
         return Build(
             strategyType,
-            BuildPhaseRecommendationReason(phase, strategyType, aggressiveUnknownFallback, baseline),
+            BuildPhaseRecommendationReason(phase, strategyType, aggressiveUnknownFallback, bullishOverextended, baseline),
             baseline.LowerPrice,
             baseline.UpperPrice,
             baseline.Step,
@@ -355,11 +378,17 @@ public sealed class AutoStrategySelector
         MarketPhaseResult phase,
         TradingStrategyType strategyType,
         bool aggressiveUnknownFallback,
+        bool bullishOverextended,
         AutoConfigRecommendation baseline)
     {
         if (aggressiveUnknownFallback)
         {
             return $"Aggressive auto fallback: phase is Unknown, using {strategyType} from market regime instead of NoTrade. Baseline was {baseline.StrategyType}. Baseline reason: {baseline.Reason}. Phase confidence: {phase.Confidence:0.####}. {phase.Reason}";
+        }
+
+        if (bullishOverextended && strategyType == TradingStrategyType.Combo)
+        {
+            return $"Bullish move is overextended, so BTD is avoided and Combo uses smaller pullback-aware entries. Phase confidence: {phase.Confidence:0.####}. {phase.Reason}";
         }
 
         return strategyType switch
@@ -396,6 +425,10 @@ public sealed class AutoStrategySelector
             signal.BollingerPosition >= 0.65m &&
             regime.Regime is MarketRegimeType.Breakout or MarketRegimeType.Trend;
     }
+
+    private static bool IsBullishOverextended(SignalAnalysis signal) =>
+        signal.TrendStrength > 0.08m &&
+        (signal.BollingerPosition >= 0.8m || signal.Rsi >= 68m);
 
     private static bool ShouldRecommendTrendFollowing(MarketRegimeAnalysis regime, SignalAnalysis signal)
     {
