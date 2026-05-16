@@ -25,6 +25,14 @@ public sealed class FuturesRiskOptions
     [Range(typeof(decimal), "0", "999999999")]
     public decimal MaxFundingCostUsdt { get; init; } = 1m;
 
+    [ConfigurationKeyName("FUTURES_MIN_NET_PROFIT_USDT")]
+    [Range(typeof(decimal), "0", "999999999")]
+    public decimal MinNetProfitUsdt { get; init; } = 0.02m;
+
+    [ConfigurationKeyName("FUTURES_MIN_NET_PROFIT_PERCENT")]
+    [Range(typeof(decimal), "0", "100")]
+    public decimal MinNetProfitPercent { get; init; } = 0.15m;
+
     [ConfigurationKeyName("FUTURES_MAX_DAILY_LOSS_USDT")]
     [Range(typeof(decimal), "0", "999999999")]
     public decimal MaxDailyLossUsdt { get; init; } = 20m;
