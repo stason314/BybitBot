@@ -120,6 +120,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         var fillLedger = FuturesFillLedger.Build(recentFills, DateOnly.FromDateTime(DateTime.UtcNow));
         var runtimeControls = await BuildRuntimeControlsAsync(profiles, state, cancellationToken);
         var selectedInstrumentRules = await TryGetInstrumentRulesAsync(selectedSettings, cancellationToken);
+        var positionSnapshot = await TryResolvePositionSnapshotAsync(selectedSettings, cancellationToken);
 
         return new FuturesDashboardResponse
         {
@@ -142,7 +143,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             UserStreamStatus = BuildUserStreamStatus(),
             RuntimeControls = runtimeControls,
             AggressiveMode = BuildAggressiveModeStatus(selectedSettings, recentFills, riskDecisions),
-            StrategyQuality = BuildStrategyQuality(selectedSettings, position, selectedInstrumentRules, riskDecisions),
+            StrategyQuality = BuildStrategyQuality(selectedSettings, positionSnapshot, selectedInstrumentRules, riskDecisions),
             AutoRecommendation = MapAutoRecommendation(
                 recommendation,
                 selectedSettings,
@@ -2870,7 +2871,27 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
                 RealizedPnl = bybitPosition.RealizedPnl,
                 PositionIdx = bybitPosition.PositionIdx,
                 UpdatedAt = bybitPosition.UpdatedAt
-        };
+            };
+    }
+
+    private async Task<FuturesPositionSnapshot> TryResolvePositionSnapshotAsync(
+        FuturesBotSettings settings,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await ResolvePositionSnapshotAsync(settings, cancellationToken);
+        }
+        catch
+        {
+            return new FuturesPositionSnapshot
+            {
+                Symbol = settings.Symbol,
+                Category = settings.Category,
+                Side = "None",
+                UpdatedAt = DateTimeOffset.UtcNow
+            };
+        }
     }
 
     private async Task<BotState> EnsurePaperStateAsync(
