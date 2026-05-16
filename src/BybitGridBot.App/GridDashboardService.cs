@@ -25,6 +25,13 @@ public sealed class GridDashboardService : IGridDashboardService
 {
     private static readonly JsonSerializerOptions StrategyJsonOptions = new(JsonSerializerDefaults.Web);
     private const decimal ExecutionDrawdownWarningPercent = 1m;
+    private const decimal PairScoreMinBuyScore = 60m;
+    private const decimal PairScoreProbationMultiplier = 0.5m;
+    private const decimal PairScoreFirstProfitMultiplier = 1m;
+    private const decimal PairScoreProfitStreakMultiplier = 1.4m;
+    private const int PairScoreProfitStreakTrades = 3;
+    private const decimal PairScoreNegativeDailyMaxMultiplier = 0.5m;
+    private const decimal PairScoreRecentLossMaxMultiplier = 0.5m;
 
     private readonly AppOptions _appOptions;
     private readonly AutoStrategySelector _autoStrategySelector;
@@ -857,13 +864,14 @@ public sealed class GridDashboardService : IGridDashboardService
         }
 
         score = decimal.Max(0m, decimal.Min(100m, decimal.Round(score, 2, MidpointRounding.AwayFromZero)));
+        var suggestedMultiplier = ResolveDashboardSuggestedOrderSizeMultiplier(score, dailyPnl, orders, reasons);
         return new DashboardPairScoreItem
         {
             Symbol = profile.Symbol,
             Category = profile.Category,
             Score = score,
             Label = score >= 75m ? "Hot" : score >= 60m ? "Good" : score >= 40m ? "Neutral" : "Avoid",
-            SuggestedOrderSizeMultiplier = score >= 75m ? 1.4m : score >= 60m ? 1.15m : score < 35m ? 0.5m : 1m,
+            SuggestedOrderSizeMultiplier = suggestedMultiplier,
             SpreadPercent = decimal.Round(market.SpreadPercent, 4, MidpointRounding.AwayFromZero),
             VolatilityPercent = decimal.Round(market.VolatilityPercent, 4, MidpointRounding.AwayFromZero),
             VolumeRatio = decimal.Round(market.VolumeRatio, 4, MidpointRounding.AwayFromZero),
@@ -873,6 +881,81 @@ public sealed class GridDashboardService : IGridDashboardService
             Reasons = reasons.Count == 0 ? ["market data limited"] : reasons
         };
     }
+
+    private static decimal ResolveDashboardSuggestedOrderSizeMultiplier(
+        decimal score,
+        decimal dailyPnl,
+        IReadOnlyCollection<GridOrder> orders,
+        List<string> reasons)
+    {
+        if (score < PairScoreMinBuyScore)
+        {
+            reasons.Add($"Market Fit below buy threshold {PairScoreMinBuyScore:0.#}");
+            return 0m;
+        }
+
+        var multiplier = score >= 75m ? 1.4m : score >= 60m ? 1.15m : 1m;
+        var profitStats = CalculateDashboardPairProfitStats(orders);
+        if (profitStats.ProfitableClosedSellCount == 0)
+        {
+            multiplier = decimal.Min(multiplier, PairScoreProbationMultiplier);
+            reasons.Add("probation size until first profitable cycle");
+        }
+        else if (profitStats.ProfitableClosedSellCount == 1 ||
+                 profitStats.CurrentProfitStreak < PairScoreProfitStreakTrades)
+        {
+            multiplier = decimal.Min(multiplier, PairScoreFirstProfitMultiplier);
+            reasons.Add("profit-first size until streak improves");
+        }
+        else
+        {
+            multiplier = decimal.Min(multiplier, PairScoreProfitStreakMultiplier);
+            reasons.Add($"profit streak {profitStats.CurrentProfitStreak}");
+        }
+
+        if (profitStats.LatestClosedSellWasLoss)
+        {
+            multiplier = decimal.Min(multiplier, PairScoreRecentLossMaxMultiplier);
+            reasons.Add("latest closed sell was a loss");
+        }
+
+        if (dailyPnl < 0m)
+        {
+            multiplier = decimal.Min(multiplier, PairScoreNegativeDailyMaxMultiplier);
+            reasons.Add("negative daily PnL caps size");
+        }
+
+        return multiplier;
+    }
+
+    private static DashboardPairProfitStats CalculateDashboardPairProfitStats(IReadOnlyCollection<GridOrder> orders)
+    {
+        var closedSells = orders
+            .Where(order => order.Side == TradeSide.Sell && order.Status == OrderStatus.Filled)
+            .OrderByDescending(order => order.FilledAt ?? order.UpdatedAt)
+            .ToArray();
+        var currentProfitStreak = 0;
+        foreach (var order in closedSells)
+        {
+            if (order.RealizedPnl <= order.FeePaid)
+            {
+                break;
+            }
+
+            currentProfitStreak++;
+        }
+
+        var latestClosedSell = closedSells.FirstOrDefault();
+        return new DashboardPairProfitStats(
+            closedSells.Count(order => order.RealizedPnl > order.FeePaid),
+            currentProfitStreak,
+            latestClosedSell is not null && latestClosedSell.RealizedPnl <= latestClosedSell.FeePaid);
+    }
+
+    private sealed record DashboardPairProfitStats(
+        int ProfitableClosedSellCount,
+        int CurrentProfitStreak,
+        bool LatestClosedSellWasLoss);
 
     private static decimal CalculatePairCurrentDrawdownPercent(BotState? state, decimal currentPrice)
     {

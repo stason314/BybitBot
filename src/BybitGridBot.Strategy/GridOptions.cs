@@ -94,6 +94,34 @@ public sealed class GridOptions
     [Range(0, 1000)]
     public int PairScoreMaxHotPairs { get; init; } = 5;
 
+    [ConfigurationKeyName("PAIR_SCORE_MIN_BUY_SCORE")]
+    [Range(typeof(decimal), "0", "100")]
+    public decimal PairScoreMinBuyScore { get; init; } = 60m;
+
+    [ConfigurationKeyName("PAIR_SCORE_PROBATION_MULTIPLIER")]
+    [Range(typeof(decimal), "0", "1000")]
+    public decimal PairScoreProbationMultiplier { get; init; } = 0.5m;
+
+    [ConfigurationKeyName("PAIR_SCORE_FIRST_PROFIT_MULTIPLIER")]
+    [Range(typeof(decimal), "0", "1000")]
+    public decimal PairScoreFirstProfitMultiplier { get; init; } = 1m;
+
+    [ConfigurationKeyName("PAIR_SCORE_PROFIT_STREAK_MULTIPLIER")]
+    [Range(typeof(decimal), "0", "1000")]
+    public decimal PairScoreProfitStreakMultiplier { get; init; } = 1.4m;
+
+    [ConfigurationKeyName("PAIR_SCORE_PROFIT_STREAK_TRADES")]
+    [Range(1, 1000)]
+    public int PairScoreProfitStreakTrades { get; init; } = 3;
+
+    [ConfigurationKeyName("PAIR_SCORE_NEGATIVE_DAILY_MAX_MULTIPLIER")]
+    [Range(typeof(decimal), "0", "1000")]
+    public decimal PairScoreNegativeDailyMaxMultiplier { get; init; } = 0.5m;
+
+    [ConfigurationKeyName("PAIR_SCORE_RECENT_LOSS_MAX_MULTIPLIER")]
+    [Range(typeof(decimal), "0", "1000")]
+    public decimal PairScoreRecentLossMaxMultiplier { get; init; } = 0.5m;
+
     [ConfigurationKeyName("STOP_LOWER_PRICE")]
     public decimal StopLowerPrice { get; init; } = 0.09m;
 

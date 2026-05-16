@@ -4428,6 +4428,21 @@ public sealed class GridBotWorker : BackgroundService
         }
 
         var score = CalculateCapitalPairScore(state, orders, lastNoTradeReason);
+        if (score < _gridOptions.PairScoreMinBuyScore)
+        {
+            await RecordNoTradeReasonAsync(
+                profile,
+                NoTradeReason.ScoreTooLow,
+                $"Market Fit {score:0.##} is below buy threshold {_gridOptions.PairScoreMinBuyScore:0.##}.",
+                cancellationToken);
+            _logger.LogInformation(
+                "Pair score capital allocation blocks {Symbol}: Market Fit {Score} is below {MinBuyScore}.",
+                _gridOptions.Symbol,
+                score,
+                _gridOptions.PairScoreMinBuyScore);
+            return 0m;
+        }
+
         var multiplier = score >= 75m
             ? _gridOptions.PairScoreHotMultiplier
             : score >= 60m
@@ -4435,6 +4450,30 @@ public sealed class GridBotWorker : BackgroundService
                 : score >= 40m
                     ? _gridOptions.PairScoreNeutralMultiplier
                     : _gridOptions.PairScoreAvoidMultiplier;
+        var profitStats = CalculatePairProfitStats(orders);
+        if (profitStats.ProfitableClosedSellCount == 0)
+        {
+            multiplier = decimal.Min(multiplier, _gridOptions.PairScoreProbationMultiplier);
+        }
+        else if (profitStats.ProfitableClosedSellCount == 1 ||
+                 profitStats.CurrentProfitStreak < Math.Max(1, _gridOptions.PairScoreProfitStreakTrades))
+        {
+            multiplier = decimal.Min(multiplier, _gridOptions.PairScoreFirstProfitMultiplier);
+        }
+        else
+        {
+            multiplier = decimal.Min(multiplier, _gridOptions.PairScoreProfitStreakMultiplier);
+        }
+
+        if (profitStats.LatestClosedSellWasLoss)
+        {
+            multiplier = decimal.Min(multiplier, _gridOptions.PairScoreRecentLossMaxMultiplier);
+        }
+
+        if (state.DailyRealizedPnl < 0m)
+        {
+            multiplier = decimal.Min(multiplier, _gridOptions.PairScoreNegativeDailyMaxMultiplier);
+        }
 
         if (score >= 75m && _gridOptions.PairScoreMaxHotPairs > 0)
         {
@@ -4565,6 +4604,35 @@ public sealed class GridBotWorker : BackgroundService
 
     private static decimal ApplyPairScoreOrderSizeMultiplier(decimal orderSizeUsdt, decimal multiplier) =>
         decimal.Max(0m, orderSizeUsdt * decimal.Max(0m, multiplier));
+
+    private static PairProfitStats CalculatePairProfitStats(IReadOnlyCollection<GridOrder> orders)
+    {
+        var closedSells = orders
+            .Where(order => order.Side == TradeSide.Sell && order.Status == OrderStatus.Filled)
+            .OrderByDescending(order => order.FilledAt ?? order.UpdatedAt)
+            .ToArray();
+        var currentProfitStreak = 0;
+        foreach (var order in closedSells)
+        {
+            if (order.RealizedPnl <= order.FeePaid)
+            {
+                break;
+            }
+
+            currentProfitStreak++;
+        }
+
+        var latestClosedSell = closedSells.FirstOrDefault();
+        return new PairProfitStats(
+            closedSells.Count(order => order.RealizedPnl > order.FeePaid),
+            currentProfitStreak,
+            latestClosedSell is not null && latestClosedSell.RealizedPnl <= latestClosedSell.FeePaid);
+    }
+
+    private sealed record PairProfitStats(
+        int ProfitableClosedSellCount,
+        int CurrentProfitStreak,
+        bool LatestClosedSellWasLoss);
 
     private async Task<int> GetPairScoreRankAsync(decimal currentScore, CancellationToken cancellationToken)
     {
