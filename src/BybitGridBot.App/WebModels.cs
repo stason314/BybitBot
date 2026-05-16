@@ -83,6 +83,14 @@ public sealed class DashboardConfigSummaryItem
 
     public required IReadOnlyList<string> PairScoreReasons { get; init; }
 
+    public bool CanTradeNow { get; init; }
+
+    public required string ExecutionReadiness { get; init; }
+
+    public required string WhyNoOrdersNow { get; init; }
+
+    public required IReadOnlyList<string> ExecutionReadinessReasons { get; init; }
+
     public bool IsSelected { get; init; }
 
     public DateTimeOffset UpdatedAt { get; init; }

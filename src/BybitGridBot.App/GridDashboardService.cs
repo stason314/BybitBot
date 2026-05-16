@@ -24,6 +24,7 @@ public interface IGridDashboardService
 public sealed class GridDashboardService : IGridDashboardService
 {
     private static readonly JsonSerializerOptions StrategyJsonOptions = new(JsonSerializerDefaults.Web);
+    private const decimal ExecutionDrawdownWarningPercent = 1m;
 
     private readonly AppOptions _appOptions;
     private readonly AutoStrategySelector _autoStrategySelector;
@@ -315,8 +316,17 @@ public sealed class GridDashboardService : IGridDashboardService
 
         foreach (var profile in profiles)
         {
-            var state = await _repository.GetBotStateAsync(profile.Symbol, cancellationToken);
+            var stateTask = _repository.GetBotStateAsync(profile.Symbol, cancellationToken);
+            var ordersTask = _repository.GetOrdersAsync(profile.Symbol, cancellationToken);
+            var noTradeReasonsTask = _repository.GetNoTradeReasonsAsync(profile.Symbol, 1, cancellationToken);
+
+            await Task.WhenAll(new Task[] { stateTask, ordersTask, noTradeReasonsTask });
+
+            var state = await stateTask;
+            var orders = await ordersTask;
+            var lastNoTradeReason = (await noTradeReasonsTask).FirstOrDefault();
             var isPaused = state?.IsPaused == true || profile.StrategyType is TradingStrategyType.Pause or TradingStrategyType.NoTrade;
+            var execution = BuildExecutionReadiness(profile, state, orders, lastNoTradeReason);
             scoreBySymbol.TryGetValue(profile.Symbol, out var pairScore);
             summaries.Add(new DashboardConfigSummaryItem
             {
@@ -331,6 +341,10 @@ public sealed class GridDashboardService : IGridDashboardService
                 PairScoreLabel = pairScore?.Label ?? "Unknown",
                 SuggestedOrderSizeMultiplier = pairScore?.SuggestedOrderSizeMultiplier ?? 1m,
                 PairScoreReasons = pairScore?.Reasons ?? [],
+                CanTradeNow = execution.CanTradeNow,
+                ExecutionReadiness = execution.Readiness,
+                WhyNoOrdersNow = execution.WhyNoOrdersNow,
+                ExecutionReadinessReasons = execution.Reasons,
                 IsSelected = string.Equals(profile.Symbol, selectedSymbol, StringComparison.OrdinalIgnoreCase),
                 UpdatedAt = state?.UpdatedAt ?? profile.UpdatedAt
             });
@@ -343,6 +357,146 @@ public sealed class GridDashboardService : IGridDashboardService
             .ThenBy(summary => summary.Symbol, StringComparer.OrdinalIgnoreCase)
             .ToArray();
     }
+
+    private ExecutionReadinessResult BuildExecutionReadiness(
+        GridBotSettings profile,
+        BotState? state,
+        IReadOnlyCollection<GridOrder> orders,
+        NoTradeReasonRecord? lastNoTradeReason)
+    {
+        var reasons = new List<string>();
+        var activeOrders = orders
+            .Where(order => order.Status is OrderStatus.New or OrderStatus.PartiallyFilled)
+            .ToArray();
+        var activeBuyCount = activeOrders.Count(order => order.Side == TradeSide.Buy);
+        var activeSellCount = activeOrders.Count(order => order.Side == TradeSide.Sell);
+        var hasPosition = state?.BaseAssetQuantity > 0m;
+        var currentPrice = state?.LastObservedPrice is > 0m
+            ? state.LastObservedPrice.Value
+            : state?.MarkPrice is > 0m
+                ? state.MarkPrice
+                : 0m;
+        var drawdownPercent = CalculatePositionDrawdownPercent(state, currentPrice);
+
+        if (profile.StrategyType is TradingStrategyType.NoTrade or TradingStrategyType.Pause)
+        {
+            reasons.Add($"{profile.StrategyType} mode blocks new orders");
+            return new ExecutionReadinessResult(false, "Blocked", string.Join("; ", reasons), reasons);
+        }
+
+        if (state?.IsPaused == true)
+        {
+            reasons.Add(string.IsNullOrWhiteSpace(state.PauseReason)
+                ? "runtime state is paused"
+                : $"runtime paused: {state.PauseReason}");
+            return new ExecutionReadinessResult(false, "Blocked", string.Join("; ", reasons), reasons);
+        }
+
+        if (profile.StrategyType == TradingStrategyType.ReduceOnly)
+        {
+            if (hasPosition)
+            {
+                reasons.Add($"ReduceOnly: exit position only ({state!.BaseAssetQuantity:0.####} base)");
+                if (activeSellCount > 0)
+                {
+                    reasons.Add($"waiting for {activeSellCount} active sell order(s)");
+                }
+
+                if (drawdownPercent >= ExecutionDrawdownWarningPercent)
+                {
+                    reasons.Add($"position drawdown {drawdownPercent:0.##}%");
+                }
+
+                return new ExecutionReadinessResult(false, "ExitOnly", string.Join("; ", reasons), reasons);
+            }
+
+            reasons.Add("ReduceOnly has no open position to close");
+            return new ExecutionReadinessResult(false, "Blocked", string.Join("; ", reasons), reasons);
+        }
+
+        if (currentPrice <= 0m)
+        {
+            reasons.Add("current price is not available yet");
+            return new ExecutionReadinessResult(false, "Unknown", string.Join("; ", reasons), reasons);
+        }
+
+        if (currentPrice < profile.LowerPrice || currentPrice > profile.UpperPrice)
+        {
+            reasons.Add($"price {currentPrice:0.########} outside range {profile.LowerPrice:0.########}-{profile.UpperPrice:0.########}");
+            return new ExecutionReadinessResult(false, "Blocked", string.Join("; ", reasons), reasons);
+        }
+
+        if (lastNoTradeReason is not null)
+        {
+            reasons.Add($"last no-trade: {lastNoTradeReason.ReasonCode}");
+        }
+
+        if (activeOrders.Length > 0)
+        {
+            reasons.Add($"active orders: {activeOrders.Length} ({activeBuyCount} buy, {activeSellCount} sell)");
+            if (hasPosition && activeSellCount > 0)
+            {
+                reasons.Add("waiting for exits to fill");
+            }
+
+            return new ExecutionReadinessResult(false, "Waiting", string.Join("; ", reasons), reasons);
+        }
+
+        if (hasPosition && drawdownPercent >= ExecutionDrawdownWarningPercent)
+        {
+            reasons.Add($"position drawdown {drawdownPercent:0.##}% blocks new accumulation");
+            return new ExecutionReadinessResult(false, "Blocked", string.Join("; ", reasons), reasons);
+        }
+
+        if ((state?.QuoteAssetBalance ?? 0m) < Math.Max(profile.OrderSizeUsdt, _defaultGridOptions.MinOrderSizeUsdt))
+        {
+            reasons.Add($"insufficient USDT balance {(state?.QuoteAssetBalance ?? 0m):0.####}");
+            return new ExecutionReadinessResult(false, "Blocked", string.Join("; ", reasons), reasons);
+        }
+
+        var expectedStepProfitPercent = currentPrice > 0m
+            ? profile.Step / currentPrice * 100m - _defaultGridOptions.FeePercent * 2m - _defaultGridOptions.SlippagePercent * 2m
+            : 0m;
+        if (expectedStepProfitPercent < _defaultGridOptions.MinNetProfitPercent)
+        {
+            reasons.Add($"expected step profit {expectedStepProfitPercent:0.###}% below min {_defaultGridOptions.MinNetProfitPercent:0.###}%");
+            return new ExecutionReadinessResult(false, "Blocked", string.Join("; ", reasons), reasons);
+        }
+
+        var expectedStepProfitUsdt = profile.OrderSizeUsdt * expectedStepProfitPercent / 100m;
+        if (expectedStepProfitUsdt < _defaultGridOptions.MinNetProfitUsdt)
+        {
+            reasons.Add($"expected step profit {expectedStepProfitUsdt:0.####} USDT below min {_defaultGridOptions.MinNetProfitUsdt:0.####} USDT");
+            return new ExecutionReadinessResult(false, "Blocked", string.Join("; ", reasons), reasons);
+        }
+
+        if (profile.StrategyType is TradingStrategyType.Btd or TradingStrategyType.Signal or TradingStrategyType.TrendFollow or TradingStrategyType.TrendFollowing or TradingStrategyType.Breakout)
+        {
+            reasons.Add($"{profile.StrategyType} waits for its entry trigger");
+            return new ExecutionReadinessResult(false, "Waiting", string.Join("; ", reasons), reasons);
+        }
+
+        reasons.Add("price in range, no active orders, balance ok");
+        return new ExecutionReadinessResult(true, "Ready", string.Join("; ", reasons), reasons);
+    }
+
+    private static decimal CalculatePositionDrawdownPercent(BotState? state, decimal currentPrice)
+    {
+        if (state is null || state.BaseAssetQuantity <= 0m || state.AverageEntryPrice <= 0m || currentPrice <= 0m)
+        {
+            return 0m;
+        }
+
+        return currentPrice >= state.AverageEntryPrice
+            ? 0m
+            : (state.AverageEntryPrice - currentPrice) / state.AverageEntryPrice * 100m;
+    }
+
+    private sealed record ExecutionReadinessResult(
+        bool CanTradeNow,
+        string Readiness,
+        string WhyNoOrdersNow,
+        IReadOnlyList<string> Reasons);
 
     private async Task<IReadOnlyList<DashboardPairScoreItem>> BuildPairScoresAsync(
         IReadOnlyList<GridBotSettings> profiles,
@@ -1607,6 +1761,30 @@ public sealed class GridDashboardService : IGridDashboardService
       background: rgba(177,54,34,0.14);
       color: var(--danger);
     }
+    .readiness-pill {
+      display: inline-flex;
+      align-items: center;
+      padding: 7px 10px;
+      border-radius: 999px;
+      background: rgba(29,35,31,0.08);
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 800;
+      white-space: nowrap;
+    }
+    .readiness-pill.ready {
+      background: rgba(23,102,78,0.14);
+      color: var(--accent-2);
+    }
+    .readiness-pill.waiting,
+    .readiness-pill.exitonly {
+      background: rgba(198,103,47,0.14);
+      color: var(--accent);
+    }
+    .readiness-pill.blocked {
+      background: rgba(177,54,34,0.14);
+      color: var(--danger);
+    }
     .scan-controls {
       display: flex;
       flex-wrap: wrap;
@@ -1789,7 +1967,7 @@ public sealed class GridDashboardService : IGridDashboardService
         <table class="config-table">
           <thead>
             <tr>
-              <th>Symbol</th><th>Strategy</th><th>Type</th><th>Status</th><th>Score</th><th>Capital</th><th>Daily Profit</th><th>Total Profit ↓</th><th>Updated</th><th>Action</th>
+              <th>Symbol</th><th>Strategy</th><th>Type</th><th>Status</th><th>Score</th><th>Execution</th><th>Capital</th><th>Daily Profit</th><th>Total Profit ↓</th><th>Updated</th><th>Action</th>
             </tr>
           </thead>
           <tbody id="configSummaryRows"></tbody>
@@ -2081,7 +2259,7 @@ public sealed class GridDashboardService : IGridDashboardService
     const renderConfigSummaries = (configs) => {
       renderConfigTotals(configs);
       byId('configSummaryRows').innerHTML = configs.length === 0
-        ? `<tr><td colspan="10">No configs yet.</td></tr>`
+        ? `<tr><td colspan="11">No configs yet.</td></tr>`
         : configs.map(config => `
             <tr class="${config.isSelected && !isCreatingNewProfile ? 'selected' : ''}" data-symbol="${escapeHtml(config.symbol)}">
               <td>
@@ -2096,6 +2274,9 @@ public sealed class GridDashboardService : IGridDashboardService
               <td title="${escapeHtml((config.pairScoreReasons || []).join('; '))}">
                 <strong>${formatNumber(config.pairScore)}</strong>
                 <span class="subtle">${escapeHtml(config.pairScoreLabel || 'Unknown')}</span>
+              </td>
+              <td title="${escapeHtml(config.whyNoOrdersNow || (config.executionReadinessReasons || []).join('; '))}">
+                <span class="readiness-pill ${escapeHtml(String(config.executionReadiness || 'unknown').toLowerCase())}">${escapeHtml(config.executionReadiness || 'Unknown')}</span>
               </td>
               <td>${formatNumber(config.suggestedOrderSizeMultiplier || 1)}x</td>
               <td>${formatPnl(config.dailyRealizedPnl)}</td>
@@ -2454,7 +2635,8 @@ public sealed class GridDashboardService : IGridDashboardService
           'active-orders',
           'recent-order-history',
           'performance-source-sanity',
-          'pair-scoring'
+          'pair-scoring',
+          'execution-readiness'
         ],
         formSettings,
         parsedFormStrategyConfig: parseStrategyConfigSnapshot(formSettings.strategyConfigJson),
