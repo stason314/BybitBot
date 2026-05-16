@@ -81,7 +81,7 @@ public sealed class FuturesStrategiesTests
             positionSize: 0.001m,
             entryPrice: 50100m,
             positionSide: "Sell",
-            direction: FuturesDirection.LongShort,
+            direction: FuturesDirection.LongAndShort,
             aggressiveModeEnabled: true));
 
         var intent = Assert.Single(decision.TradeIntents);
@@ -94,16 +94,15 @@ public sealed class FuturesStrategiesTests
     {
         var router = Router();
         var decision = router.Decide(Context(
-            currentPrice: 50020m,
+            currentPrice: 51200m,
             positionSize: 0.001m,
             entryPrice: 50100m,
             positionSide: "Sell",
-            direction: FuturesDirection.LongShort,
+            direction: FuturesDirection.LongAndShort,
             aggressiveModeEnabled: true));
 
         var intent = Assert.Single(decision.TradeIntents);
-        Assert.NotEqual(FuturesTradeAction.OpenLong, intent.Action);
-        Assert.NotEqual(FuturesTradeAction.CloseLong, intent.Action);
+        Assert.Equal(FuturesTradeAction.CloseShort, intent.Action);
     }
 
     [Fact]
@@ -165,7 +164,7 @@ public sealed class FuturesStrategiesTests
             currentPrice: 50140m,
             positionSize: 0.001m,
             entryPrice: 50000m,
-            direction: FuturesDirection.LongShort,
+            direction: FuturesDirection.LongAndShort,
             aggressiveModeEnabled: true));
 
         var intent = Assert.Single(decision.TradeIntents);

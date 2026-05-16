@@ -856,6 +856,14 @@ public sealed class FuturesAutoRecommendationView
 
     public required string StrategyConfigJson { get; init; }
 
+    public bool AutoApplyEnabled { get; init; }
+
+    public bool CanApply { get; init; }
+
+    public required string ApplyBlockReason { get; init; }
+
+    public required string CompatibleStrategyForPosition { get; init; }
+
     public decimal LastPrice { get; init; }
 
     public decimal MovePercent { get; init; }
