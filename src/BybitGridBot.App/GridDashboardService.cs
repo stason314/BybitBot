@@ -10,7 +10,7 @@ namespace BybitGridBot.App;
 
 public interface IGridDashboardService
 {
-    Task<DashboardResponse> GetDashboardAsync(string? symbol, CancellationToken cancellationToken);
+    Task<DashboardResponse> GetDashboardAsync(string? symbol, bool fast, CancellationToken cancellationToken);
     Task<UpdateSettingsResponse> ApplyAutoRecommendationAsync(string? symbol, CancellationToken cancellationToken);
     Task<UpdateSettingsResponse> ApplyRecommendationForSelectedStrategyAsync(UpdateSettingsRequest request, CancellationToken cancellationToken);
     Task<UpdateSettingsResponse> UpdateSettingsAsync(UpdateSettingsRequest request, CancellationToken cancellationToken);
@@ -73,7 +73,7 @@ public sealed class GridDashboardService : IGridDashboardService
         return [defaultSettings];
     }
 
-    public async Task<DashboardResponse> GetDashboardAsync(string? symbol, CancellationToken cancellationToken)
+    public async Task<DashboardResponse> GetDashboardAsync(string? symbol, bool fast, CancellationToken cancellationToken)
     {
         var profiles = await EnsureRuntimeSettingsProfilesAsync(cancellationToken);
         var selectedSymbol = NormalizeOptionalSymbol(symbol);
@@ -118,14 +118,17 @@ public sealed class GridDashboardService : IGridDashboardService
         var lastNoTradeReason = noTradeReasonHistory.FirstOrDefault();
 
         decimal? currentPrice = state.LastObservedPrice;
-        try
+        if (!fast)
         {
-            var ticker = await _bybitRestClient.GetTickerAsync(gridOptions.Category, gridOptions.Symbol, cancellationToken);
-            currentPrice = ticker.LastPrice;
-        }
-        catch
-        {
-            currentPrice ??= state.LastObservedPrice;
+            try
+            {
+                var ticker = await _bybitRestClient.GetTickerAsync(gridOptions.Category, gridOptions.Symbol, cancellationToken);
+                currentPrice = ticker.LastPrice;
+            }
+            catch
+            {
+                currentPrice ??= state.LastObservedPrice;
+            }
         }
 
         var unrealizedPnl = currentPrice is null
@@ -139,41 +142,62 @@ public sealed class GridDashboardService : IGridDashboardService
             : 0m;
         var estimatedTotalEquity = state.QuoteAssetBalance + (currentPrice ?? 0m) * state.BaseAssetQuantity;
         var generatedAt = DateTimeOffset.UtcNow;
-        var analysisCandles = await GetAnalysisCandlesAsync(gridOptions, cancellationToken);
-        var marketRegime = AnalyzeMarketRegime(analysisCandles);
-        var signalAnalysis = AnalyzeSignal(analysisCandles);
-        var btcCandles = await GetBtcCandlesForPhaseAsync(gridOptions, cancellationToken);
-        var marketPhase = DetectMarketPhase(gridOptions, analysisCandles, btcCandles, currentPrice);
         var aggressiveModeActive = IsAggressiveModeActive(gridOptions, state, generatedAt);
-        var btdDiagnostics = BuildBtdDiagnostics(
-            gridOptions,
-            runtimeSettings,
-            analysisCandles,
-            btcCandles,
-            marketPhase,
-            currentPrice,
-            aggressiveModeActive);
-        var autoRecommendation = _autoStrategySelector.Recommend(
-            gridOptions,
-            marketRegime,
-            marketPhase,
-            analysisCandles,
-            aggressiveModeActive);
-        var recommendedSettings = BuildRecommendedSettings(runtimeSettings, autoRecommendation, StrategySelectionMode.Auto, generatedAt);
-        recommendedSettings = UseReduceOnlyWhenNoTradeWouldLeavePosition(recommendedSettings, state);
-        autoRecommendation = UseReduceOnlyRecommendationWhenNoTradeWouldLeavePosition(autoRecommendation, recommendedSettings);
-        var autoRecommendationSafetyErrors = AutoRecommendationApplySafety.Validate(
-            runtimeSettings,
-            state,
-            rawActiveOrders,
-            autoRecommendation,
-            recommendedSettings,
-            _riskOptions,
-            _strategy);
-        var pairScores = await BuildPairScoresAsync(profiles, generatedAt, cancellationToken);
+        var marketRegime = new MarketRegimeAnalysis
+        {
+            Regime = MarketRegimeType.Range,
+            Confidence = 0m,
+            Recommendation = "Loading market regime in the background."
+        };
+        var signalAnalysis = new SignalAnalysis
+        {
+            Signal = SignalType.Hold,
+            Confidence = 0m,
+            Reason = "Loading signal analysis in the background."
+        };
+        var btdDiagnostics = BuildFastBtdDiagnostics(currentPrice, aggressiveModeActive);
+        var autoRecommendation = BuildFastAutoRecommendation(runtimeSettings, gridOptions, fast);
+        IReadOnlyList<string> autoRecommendationSafetyErrors = [];
+        IReadOnlyList<DashboardPairScoreItem> pairScores = [];
+
+        if (!fast)
+        {
+            var analysisCandles = await GetAnalysisCandlesAsync(gridOptions, cancellationToken);
+            marketRegime = AnalyzeMarketRegime(analysisCandles);
+            signalAnalysis = AnalyzeSignal(analysisCandles);
+            var btcCandles = await GetBtcCandlesForPhaseAsync(gridOptions, cancellationToken);
+            var marketPhase = DetectMarketPhase(gridOptions, analysisCandles, btcCandles, currentPrice);
+            btdDiagnostics = BuildBtdDiagnostics(
+                gridOptions,
+                runtimeSettings,
+                analysisCandles,
+                btcCandles,
+                marketPhase,
+                currentPrice,
+                aggressiveModeActive);
+            autoRecommendation = _autoStrategySelector.Recommend(
+                gridOptions,
+                marketRegime,
+                marketPhase,
+                analysisCandles,
+                aggressiveModeActive);
+            var recommendedSettings = BuildRecommendedSettings(runtimeSettings, autoRecommendation, StrategySelectionMode.Auto, generatedAt);
+            recommendedSettings = UseReduceOnlyWhenNoTradeWouldLeavePosition(recommendedSettings, state);
+            autoRecommendation = UseReduceOnlyRecommendationWhenNoTradeWouldLeavePosition(autoRecommendation, recommendedSettings);
+            autoRecommendationSafetyErrors = AutoRecommendationApplySafety.Validate(
+                runtimeSettings,
+                state,
+                rawActiveOrders,
+                autoRecommendation,
+                recommendedSettings,
+                _riskOptions,
+                _strategy);
+            pairScores = await BuildPairScoresAsync(profiles, generatedAt, cancellationToken);
+        }
 
         return new DashboardResponse
         {
+            IsPartial = fast,
             Profiles = profiles
                 .Select(profile => new DashboardProfileItem
                 {
@@ -241,6 +265,45 @@ public sealed class GridDashboardService : IGridDashboardService
         };
     }
 
+    private DashboardBtdDiagnostics BuildFastBtdDiagnostics(decimal? currentPrice, bool aggressiveModeActive) =>
+        new()
+        {
+            Phase = "Loading",
+            EmaFast = currentPrice ?? 0m,
+            EmaSlow = currentPrice ?? 0m,
+            BtcRiskOff = false,
+            PullbackPercent = 0m,
+            DistanceToEmaPercent = 0m,
+            DipTriggered = false,
+            IsAllowed = aggressiveModeActive,
+            Reason = "Loading market diagnostics in the background."
+        };
+
+    private static AutoConfigRecommendation BuildFastAutoRecommendation(
+        GridBotSettings runtimeSettings,
+        GridOptions gridOptions,
+        bool fast) =>
+        new()
+        {
+            StrategyType = runtimeSettings.StrategyType,
+            Reason = fast
+                ? "Loading market recommendation in the background."
+                : "Current runtime settings.",
+            LowerPrice = gridOptions.LowerPrice,
+            UpperPrice = gridOptions.UpperPrice,
+            Step = gridOptions.Step,
+            OrderSizeUsdt = gridOptions.OrderSizeUsdt,
+            StopLowerPrice = gridOptions.StopLowerPrice,
+            StopUpperPrice = gridOptions.StopUpperPrice,
+            StrategyConfigJson = runtimeSettings.StrategyConfigJson,
+            Metrics = new AutoConfigMetrics
+            {
+                LastPrice = 0m,
+                Support = gridOptions.LowerPrice,
+                Resistance = gridOptions.UpperPrice
+            }
+        };
+
     private async Task<IReadOnlyList<DashboardConfigSummaryItem>> BuildConfigSummariesAsync(
         IReadOnlyList<GridBotSettings> profiles,
         string selectedSymbol,
@@ -286,16 +349,33 @@ public sealed class GridDashboardService : IGridDashboardService
         DateTimeOffset now,
         CancellationToken cancellationToken)
     {
-        var scores = new List<DashboardPairScoreItem>(profiles.Count);
-
-        foreach (var profile in profiles)
+        using var throttle = new SemaphoreSlim(4);
+        var scoreTasks = profiles.Select(async profile =>
         {
-            var state = await _repository.GetBotStateAsync(profile.Symbol, cancellationToken);
-            var orders = await _repository.GetOrdersAsync(profile.Symbol, cancellationToken);
-            var lastNoTradeReason = (await _repository.GetNoTradeReasonsAsync(profile.Symbol, 1, cancellationToken)).FirstOrDefault();
-            var market = await GetPairScoreMarketMetricsAsync(profile, cancellationToken);
-            scores.Add(BuildPairScore(profile, state, orders, lastNoTradeReason, market, now));
-        }
+            await throttle.WaitAsync(cancellationToken);
+            try
+            {
+                var stateTask = _repository.GetBotStateAsync(profile.Symbol, cancellationToken);
+                var ordersTask = _repository.GetOrdersAsync(profile.Symbol, cancellationToken);
+                var noTradeReasonsTask = _repository.GetNoTradeReasonsAsync(profile.Symbol, 1, cancellationToken);
+                var marketTask = GetPairScoreMarketMetricsAsync(profile, cancellationToken);
+
+                await Task.WhenAll(new Task[] { stateTask, ordersTask, noTradeReasonsTask, marketTask });
+                return BuildPairScore(
+                    profile,
+                    await stateTask,
+                    await ordersTask,
+                    (await noTradeReasonsTask).FirstOrDefault(),
+                    await marketTask,
+                    now);
+            }
+            finally
+            {
+                throttle.Release();
+            }
+        });
+
+        var scores = await Task.WhenAll(scoreTasks);
 
         return scores
             .OrderByDescending(score => score.Score)
@@ -1181,6 +1261,34 @@ public sealed class GridDashboardService : IGridDashboardService
       background: rgba(29,35,31,0.06);
       font-size: 13px;
     }
+    .dashboard-loading {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      display: none;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 14px;
+      padding: 10px 14px;
+      border: 1px solid rgba(29,35,31,0.12);
+      border-radius: 12px;
+      background: rgba(255,252,246,0.94);
+      box-shadow: 0 12px 40px rgba(58,42,25,0.12);
+      color: var(--muted);
+      font-weight: 700;
+    }
+    .dashboard-loading.active { display: inline-flex; }
+    .spinner {
+      width: 16px;
+      height: 16px;
+      border: 2px solid rgba(29,35,31,0.16);
+      border-top-color: var(--accent);
+      border-radius: 999px;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
     .stats {
       display: grid;
       grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -1545,6 +1653,10 @@ public sealed class GridDashboardService : IGridDashboardService
 </head>
 <body>
   <div class="shell">
+    <div class="dashboard-loading" id="dashboardLoading">
+      <span class="spinner"></span>
+      <span id="dashboardLoadingText">Loading dashboard...</span>
+    </div>
     <div class="hero">
       <section class="panel hero-main">
         <div class="pill" id="modePill">loading mode</div>
@@ -1794,7 +1906,9 @@ public sealed class GridDashboardService : IGridDashboardService
     let isCreatingNewProfile = false;
     let profileCache = [];
     let latestDashboardData = null;
+    let latestFullDashboardData = null;
     let settingsFormDirty = false;
+    let dashboardRequestSeq = 0;
 
     const isSettingsFormDirty = () => settingsFormDirty;
     const setSettingsFormDirty = (isDirty) => {
@@ -1827,6 +1941,26 @@ public sealed class GridDashboardService : IGridDashboardService
         url.searchParams.delete('symbol');
       }
       window.history.replaceState({}, '', url);
+    };
+    const waitForPaint = () => new Promise((resolve) => requestAnimationFrame(() => resolve()));
+    const setDashboardLoading = (isLoading, text = 'Loading dashboard...') => {
+      byId('dashboardLoading').classList.toggle('active', isLoading);
+      byId('dashboardLoadingText').textContent = text;
+    };
+    const updateSelectedConfigSummaries = (summaries, symbol) => (summaries || []).map(item => ({
+      ...item,
+      isSelected: String(item.symbol || '').toUpperCase() === String(symbol || '').toUpperCase()
+    }));
+    const loadSelectedProfile = async (symbol) => {
+      selectedSymbol = symbol.toUpperCase();
+      isCreatingNewProfile = false;
+      setSettingsFormDirty(false);
+      updateSelectedSymbolUrl();
+      await loadDashboard({ forceSettingsRefresh: true, fast: true, loadingText: `Switching to ${selectedSymbol}...` });
+      loadDashboard({ forceSettingsRefresh: true, background: true, loadingText: `Loading ${selectedSymbol} analytics...` }).catch((error) => {
+        byId('formStatus').className = 'status error';
+        byId('formStatus').textContent = error.message;
+      });
     };
     const renderProfileTabs = (profiles) => {
       profileCache = profiles;
@@ -2262,18 +2396,61 @@ public sealed class GridDashboardService : IGridDashboardService
 
     async function loadDashboard(options = {}) {
       const forceSettingsRefresh = Boolean(options.forceSettingsRefresh);
-      const dashboardUrl = selectedSymbol && !isCreatingNewProfile
-        ? `/api/dashboard?symbol=${encodeURIComponent(selectedSymbol)}`
-        : '/api/dashboard';
-      const response = await fetch(dashboardUrl, { cache: 'no-store' });
-      const data = await response.json();
+      const fast = Boolean(options.fast);
+      const background = Boolean(options.background);
+      const requestId = ++dashboardRequestSeq;
+      const params = new URLSearchParams();
+      if (selectedSymbol && !isCreatingNewProfile) {
+        params.set('symbol', selectedSymbol);
+      }
+      if (fast) {
+        params.set('fast', 'true');
+      }
+      const dashboardUrl = params.toString() ? `/api/dashboard?${params}` : '/api/dashboard';
+      if (!background) {
+        setDashboardLoading(true, options.loadingText || (fast ? 'Switching config...' : 'Loading dashboard...'));
+        await waitForPaint();
+      } else {
+        setDashboardLoading(true, options.loadingText || 'Loading analytics...');
+      }
+
+      let data;
+      try {
+        const response = await fetch(dashboardUrl, { cache: 'no-store' });
+        data = await response.json();
+        if (!response.ok) {
+          throw new Error(data?.message || data?.errors?.join(' | ') || 'Failed to load dashboard.');
+        }
+      } catch (error) {
+        if (background && requestId === dashboardRequestSeq) {
+          setDashboardLoading(false);
+        }
+        throw error;
+      } finally {
+        if (!background && requestId === dashboardRequestSeq) {
+          setDashboardLoading(false);
+        }
+      }
+
+      if (requestId !== dashboardRequestSeq) {
+        return;
+      }
+
       latestDashboardData = data;
+      if (!data.isPartial) {
+        latestFullDashboardData = data;
+        setDashboardLoading(false);
+      }
       if (!isCreatingNewProfile) {
         selectedSymbol = data.settings.symbol;
         updateSelectedSymbolUrl();
       }
       renderProfileTabs(data.profiles);
-      renderConfigSummaries(data.configSummaries || []);
+      if (data.isPartial && latestFullDashboardData?.configSummaries?.length) {
+        renderConfigSummaries(updateSelectedConfigSummaries(latestFullDashboardData.configSummaries, data.settings.symbol));
+      } else {
+        renderConfigSummaries(data.configSummaries || []);
+      }
 
       byId('modePill').textContent = `${data.state.tradingMode} mode`;
       byId('modePill').className = data.state.isPaused ? 'pill paused' : 'pill';
@@ -2508,11 +2685,7 @@ public sealed class GridDashboardService : IGridDashboardService
       const action = actionTarget.dataset.action;
       const symbol = actionTarget.dataset.symbol;
       if (action === 'select-profile' && symbol) {
-        selectedSymbol = symbol.toUpperCase();
-        isCreatingNewProfile = false;
-        setSettingsFormDirty(false);
-        updateSelectedSymbolUrl();
-        await loadDashboard({ forceSettingsRefresh: true });
+        await loadSelectedProfile(symbol);
         return;
       }
 
@@ -2552,11 +2725,7 @@ public sealed class GridDashboardService : IGridDashboardService
         return;
       }
 
-      selectedSymbol = row.dataset.symbol.toUpperCase();
-      isCreatingNewProfile = false;
-      setSettingsFormDirty(false);
-      updateSelectedSymbolUrl();
-      await loadDashboard({ forceSettingsRefresh: true });
+      await loadSelectedProfile(row.dataset.symbol);
     });
     byId('resumeTrading').addEventListener('click', async () => {
       const resumeUrl = selectedSymbol ? `/api/resume?symbol=${encodeURIComponent(selectedSymbol)}` : '/api/resume';
@@ -2599,7 +2768,7 @@ public sealed class GridDashboardService : IGridDashboardService
       byId('formStatus').className = 'status error';
       byId('formStatus').textContent = error.message;
     });
-    setInterval(() => loadDashboard().catch(() => {}), 10000);
+    setInterval(() => loadDashboard({ background: true }).catch(() => {}), 10000);
   </script>
 </body>
 </html>

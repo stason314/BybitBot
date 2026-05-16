@@ -4,6 +4,8 @@ namespace BybitGridBot.App;
 
 public sealed class DashboardResponse
 {
+    public bool IsPartial { get; init; }
+
     public required IReadOnlyList<DashboardProfileItem> Profiles { get; init; }
 
     public required IReadOnlyList<DashboardConfigSummaryItem> ConfigSummaries { get; init; }
