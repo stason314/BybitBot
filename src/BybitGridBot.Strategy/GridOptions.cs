@@ -400,7 +400,7 @@ public sealed class GridOptions
 
     [ConfigurationKeyName("PROFIT_PROTECTION_TRIGGER_PERCENT")]
     [Range(typeof(decimal), "0", "1000")]
-    public decimal ProfitProtectionTriggerPercent { get; init; } = 0.8m;
+    public decimal ProfitProtectionTriggerPercent { get; init; } = 0.6m;
 
     [ConfigurationKeyName("TRAILING_STOP_ENABLED")]
     public bool TrailingStopEnabled { get; init; } = true;
@@ -421,11 +421,11 @@ public sealed class GridOptions
 
     [ConfigurationKeyName("FAST_PROTECTIVE_EXIT_TRIGGER_PERCENT")]
     [Range(typeof(decimal), "0", "1000")]
-    public decimal FastProtectiveExitTriggerPercent { get; init; } = 0.8m;
+    public decimal FastProtectiveExitTriggerPercent { get; init; } = 0.6m;
 
     [ConfigurationKeyName("FAST_PROTECTIVE_EXIT_FLOOR_PERCENT")]
     [Range(typeof(decimal), "-100", "1000")]
-    public decimal FastProtectiveExitFloorPercent { get; init; } = 0.2m;
+    public decimal FastProtectiveExitFloorPercent { get; init; } = 0.1m;
 
     [ConfigurationKeyName("REDUCE_ONLY_FORCE_EXIT_ON_DRAWDOWN")]
     public bool ReduceOnlyForceExitOnDrawdown { get; init; } = true;

@@ -12,11 +12,11 @@ public class DcaStrategyConfig
 
     public bool TakeProfitLadderEnabled { get; init; } = true;
 
-    public decimal TakeProfitLadderFirstPercent { get; init; } = 0.6m;
+    public decimal TakeProfitLadderFirstPercent { get; init; } = 0.45m;
 
     public decimal TakeProfitLadderFirstQuantityPercent { get; init; } = 50m;
 
-    public decimal TakeProfitLadderSecondPercent { get; init; } = 1m;
+    public decimal TakeProfitLadderSecondPercent { get; init; } = 0.9m;
 
     public decimal TakeProfitLadderSecondQuantityPercent { get; init; } = 30m;
 
