@@ -3369,6 +3369,17 @@ public sealed class GridBotWorker : BackgroundService
                 continue;
             }
 
+            var entryFeeShare = filledOrder.FilledQuantity > 0m && filledOrder.FeePaid > 0m
+                ? filledOrder.FeePaid * decimal.Min(1m, quantity / filledOrder.FilledQuantity)
+                : 0m;
+            if (!await HasMinimumNetProfitPercentAsync(TradeSide.Sell, entryPrice, takeProfitPrice, quantity, entryFeeShare, cancellationToken))
+            {
+                _logger.LogInformation(
+                    "TP ladder sell at {Price} skipped because net profit percent is below minimum.",
+                    takeProfitPrice);
+                continue;
+            }
+
             if (HasActiveOrderAtLevel(activeOrders, takeProfitPrice) ||
                 !plannedPrices.Add(takeProfitPrice) ||
                 await _repository.GetActiveOrderAtLevelAsync(_gridOptions.Symbol, TradeSide.Sell, takeProfitPrice, cancellationToken) is not null)
@@ -5107,7 +5118,7 @@ public sealed class GridBotWorker : BackgroundService
         var exitFee = await EstimateFeeAsync(sellPrice * quantity, cancellationToken);
         var entryFee = await EstimateFeeAsync(state.AverageEntryPrice * quantity, cancellationToken);
         var netPnl = (sellPrice - state.AverageEntryPrice) * quantity - entryFee - exitFee;
-        if (netPnl <= 0m || netPnl < _gridOptions.MinNetProfitUsdt)
+        if (!PassesMinimumNetProfit(netPnl, state.AverageEntryPrice * quantity))
         {
             return false;
         }
@@ -5131,14 +5142,61 @@ public sealed class GridBotWorker : BackgroundService
             return true;
         }
 
+        var netPnl = await CalculateNetPnlAsync(closingSide, entryPrice, exitPrice, quantity, knownEntryFee, cancellationToken);
+        return PassesMinimumNetProfit(netPnl, entryPrice * quantity);
+    }
+
+    private async Task<bool> HasMinimumNetProfitPercentAsync(
+        TradeSide closingSide,
+        decimal entryPrice,
+        decimal exitPrice,
+        decimal quantity,
+        decimal knownEntryFee,
+        CancellationToken cancellationToken)
+    {
+        if (quantity <= 0m || entryPrice <= 0m)
+        {
+            return true;
+        }
+
+        var netPnl = await CalculateNetPnlAsync(closingSide, entryPrice, exitPrice, quantity, knownEntryFee, cancellationToken);
+        return PassesMinimumNetProfitPercent(netPnl, entryPrice * quantity);
+    }
+
+    private async Task<decimal> CalculateNetPnlAsync(
+        TradeSide closingSide,
+        decimal entryPrice,
+        decimal exitPrice,
+        decimal quantity,
+        decimal knownEntryFee,
+        CancellationToken cancellationToken)
+    {
         var exitFee = await EstimateFeeAsync(exitPrice * quantity, cancellationToken);
         var entryFee = knownEntryFee > 0m ? knownEntryFee : await EstimateFeeAsync(entryPrice * quantity, cancellationToken);
         var grossPnl = closingSide == TradeSide.Sell
             ? (exitPrice - entryPrice) * quantity
             : (entryPrice - exitPrice) * quantity;
-        var netPnl = grossPnl - entryFee - exitFee;
+        return grossPnl - entryFee - exitFee;
+    }
 
-        return netPnl >= _gridOptions.MinNetProfitUsdt;
+    private bool PassesMinimumNetProfit(decimal netPnl, decimal entryNotional) =>
+        PassesMinimumNetProfitPercent(netPnl, entryNotional) &&
+        (_gridOptions.MinNetProfitUsdt <= 0m || netPnl >= _gridOptions.MinNetProfitUsdt);
+
+    private bool PassesMinimumNetProfitPercent(decimal netPnl, decimal entryNotional)
+    {
+        if (netPnl <= 0m)
+        {
+            return false;
+        }
+
+        if (_gridOptions.MinNetProfitPercent <= 0m || entryNotional <= 0m)
+        {
+            return true;
+        }
+
+        var netProfitPercent = netPnl / entryNotional * 100m;
+        return netProfitPercent >= _gridOptions.MinNetProfitPercent;
     }
 
     private decimal CalculateFee(decimal tradedNotional) => tradedNotional * (_gridOptions.FeePercent / 100m);

@@ -44,6 +44,10 @@ public sealed class GridOptions
     [Range(typeof(decimal), "0", "999999999")]
     public decimal MinNetProfitUsdt { get; init; } = 0m;
 
+    [ConfigurationKeyName("MIN_NET_PROFIT_PERCENT")]
+    [Range(typeof(decimal), "0", "1000")]
+    public decimal MinNetProfitPercent { get; init; } = 0m;
+
     [ConfigurationKeyName("DYNAMIC_ORDER_SIZE_ENABLED")]
     public bool DynamicOrderSizeEnabled { get; init; } = false;
 
