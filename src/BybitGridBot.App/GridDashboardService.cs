@@ -1823,7 +1823,7 @@ public sealed class GridDashboardService : IGridDashboardService
         <table>
           <thead>
             <tr>
-              <th>Symbol</th><th>Score</th><th>Strategy</th><th>Entry</th><th>Price</th><th>Spread</th><th>ATR</th><th>6h Volume</th><th>Support / Resistance</th><th>Reasons</th><th>Action</th>
+              <th>Symbol</th><th>Score</th><th>Strategy</th><th>Fit</th><th>Entry</th><th>Price</th><th>Spread</th><th>ATR</th><th>6h Volume</th><th>Support / Resistance</th><th>Reasons</th><th>Action</th>
             </tr>
           </thead>
           <tbody id="marketScanRows"></tbody>
@@ -2263,10 +2263,11 @@ public sealed class GridDashboardService : IGridDashboardService
     const marketScanVisibleRows = 10;
     const renderMarketScanRows = (items) => {
       byId('marketScanRows').innerHTML = !items || items.length === 0
-        ? `<tr><td colspan="11">No scan results yet.</td></tr>`
+        ? `<tr><td colspan="12">No scan results yet.</td></tr>`
         : items.map(item => {
             const labelClass = String(item.label || '').toLowerCase();
             const canCreate = String(item.category || '').toLowerCase() === 'spot' && item.score >= 15;
+            const fitTitle = `Grid ${formatNumber(item.gridFitScore)} | BTD ${formatNumber(item.btdFitScore)} | Combo ${formatNumber(item.comboFitScore)} | Reversal ${formatNumber(item.reversalFitScore)}`;
             return `
               <tr>
                 <td>
@@ -2280,6 +2281,10 @@ public sealed class GridDashboardService : IGridDashboardService
                   <span class="score-label ${escapeHtml(labelClass)}">${escapeHtml(item.label)}</span>
                 </td>
                 <td>${escapeHtml(item.recommendedStrategy)}</td>
+                <td title="${escapeHtml(fitTitle)}">
+                  <strong>${formatNumber(item.strategyFitScore)}</strong>
+                  <span class="subtle">${escapeHtml(item.strategyFitName || 'Fit')}</span>
+                </td>
                 <td>${formatNumber(item.recommendedOrderSizeUsdt)} USDT</td>
                 <td>${formatNumber(item.lastPrice)}</td>
                 <td>${formatNumber(item.spreadPercent)}%</td>

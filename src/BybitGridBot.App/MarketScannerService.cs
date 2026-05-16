@@ -136,6 +136,14 @@ public sealed class MarketScannerService : IMarketScannerService
         var scanOptions = BuildScanGridOptions(category, instrument.Symbol, lastPrice, support, resistance, atr);
         var regime = _marketRegimeAnalyzer.Analyze(ordered);
         var recommendation = _autoStrategySelector.Recommend(scanOptions, regime, ordered);
+        var strategyFit = StrategyFitAnalyzer.Analyze(
+            ordered,
+            scanOptions,
+            lastPrice,
+            atrPercent,
+            volatilityPercent,
+            momentumPercent,
+            recommendation.StrategyType);
         var reasons = new List<string>();
         var score = 50m;
 
@@ -145,6 +153,7 @@ public sealed class MarketScannerService : IMarketScannerService
         ScoreMomentum(momentumPercent, ref score, reasons);
         ScoreRangeQuality(volatilityPercent, momentumPercent, ref score, reasons);
         ScoreRecommendation(recommendation, ref score, reasons);
+        ScoreStrategyFit(strategyFit, ref score, reasons);
         ScoreDumpRisk(ordered, momentumPercent, ref score, reasons);
         ScoreMinimumOrder(instrument, scanOptions, ref score, reasons);
         if (recentLosses > 0)
@@ -166,6 +175,12 @@ public sealed class MarketScannerService : IMarketScannerService
             Label = label,
             RecommendedStrategy = recommendation.StrategyType.ToString(),
             RecommendedOrderSizeUsdt = orderSize,
+            StrategyFitScore = decimal.Round(strategyFit.SelectedFitScore, 2, MidpointRounding.AwayFromZero),
+            StrategyFitName = strategyFit.SelectedFitStrategy,
+            GridFitScore = decimal.Round(strategyFit.GridFitScore, 2, MidpointRounding.AwayFromZero),
+            BtdFitScore = decimal.Round(strategyFit.BtdFitScore, 2, MidpointRounding.AwayFromZero),
+            ComboFitScore = decimal.Round(strategyFit.ComboFitScore, 2, MidpointRounding.AwayFromZero),
+            ReversalFitScore = decimal.Round(strategyFit.ReversalFitScore, 2, MidpointRounding.AwayFromZero),
             LastPrice = decimal.Round(lastPrice, 8, MidpointRounding.AwayFromZero),
             SpreadPercent = decimal.Round(spreadPercent, 4, MidpointRounding.AwayFromZero),
             AtrPercent = decimal.Round(atrPercent, 4, MidpointRounding.AwayFromZero),
@@ -175,7 +190,7 @@ public sealed class MarketScannerService : IMarketScannerService
             Support = decimal.Round(support, 8, MidpointRounding.AwayFromZero),
             Resistance = decimal.Round(resistance, 8, MidpointRounding.AwayFromZero),
             MinOrderAmount = instrument.MinOrderAmount,
-            Reasons = reasons,
+            Reasons = reasons.Concat(strategyFit.Reasons).ToArray(),
             Settings = settings
         };
     }
@@ -265,6 +280,12 @@ public sealed class MarketScannerService : IMarketScannerService
         Label = "NO_TRADE",
         RecommendedStrategy = TradingStrategyType.NoTrade.ToString(),
         RecommendedOrderSizeUsdt = 0m,
+        StrategyFitScore = 0m,
+        StrategyFitName = "Unknown",
+        GridFitScore = 0m,
+        BtdFitScore = 0m,
+        ComboFitScore = 0m,
+        ReversalFitScore = 0m,
         LastPrice = ticker.LastPrice,
         SpreadPercent = CalculateSpreadPercent(ticker),
         AtrPercent = 0m,
@@ -385,6 +406,34 @@ public sealed class MarketScannerService : IMarketScannerService
                 score -= 30m;
                 reasons.Add("auto selector NoTrade");
                 break;
+        }
+    }
+
+    private static void ScoreStrategyFit(StrategyFitResult fit, ref decimal score, List<string> reasons)
+    {
+        if (fit.SelectedFitScore >= 75m)
+        {
+            score += 20m;
+            reasons.Add($"{fit.SelectedFitStrategy} candle fit strong {fit.SelectedFitScore:0}");
+        }
+        else if (fit.SelectedFitScore >= 60m)
+        {
+            score += 10m;
+            reasons.Add($"{fit.SelectedFitStrategy} candle fit good {fit.SelectedFitScore:0}");
+        }
+        else if (fit.SelectedFitScore >= 45m)
+        {
+            reasons.Add($"{fit.SelectedFitStrategy} candle fit neutral {fit.SelectedFitScore:0}");
+        }
+        else if (fit.SelectedFitScore >= 30m)
+        {
+            score -= 12m;
+            reasons.Add($"{fit.SelectedFitStrategy} candle fit weak {fit.SelectedFitScore:0}");
+        }
+        else
+        {
+            score -= 25m;
+            reasons.Add($"{fit.SelectedFitStrategy} candle fit poor {fit.SelectedFitScore:0}");
         }
     }
 

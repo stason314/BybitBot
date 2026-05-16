@@ -446,6 +446,18 @@ public sealed class MarketScanItem
 
     public decimal RecommendedOrderSizeUsdt { get; init; }
 
+    public decimal StrategyFitScore { get; init; }
+
+    public required string StrategyFitName { get; init; }
+
+    public decimal GridFitScore { get; init; }
+
+    public decimal BtdFitScore { get; init; }
+
+    public decimal ComboFitScore { get; init; }
+
+    public decimal ReversalFitScore { get; init; }
+
     public decimal LastPrice { get; init; }
 
     public decimal SpreadPercent { get; init; }
