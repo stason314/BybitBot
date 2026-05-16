@@ -352,6 +352,20 @@ public sealed class FuturesBotWorker : BackgroundService
             return settings;
         }
 
+        var holdReason = await GetAutoRecommendationHoldReasonAsync(settings, recommendation, cancellationToken);
+        if (holdReason is not null)
+        {
+            await RecordThrottledRiskDecisionAsync(
+                settings.Symbol,
+                "AutoRecommendationSkipped",
+                false,
+                holdReason,
+                RiskSeverity.Info,
+                RiskSuggestedAction.BlockNewOrders,
+                cancellationToken);
+            return settings;
+        }
+
         await _repository.SaveFuturesSettingsAsync(recommendedSettings, cancellationToken);
         var reason = $"Auto-applied futures recommendation: {recommendation.StrategyType}. {recommendation.Reason}";
         await RecordThrottledRiskDecisionAsync(
@@ -370,6 +384,41 @@ public sealed class FuturesBotWorker : BackgroundService
             recommendation.StrategyType,
             recommendation.Reason);
         return recommendedSettings;
+    }
+
+    private async Task<string?> GetAutoRecommendationHoldReasonAsync(
+        FuturesBotSettings settings,
+        FuturesAutoConfigRecommendation recommendation,
+        CancellationToken cancellationToken)
+    {
+        var recent = await _repository.GetFuturesRiskDecisionsAsync(settings.Symbol, 50, cancellationToken);
+        var lastApply = recent
+            .Where(decision => string.Equals(decision.Source, "AutoRecommendationApply", StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(decision => decision.CreatedAt)
+            .FirstOrDefault();
+        var now = DateTimeOffset.UtcNow;
+        var minInterval = TimeSpan.FromMinutes(Math.Max(0, _futuresOptions.AutoRecommendationMinApplyIntervalMinutes));
+        if (lastApply is not null &&
+            minInterval > TimeSpan.Zero &&
+            now - lastApply.CreatedAt < minInterval)
+        {
+            return $"FUTURES_AUTO_RECOMMENDATION_MIN_APPLY_INTERVAL_MINUTES active. Last auto apply at {lastApply.CreatedAt:O}.";
+        }
+
+        if (!IsChurnSensitiveStrategySwitch(settings.StrategyType, recommendation.StrategyType) ||
+            IsStrongRecommendation(recommendation) ||
+            lastApply is null)
+        {
+            return null;
+        }
+
+        var hysteresisInterval = TimeSpan.FromMinutes(Math.Max(10, _futuresOptions.AutoRecommendationMinApplyIntervalMinutes * 3));
+        if (now - lastApply.CreatedAt < hysteresisInterval)
+        {
+            return $"Futures auto recommendation hysteresis active for {settings.StrategyType}->{recommendation.StrategyType}. Last auto apply at {lastApply.CreatedAt:O}.";
+        }
+
+        return null;
     }
 
     private async Task RecordPositionStrategyGuardIfNeededAsync(
@@ -800,14 +849,33 @@ public sealed class FuturesBotWorker : BackgroundService
         var count = 0;
         foreach (var profile in profiles.Where(static profile => profile.Enabled))
         {
-            var position = await _repository.GetFuturesPositionAsync(profile.Symbol, cancellationToken);
-            if (position?.Size > 0m)
+            if (await HasOpenFuturesPositionAsync(profile, cancellationToken))
             {
                 count++;
             }
         }
 
         return count;
+    }
+
+    private async Task<bool> HasOpenFuturesPositionAsync(
+        FuturesBotSettings profile,
+        CancellationToken cancellationToken)
+    {
+        var storedPosition = await _repository.GetFuturesPositionAsync(profile.Symbol, cancellationToken);
+        var storedOpen = storedPosition?.Size > 0m;
+        if (_appOptions.TradingMode != TradingMode.Paper)
+        {
+            return storedOpen;
+        }
+
+        var state = await _repository.GetBotStateAsync(FuturesStateKeys.ForSymbol(profile.Symbol), cancellationToken);
+        if (state?.BaseAssetQuantity > 0m)
+        {
+            return true;
+        }
+
+        return storedOpen && state is null;
     }
 
     private async Task<FuturesAccountRiskSnapshot> ResolveAccountRiskSnapshotAsync(
@@ -970,6 +1038,30 @@ public sealed class FuturesBotWorker : BackgroundService
         current.StopLossPercent != updated.StopLossPercent ||
         current.TakeProfitPercent != updated.TakeProfitPercent ||
         current.LiquidationBufferPercent != updated.LiquidationBufferPercent;
+
+    private static bool IsChurnSensitiveStrategySwitch(
+        FuturesStrategyType current,
+        FuturesStrategyType recommended) =>
+        current != recommended &&
+        (IsLongChurnFamily(current) && IsLongChurnFamily(recommended) ||
+            IsShortChurnFamily(current) && IsShortChurnFamily(recommended));
+
+    private static bool IsLongChurnFamily(FuturesStrategyType strategyType) =>
+        strategyType is FuturesStrategyType.GridLongOnly or FuturesStrategyType.TrendFollow or FuturesStrategyType.Breakout;
+
+    private static bool IsShortChurnFamily(FuturesStrategyType strategyType) =>
+        strategyType is FuturesStrategyType.GridShortOnly or FuturesStrategyType.TrendFollowShortOnly or FuturesStrategyType.BreakdownShort;
+
+    private static bool IsStrongRecommendation(FuturesAutoConfigRecommendation recommendation)
+    {
+        var move = Math.Abs(recommendation.Metrics.MovePercent);
+        return recommendation.StrategyType switch
+        {
+            FuturesStrategyType.TrendFollow or FuturesStrategyType.TrendFollowShortOnly => move >= 1.8m,
+            FuturesStrategyType.Breakout or FuturesStrategyType.BreakdownShort => move >= 1.2m,
+            _ => false
+        };
+    }
 
     private static decimal CalculateUnrealizedPnl(string side, decimal size, decimal entryPrice, decimal currentPrice) =>
         IsShort(side)

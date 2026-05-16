@@ -1436,12 +1436,14 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
       ].join('');
       byId('runtimeGuardStats').innerHTML = [
         ['Pause Reason', runtime.pauseReason || '-'],
-        ['Auto Apply Recommendation', runtime.autoApplyRecommendationEnabled ? 'On' : 'Off'],
+        ['Auto Apply Recommendation', `${runtime.autoApplyRecommendationEnabled ? 'On' : 'Off'} / ${formatNumber(runtime.autoRecommendationMinApplyIntervalMinutes)}m`],
         ['Daily PnL / Max Loss', `${formatPnl(runtime.dailyRealizedPnl)} / ${formatNumber(runtime.maxDailyLossUsdt)} (${formatNumber(runtime.maxDailyLossEquityPercent)}%)`],
         ['Peak Equity', formatNumber(runtime.peakEquityUsdt)],
         ['Drawdown', `${formatPnl(-Math.abs(Number(runtime.currentDrawdownUsdt || 0)))} / ${formatPnl(-Math.abs(Number(runtime.currentDrawdownPercent || 0)))}%`],
         ['Max Drawdown %', formatNumber(runtime.maxDrawdownEquityPercent)],
-        ['Open Positions', `${formatNumber(runtime.openPositionCount)} / ${formatNumber(runtime.maxOpenPositions)}`]
+        ['Open Positions', `${formatNumber(runtime.openPositionCount)} / ${formatNumber(runtime.maxOpenPositions)}`],
+        ['Open Symbols', escapeHtml(runtime.openPositionSymbols || '-')],
+        ['Stale Symbols', escapeHtml(runtime.stalePositionSymbols || '-')]
       ].map(([label, value]) => `<div class="stat"><div class="label">${label}</div><div class="value">${value}</div></div>`).join('');
       if (preflight) {
         setControlStatus(
@@ -1650,9 +1652,10 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         ['Stop Cooldown', `${formatNumber(quality.stopLossCooldownMinutes)}m`],
         ['No Trade', formatNumber(quality.noTradeReasonCount)],
         ['Filter Blocks', formatNumber(quality.strategyFilterBlockCount)],
-        ['Risk Blocks', formatNumber(quality.riskBlockCount)]
+        ['Risk Blocks', formatNumber(quality.riskBlockCount)],
+        ['Current Block', quality.currentActiveBlockSource || '-']
       ].map(([label, value]) => `<div class="stat"><div class="label">${label}</div><div class="value">${escapeHtml(value)}</div></div>`).join('');
-      byId('strategyQualityReason').textContent = `Last no-trade: ${quality.lastNoTradeReason || '-'}`;
+      byId('strategyQualityReason').textContent = `Current active block: ${quality.currentActiveBlockReason || '-'} | Last historical no-trade: ${quality.lastHistoricalNoTradeReason || quality.lastNoTradeReason || '-'}`;
     };
     const renderAutoRecommendation = (recommendation) => {
       const applyStatus = recommendation.canApply
@@ -2304,6 +2307,13 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         var riskBlocks = riskDecisions.Count(decision =>
             string.Equals(decision.Source, "Risk", StringComparison.OrdinalIgnoreCase) &&
             !decision.IsAllowed);
+        var currentActiveBlock = riskDecisions
+            .Where(IsCurrentActiveBlock)
+            .OrderByDescending(decision => decision.CreatedAt)
+            .FirstOrDefault();
+        var lastHistoricalNoTrade = noTradeDecisions
+            .OrderByDescending(decision => decision.CreatedAt)
+            .FirstOrDefault();
 
         return new FuturesStrategyQualityView
         {
@@ -2316,24 +2326,40 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             NoTradeReasonCount = noTradeDecisions.Length,
             StrategyFilterBlockCount = filterBlocks,
             RiskBlockCount = riskBlocks,
-            LastNoTradeReason = noTradeDecisions
-                .OrderByDescending(decision => decision.CreatedAt)
-                .FirstOrDefault()?.Reason ?? "-"
+            CurrentActiveBlockReason = currentActiveBlock?.Reason ?? "-",
+            CurrentActiveBlockSource = currentActiveBlock?.Source ?? "-",
+            CurrentActiveBlockAt = currentActiveBlock?.CreatedAt,
+            LastNoTradeReason = lastHistoricalNoTrade?.Reason ?? "-",
+            LastHistoricalNoTradeReason = lastHistoricalNoTrade?.Reason ?? "-"
         };
     }
+
+    private static bool IsCurrentActiveBlock(FuturesRiskDecisionRecord decision) =>
+        !decision.IsAllowed &&
+        DateTimeOffset.UtcNow - decision.CreatedAt <= TimeSpan.FromMinutes(2) &&
+        (string.Equals(decision.Source, "StrategyFilter", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(decision.Source, "Risk", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(decision.Source, "AggressiveNoTrade", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(decision.Source, "AutoRecommendationSkipped", StringComparison.OrdinalIgnoreCase));
 
     private async Task<FuturesRuntimeControlsView> BuildRuntimeControlsAsync(
         IReadOnlyCollection<FuturesBotSettings> profiles,
         BotState? state,
         CancellationToken cancellationToken)
     {
-        var openPositions = 0;
+        var openSymbols = new List<string>();
+        var staleSymbols = new List<string>();
         foreach (var profile in profiles.Where(static profile => profile.Enabled))
         {
-            var position = await _repository.GetFuturesPositionAsync(profile.Symbol, cancellationToken);
-            if (position?.Size > 0m)
+            var position = await ResolveOpenPositionDiagnosticsAsync(profile, cancellationToken);
+            if (position.IsOpen)
             {
-                openPositions++;
+                openSymbols.Add(position.OpenSymbol);
+            }
+
+            if (!string.IsNullOrWhiteSpace(position.StaleSymbol))
+            {
+                staleSymbols.Add(position.StaleSymbol);
             }
         }
 
@@ -2341,6 +2367,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         {
             EnvEmergencyPauseEnabled = _riskOptions.EmergencyPause,
             AutoApplyRecommendationEnabled = _futuresOptions.AutoApplyRecommendation,
+            AutoRecommendationMinApplyIntervalMinutes = _futuresOptions.AutoRecommendationMinApplyIntervalMinutes,
             ProfilePaused = state?.IsPaused ?? false,
             PauseReason = state?.PauseReason ?? "-",
             DailyRealizedPnl = state?.DailyRealizedPnl ?? 0m,
@@ -2350,10 +2377,54 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             CurrentDrawdownUsdt = state?.CurrentDrawdownUsdt ?? 0m,
             CurrentDrawdownPercent = state?.CurrentDrawdownPercent ?? 0m,
             MaxDrawdownEquityPercent = _riskOptions.MaxDrawdownEquityPercent,
-            OpenPositionCount = openPositions,
+            OpenPositionCount = openSymbols.Count,
+            OpenPositionSymbols = openSymbols.Count == 0 ? "-" : string.Join(", ", openSymbols),
+            StalePositionSymbols = staleSymbols.Count == 0 ? "-" : string.Join(", ", staleSymbols),
             MaxOpenPositions = _riskOptions.MaxOpenPositions
         };
     }
+
+    private async Task<FuturesOpenPositionDiagnostics> ResolveOpenPositionDiagnosticsAsync(
+        FuturesBotSettings profile,
+        CancellationToken cancellationToken)
+    {
+        var storedPosition = await _repository.GetFuturesPositionAsync(profile.Symbol, cancellationToken);
+        var storedOpen = storedPosition?.Size > 0m;
+        if (_appOptions.TradingMode != TradingMode.Paper)
+        {
+            return storedOpen
+                ? new FuturesOpenPositionDiagnostics(true, FormatOpenPositionSymbol(storedPosition!), string.Empty)
+                : new FuturesOpenPositionDiagnostics(false, string.Empty, string.Empty);
+        }
+
+        var state = await _repository.GetBotStateAsync(FuturesStateKeys.ForSymbol(profile.Symbol), cancellationToken);
+        var stateOpen = state?.BaseAssetQuantity > 0m;
+        if (stateOpen)
+        {
+            var side = state!.PositionSide ?? storedPosition?.Side ?? "Buy";
+            return new FuturesOpenPositionDiagnostics(true, $"{profile.Symbol}:{side}:{state.BaseAssetQuantity}", string.Empty);
+        }
+
+        if (storedOpen && state is not null)
+        {
+            return new FuturesOpenPositionDiagnostics(
+                false,
+                string.Empty,
+                $"{profile.Symbol}:{storedPosition!.Side}:{storedPosition.Size} stored, state flat");
+        }
+
+        return storedOpen
+            ? new FuturesOpenPositionDiagnostics(true, FormatOpenPositionSymbol(storedPosition!), string.Empty)
+            : new FuturesOpenPositionDiagnostics(false, string.Empty, string.Empty);
+    }
+
+    private static string FormatOpenPositionSymbol(FuturesPositionSnapshot position) =>
+        $"{position.Symbol}:{position.Side}:{position.Size}";
+
+    private sealed record FuturesOpenPositionDiagnostics(
+        bool IsOpen,
+        string OpenSymbol,
+        string StaleSymbol);
 
     private static string BuildUserStreamFallbackReason(
         BybitUserStreamTelemetrySnapshot snapshot,
@@ -2564,8 +2635,8 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         var count = 0;
         foreach (var profile in profiles.Where(static profile => profile.Enabled))
         {
-            var position = await _repository.GetFuturesPositionAsync(profile.Symbol, cancellationToken);
-            if (position?.Size > 0m)
+            var position = await ResolveOpenPositionDiagnosticsAsync(profile, cancellationToken);
+            if (position.IsOpen)
             {
                 count++;
             }

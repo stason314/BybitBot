@@ -48,6 +48,10 @@ public sealed class FuturesOptions
     [ConfigurationKeyName("FUTURES_AUTO_APPLY_RECOMMENDATION")]
     public bool AutoApplyRecommendation { get; init; } = false;
 
+    [ConfigurationKeyName("FUTURES_AUTO_RECOMMENDATION_MIN_APPLY_INTERVAL_MINUTES")]
+    [Range(0, 1440)]
+    public int AutoRecommendationMinApplyIntervalMinutes { get; init; } = 5;
+
     [ConfigurationKeyName("FUTURES_AGGRESSIVE_MODE_KIND")]
     public string AggressiveModeKind { get; init; } = "normal";
 

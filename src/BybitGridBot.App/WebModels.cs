@@ -578,6 +578,8 @@ public sealed class FuturesRuntimeControlsView
 
     public bool AutoApplyRecommendationEnabled { get; init; }
 
+    public int AutoRecommendationMinApplyIntervalMinutes { get; init; }
+
     public bool ProfilePaused { get; init; }
 
     public string PauseReason { get; init; } = "-";
@@ -597,6 +599,10 @@ public sealed class FuturesRuntimeControlsView
     public decimal MaxDrawdownEquityPercent { get; init; }
 
     public int OpenPositionCount { get; init; }
+
+    public string OpenPositionSymbols { get; init; } = "-";
+
+    public string StalePositionSymbols { get; init; } = "-";
 
     public int MaxOpenPositions { get; init; }
 }
@@ -621,7 +627,15 @@ public sealed class FuturesStrategyQualityView
 
     public int RiskBlockCount { get; init; }
 
+    public string CurrentActiveBlockReason { get; init; } = "-";
+
+    public string CurrentActiveBlockSource { get; init; } = "-";
+
+    public DateTimeOffset? CurrentActiveBlockAt { get; init; }
+
     public string LastNoTradeReason { get; init; } = "-";
+
+    public string LastHistoricalNoTradeReason { get; init; } = "-";
 }
 
 public sealed class FuturesOrderView
