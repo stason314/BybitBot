@@ -320,6 +320,10 @@ public sealed class DashboardOrderItem
 
     public decimal RealizedPnl { get; init; }
 
+    public decimal TradePnl { get; init; }
+
+    public decimal NetCashFlow { get; init; }
+
     public decimal FeePaid { get; init; }
 
     public required string Status { get; init; }

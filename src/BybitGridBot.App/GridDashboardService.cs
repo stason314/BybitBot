@@ -1752,7 +1752,7 @@ public sealed class GridDashboardService : IGridDashboardService
         <table>
           <thead>
             <tr>
-              <th>Time</th><th>Source</th><th>Group</th><th>Side</th><th>Price</th><th>Qty</th><th>Filled</th><th>Status</th><th>Realized PnL</th><th>Fee</th><th>Order</th>
+              <th>Time</th><th>Source</th><th>Group</th><th>Side</th><th>Price</th><th>Qty</th><th>Filled</th><th>Status</th><th>Trade PnL</th><th>Cash Flow</th><th>Fee</th><th>Order</th>
             </tr>
           </thead>
           <tbody id="historyRows"></tbody>
@@ -2146,13 +2146,14 @@ public sealed class GridDashboardService : IGridDashboardService
           order.quantity,
           order.filledQuantity,
           order.status,
-          order.realizedPnl,
+          order.tradePnl,
+          order.netCashFlow,
           order.feePaid,
           order.orderLinkId
         ]);
 
       return [
-        ['Time', 'Symbol', 'Source', 'Side', 'Price', 'Qty', 'Filled', 'Status', 'Realized PnL', 'Fee', 'Order'],
+        ['Time', 'Symbol', 'Source', 'Side', 'Price', 'Qty', 'Filled', 'Status', 'Trade PnL', 'Cash Flow', 'Fee', 'Order'],
         ...rows
       ].map(row => row.map(csvEscape).join(',')).join('\n');
     };
@@ -2428,7 +2429,7 @@ public sealed class GridDashboardService : IGridDashboardService
             </tr>`).join('');
 
       byId('historyRows').innerHTML = data.orders.length === 0
-        ? `<tr><td colspan="11">No orders yet.</td></tr>`
+        ? `<tr><td colspan="12">No orders yet.</td></tr>`
         : data.orders.map(order => `
             <tr>
               <td>${formatDate(order.filledAt || order.updatedAt || order.createdAt)}</td>
@@ -2439,7 +2440,8 @@ public sealed class GridDashboardService : IGridDashboardService
               <td>${formatNumber(order.quantity)}</td>
               <td>${formatNumber(order.filledQuantity)}</td>
               <td>${order.status}</td>
-              <td>${formatNumber(order.realizedPnl)}</td>
+              <td>${formatNumber(order.tradePnl)}</td>
+              <td>${formatNumber(order.netCashFlow)}</td>
               <td>${formatNumber(order.feePaid)}</td>
               <td class="token">${order.orderLinkId}</td>
             </tr>`).join('');
@@ -2776,6 +2778,16 @@ public sealed class GridDashboardService : IGridDashboardService
             ? sourceLabel
             : ResolveOrderSource(order, sourceContext);
 
+        var filledQuantity = order.FilledQuantity;
+        var fillPrice = order.AverageFillPrice > 0m ? order.AverageFillPrice : order.Price;
+        var filledNotional = fillPrice * filledQuantity;
+        var tradePnl = order.Side == TradeSide.Sell ? order.RealizedPnl : 0m;
+        var netCashFlow = filledQuantity <= 0m
+            ? 0m
+            : order.Side == TradeSide.Buy
+                ? -filledNotional - order.FeePaid
+                : filledNotional - order.FeePaid;
+
         return new DashboardOrderItem
         {
             OrderLinkId = order.OrderLinkId,
@@ -2788,8 +2800,10 @@ public sealed class GridDashboardService : IGridDashboardService
             Source = source,
             Price = order.Price,
             Quantity = order.Quantity,
-            FilledQuantity = order.FilledQuantity,
+            FilledQuantity = filledQuantity,
             RealizedPnl = order.RealizedPnl,
+            TradePnl = tradePnl,
+            NetCashFlow = netCashFlow,
             FeePaid = order.FeePaid,
             Status = order.Status.ToString(),
             CreatedAt = order.CreatedAt,
@@ -2883,7 +2897,7 @@ public sealed class GridDashboardService : IGridDashboardService
                     PerformanceDate = group.Key.Date.ToString("yyyy-MM-dd"),
                     Strategy = group.Key.Strategy,
                     FeesPaid = filledOrders.Sum(order => order.FeePaid),
-                    NetPnl = filledOrders.Sum(order => order.RealizedPnl),
+                    NetPnl = closedOrders.Sum(order => order.RealizedPnl),
                     FilledTradesCount = filledOrders.Length,
                     ClosedTradesCount = closedOrders.Length,
                     WinRate = closedOrders.Length == 0 ? 0m : wins * 100m / closedOrders.Length
@@ -2914,9 +2928,9 @@ public sealed class GridDashboardService : IGridDashboardService
         return new DashboardStrategyPerformanceItem
         {
             Strategy = strategy,
-            GrossPnl = filledOrders.Sum(order => order.RealizedPnl + order.FeePaid),
+            GrossPnl = closedOrders.Sum(order => order.RealizedPnl + order.FeePaid),
             FeesPaid = filledOrders.Sum(order => order.FeePaid),
-            NetPnl = filledOrders.Sum(order => order.RealizedPnl),
+            NetPnl = closedOrders.Sum(order => order.RealizedPnl),
             FilledTradesCount = filledOrders.Length,
             ClosedTradesCount = closedOrders.Length,
             ActiveOrdersCount = orders.Count(order => order.IsActive),
