@@ -431,6 +431,8 @@ public sealed class GridDashboardService : IGridDashboardService
             reasons.Add($"last no-trade: {lastNoTradeReason.ReasonCode}");
         }
 
+        AddStrategySpecificReadinessReasons(profile, currentPrice, activeOrders, state, lastNoTradeReason, reasons);
+
         if (activeOrders.Length > 0)
         {
             reasons.Add($"active orders: {activeOrders.Length} ({activeBuyCount} buy, {activeSellCount} sell)");
@@ -479,6 +481,126 @@ public sealed class GridDashboardService : IGridDashboardService
         reasons.Add("price in range, no active orders, balance ok");
         return new ExecutionReadinessResult(true, "Ready", string.Join("; ", reasons), reasons);
     }
+
+    private static void AddStrategySpecificReadinessReasons(
+        GridBotSettings profile,
+        decimal currentPrice,
+        IReadOnlyCollection<GridOrder> activeOrders,
+        BotState? state,
+        NoTradeReasonRecord? lastNoTradeReason,
+        List<string> reasons)
+    {
+        switch (profile.StrategyType)
+        {
+            case TradingStrategyType.Grid:
+                AddGridReadinessReasons(profile, currentPrice, reasons);
+                break;
+            case TradingStrategyType.Btd:
+                AddBtdReadinessReasons(ParseStrategyConfig<BtdStrategyConfig>(profile), lastNoTradeReason, reasons);
+                break;
+            case TradingStrategyType.Combo:
+            case TradingStrategyType.Hybrid:
+                AddComboReadinessReasons(ParseStrategyConfig<ComboStrategyConfig>(profile), currentPrice, activeOrders, reasons);
+                break;
+            case TradingStrategyType.Dca:
+                AddDcaReadinessReasons(ParseStrategyConfig<DcaStrategyConfig>(profile), activeOrders, reasons);
+                break;
+            case TradingStrategyType.ReduceOnly:
+                if (state?.BaseAssetQuantity > 0m)
+                {
+                    reasons.Add($"reduce-only remaining base {state.BaseAssetQuantity:0.####}");
+                }
+                break;
+        }
+    }
+
+    private static void AddGridReadinessReasons(GridBotSettings profile, decimal currentPrice, List<string> reasons)
+    {
+        if (profile.Step <= 0m || profile.LowerPrice <= 0m || profile.UpperPrice <= profile.LowerPrice || currentPrice <= 0m)
+        {
+            reasons.Add("grid levels unavailable");
+            return;
+        }
+
+        var nearestBuy = FloorToGridLevel(decimal.Min(currentPrice, profile.UpperPrice), profile.LowerPrice, profile.Step);
+        if (nearestBuy >= currentPrice)
+        {
+            nearestBuy -= profile.Step;
+        }
+
+        var nearestSell = CeilingToGridLevel(decimal.Max(currentPrice, profile.LowerPrice), profile.LowerPrice, profile.Step);
+        if (nearestSell <= currentPrice)
+        {
+            nearestSell += profile.Step;
+        }
+
+        var buyText = nearestBuy >= profile.LowerPrice ? nearestBuy.ToString("0.########") : "none";
+        var sellText = nearestSell <= profile.UpperPrice ? nearestSell.ToString("0.########") : "none";
+        reasons.Add($"nearest grid buy {buyText}, sell {sellText}");
+    }
+
+    private static void AddBtdReadinessReasons(
+        BtdStrategyConfig config,
+        NoTradeReasonRecord? lastNoTradeReason,
+        List<string> reasons)
+    {
+        reasons.Add($"BTD waits for dip trigger >= {config.DipPercent:0.##}% over {config.DipLookbackCandles} candles");
+        reasons.Add($"BTD max buys {config.MaxBuys}, min spacing {config.MinMinutesBetweenBuys}m");
+        if (lastNoTradeReason is not null)
+        {
+            reasons.Add($"last BTD blocker may explain trigger: {lastNoTradeReason.ReasonCode}");
+        }
+    }
+
+    private static void AddComboReadinessReasons(
+        ComboStrategyConfig config,
+        decimal currentPrice,
+        IReadOnlyCollection<GridOrder> activeOrders,
+        List<string> reasons)
+    {
+        var activeBuyCount = activeOrders.Count(order => order.Side == TradeSide.Buy);
+        reasons.Add($"Combo buy interval {config.BuyIntervalMinutes}m, active buys {activeBuyCount}/{config.MaxActiveBuyOrders}");
+        if (config.DcaBelowPrice is > 0m)
+        {
+            var relation = currentPrice <= config.DcaBelowPrice ? "at/below" : "above";
+            reasons.Add($"DCA trigger price {config.DcaBelowPrice:0.########}; current is {relation}");
+        }
+    }
+
+    private static void AddDcaReadinessReasons(
+        DcaStrategyConfig config,
+        IReadOnlyCollection<GridOrder> activeOrders,
+        List<string> reasons)
+    {
+        var activeBuyCount = activeOrders.Count(order => order.Side == TradeSide.Buy);
+        reasons.Add($"DCA buy interval {config.BuyIntervalMinutes}m, active buys {activeBuyCount}/{config.MaxActiveBuyOrders}");
+        if (config.DipPercent > 0m)
+        {
+            reasons.Add($"DCA dip trigger >= {config.DipPercent:0.##}%");
+        }
+    }
+
+    private static T ParseStrategyConfig<T>(GridBotSettings profile)
+        where T : new()
+    {
+        try
+        {
+            return JsonSerializer.Deserialize<T>(
+                    string.IsNullOrWhiteSpace(profile.StrategyConfigJson) ? "{}" : profile.StrategyConfigJson,
+                    StrategyJsonOptions)
+                ?? new T();
+        }
+        catch (JsonException)
+        {
+            return new T();
+        }
+    }
+
+    private static decimal FloorToGridLevel(decimal value, decimal lowerPrice, decimal step) =>
+        step <= 0m ? value : lowerPrice + Math.Floor((value - lowerPrice) / step) * step;
+
+    private static decimal CeilingToGridLevel(decimal value, decimal lowerPrice, decimal step) =>
+        step <= 0m ? value : lowerPrice + Math.Ceiling((value - lowerPrice) / step) * step;
 
     private static decimal CalculatePositionDrawdownPercent(BotState? state, decimal currentPrice)
     {
@@ -1967,7 +2089,7 @@ public sealed class GridDashboardService : IGridDashboardService
         <table class="config-table">
           <thead>
             <tr>
-              <th>Symbol</th><th>Strategy</th><th>Type</th><th>Status</th><th>Score</th><th>Execution</th><th>Capital</th><th>Daily Profit</th><th>Total Profit ↓</th><th>Updated</th><th>Action</th>
+              <th>Symbol</th><th>Strategy</th><th>Type</th><th>Status</th><th>Live Score</th><th>Execution</th><th>Capital</th><th>Daily Profit</th><th>Total Profit ↓</th><th>Updated</th><th>Action</th>
             </tr>
           </thead>
           <tbody id="configSummaryRows"></tbody>
@@ -2001,7 +2123,7 @@ public sealed class GridDashboardService : IGridDashboardService
         <table>
           <thead>
             <tr>
-              <th>Symbol</th><th>Score</th><th>Strategy</th><th>Fit</th><th>Entry</th><th>Price</th><th>Spread</th><th>ATR</th><th>6h Volume</th><th>Support / Resistance</th><th>Reasons</th><th>Action</th>
+              <th>Symbol</th><th>Market Fit</th><th>Strategy</th><th>Candle Fit</th><th>Entry</th><th>Price</th><th>Spread</th><th>ATR</th><th>6h Volume</th><th>Support / Resistance</th><th>Reasons</th><th>Action</th>
             </tr>
           </thead>
           <tbody id="marketScanRows"></tbody>

@@ -4363,6 +4363,22 @@ public sealed class GridBotWorker : BackgroundService
 
         var orders = await _repository.GetOrdersAsync(_gridOptions.Symbol, cancellationToken);
         var lastNoTradeReason = (await _repository.GetNoTradeReasonsAsync(_gridOptions.Symbol, 1, cancellationToken)).FirstOrDefault();
+        var profile = ResolveCurrentProfile();
+        var executionBlockReason = ResolveExecutionGuardrailBlockReason(profile, state, lastNoTradeReason);
+        if (!string.IsNullOrWhiteSpace(executionBlockReason))
+        {
+            await RecordNoTradeReasonAsync(
+                profile,
+                ResolveExecutionGuardrailReasonCode(lastNoTradeReason),
+                $"Execution readiness blocked buy sizing: {executionBlockReason}",
+                cancellationToken);
+            _logger.LogInformation(
+                "Execution readiness blocked buy sizing for {Symbol}: {Reason}",
+                _gridOptions.Symbol,
+                executionBlockReason);
+            return 0m;
+        }
+
         var score = CalculateCapitalPairScore(state, orders, lastNoTradeReason);
         var multiplier = score >= 75m
             ? _gridOptions.PairScoreHotMultiplier
@@ -4421,6 +4437,74 @@ public sealed class GridBotWorker : BackgroundService
 
         return multiplier;
     }
+
+    private string? ResolveExecutionGuardrailBlockReason(
+        GridBotSettings? profile,
+        BotState state,
+        NoTradeReasonRecord? lastNoTradeReason)
+    {
+        if (profile?.StrategyType is TradingStrategyType.NoTrade or TradingStrategyType.Pause)
+        {
+            return $"{profile.StrategyType} mode";
+        }
+
+        if (profile?.StrategyType == TradingStrategyType.ReduceOnly)
+        {
+            return "ReduceOnly mode allows exits only";
+        }
+
+        if (state.IsPaused)
+        {
+            return string.IsNullOrWhiteSpace(state.PauseReason)
+                ? "runtime state is paused"
+                : $"runtime paused: {state.PauseReason}";
+        }
+
+        var currentPrice = state.LastObservedPrice ?? state.MarkPrice;
+        if (currentPrice > 0m && (currentPrice < _gridOptions.LowerPrice || currentPrice > _gridOptions.UpperPrice))
+        {
+            return $"price {currentPrice:0.########} outside range {_gridOptions.LowerPrice:0.########}-{_gridOptions.UpperPrice:0.########}";
+        }
+
+        if (state.BaseAssetQuantity > 0m &&
+            state.AverageEntryPrice > 0m &&
+            currentPrice > 0m &&
+            currentPrice < state.AverageEntryPrice)
+        {
+            var drawdownPercent = (state.AverageEntryPrice - currentPrice) / state.AverageEntryPrice * 100m;
+            if (drawdownPercent >= 1m)
+            {
+                return $"position drawdown {drawdownPercent:0.##}%";
+            }
+        }
+
+        if (lastNoTradeReason is not null &&
+            DateTimeOffset.UtcNow - lastNoTradeReason.CreatedAt <= TimeSpan.FromMinutes(30) &&
+            IsHardExecutionBlockReason(lastNoTradeReason.ReasonCode))
+        {
+            return $"recent no-trade {lastNoTradeReason.ReasonCode}: {lastNoTradeReason.Reason}";
+        }
+
+        return null;
+    }
+
+    private static bool IsHardExecutionBlockReason(NoTradeReason reason) => reason is
+        NoTradeReason.DumpDetected or
+        NoTradeReason.BtcRiskOff or
+        NoTradeReason.DailyLossLimitReached or
+        NoTradeReason.AggressiveStopLoss or
+        NoTradeReason.AggressiveCooldown or
+        NoTradeReason.HighVolatility or
+        NoTradeReason.MaxPositionReached or
+        NoTradeReason.PriceOutsideRange or
+        NoTradeReason.ExpectedProfitTooLow or
+        NoTradeReason.RiskRejected or
+        NoTradeReason.CapitalRejected;
+
+    private static NoTradeReason ResolveExecutionGuardrailReasonCode(NoTradeReasonRecord? lastNoTradeReason) =>
+        lastNoTradeReason is not null && IsHardExecutionBlockReason(lastNoTradeReason.ReasonCode)
+            ? lastNoTradeReason.ReasonCode
+            : NoTradeReason.CapitalRejected;
 
     private static decimal ApplyPairScoreOrderSizeMultiplier(decimal orderSizeUsdt, decimal multiplier) =>
         decimal.Max(0m, orderSizeUsdt * decimal.Max(0m, multiplier));
