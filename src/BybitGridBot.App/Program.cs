@@ -84,6 +84,7 @@ builder.Services.AddSingleton<TrendFollowingStrategy>();
 builder.Services.AddSingleton<PauseStrategy>();
 builder.Services.AddSingleton<IGridDashboardService, GridDashboardService>();
 builder.Services.AddSingleton<IFuturesDashboardService, FuturesDashboardService>();
+builder.Services.AddSingleton<IMarketScannerService, MarketScannerService>();
 
 builder.Services.AddHttpClient<IBybitRestClient, BybitRestClient>(client =>
 {
@@ -124,6 +125,9 @@ app.MapGet("/futures", (IFuturesDashboardService dashboardService) =>
 
 app.MapGet("/api/dashboard", async (string? symbol, bool? fast, IGridDashboardService dashboardService, CancellationToken cancellationToken) =>
     Results.Ok(await dashboardService.GetDashboardAsync(symbol, fast == true, cancellationToken)));
+
+app.MapGet("/api/market-scan", async (string? category, int? limit, IMarketScannerService marketScannerService, CancellationToken cancellationToken) =>
+    Results.Ok(await marketScannerService.ScanAsync(category, limit, cancellationToken)));
 
 app.MapPost("/api/settings", async (UpdateSettingsRequest request, IGridDashboardService dashboardService, CancellationToken cancellationToken) =>
 {

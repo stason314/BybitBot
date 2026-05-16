@@ -417,6 +417,58 @@ public sealed class UpdateSettingsResponse
     public IReadOnlyList<string> Errors { get; init; } = [];
 }
 
+public sealed class MarketScanResponse
+{
+    public required IReadOnlyList<MarketScanItem> Items { get; init; }
+
+    public required string Category { get; init; }
+
+    public int ScannedCount { get; init; }
+
+    public int CandidateCount { get; init; }
+
+    public int FailedCount { get; init; }
+
+    public DateTimeOffset GeneratedAt { get; init; }
+}
+
+public sealed class MarketScanItem
+{
+    public required string Symbol { get; init; }
+
+    public required string Category { get; init; }
+
+    public decimal Score { get; init; }
+
+    public required string Label { get; init; }
+
+    public required string RecommendedStrategy { get; init; }
+
+    public decimal RecommendedOrderSizeUsdt { get; init; }
+
+    public decimal LastPrice { get; init; }
+
+    public decimal SpreadPercent { get; init; }
+
+    public decimal AtrPercent { get; init; }
+
+    public decimal VolatilityPercent { get; init; }
+
+    public decimal MomentumPercent { get; init; }
+
+    public decimal Volume6hUsdt { get; init; }
+
+    public decimal Support { get; init; }
+
+    public decimal Resistance { get; init; }
+
+    public decimal MinOrderAmount { get; init; }
+
+    public required IReadOnlyList<string> Reasons { get; init; }
+
+    public required UpdateSettingsRequest Settings { get; init; }
+}
+
 public sealed class FuturesDashboardResponse
 {
     public required IReadOnlyList<FuturesProfileItem> Profiles { get; init; }
