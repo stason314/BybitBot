@@ -130,7 +130,7 @@ public sealed class MarketScannerService : IMarketScannerService
             .Where(order => order.Side == TradeSide.Sell &&
                 order.FilledAt is not null &&
                 DateTimeOffset.UtcNow - order.FilledAt.Value <= TimeSpan.FromHours(12) &&
-                order.TradePnl < 0m)
+                order.RealizedPnl < 0m)
             .Count();
 
         var scanOptions = BuildScanGridOptions(category, instrument.Symbol, lastPrice, support, resistance, atr);
