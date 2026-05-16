@@ -633,6 +633,12 @@ public sealed class FuturesBotWorker : BackgroundService
             return $"FUTURES_MAX_ENTRY_ATR_PERCENT filter blocked entry. ATR={atrPercent:F4}%.";
         }
 
+        var feeOpportunityReason = GetEntryFeeOpportunityBlockReason(intent, candles);
+        if (feeOpportunityReason is not null)
+        {
+            return feeOpportunityReason;
+        }
+
         var cooldownReason = await GetStopLossCooldownReasonAsync(settings.Symbol, cancellationToken);
         if (cooldownReason is not null)
         {
@@ -678,7 +684,7 @@ public sealed class FuturesBotWorker : BackgroundService
         return $"Position is full; waiting for net-positive exit or breakout continuation. Current notional={currentNotional:F4}, next order={intent.NotionalUsdt:F4}, max={maxNotional:F4}.";
     }
 
-    private static string? GetFeeProtectedExitNoTradeReason(
+    private string? GetFeeProtectedExitNoTradeReason(
         FuturesPositionSnapshot position,
         FuturesTradeIntent intent)
     {
@@ -698,26 +704,53 @@ public sealed class FuturesBotWorker : BackgroundService
             FuturesTradeAction.CloseShort => (position.EntryPrice - intent.Price) * intent.Quantity,
             _ => 0m
         };
-        if (grossPnl <= 0m)
-        {
-            return null;
-        }
-
         var entryFee = position.EntryPrice * intent.Quantity * DefaultFuturesFeeRatePercent / 100m;
         var exitFee = intent.NotionalUsdt * DefaultFuturesFeeRatePercent / 100m;
         var estimatedNetPnl = grossPnl - entryFee - exitFee;
-        if (estimatedNetPnl > 0m)
+        var threshold = ResolveMinNetProfitThreshold(intent.NotionalUsdt);
+        if (estimatedNetPnl >= threshold)
         {
             return null;
         }
 
-        return $"Fee protection blocked {intent.Reason} close because estimated net PnL after round-trip fees is not positive. Gross={grossPnl:F6}, fees={entryFee + exitFee:F6}, net={estimatedNetPnl:F6}.";
+        return $"Fee protection: waiting for net profit threshold. Reason={intent.Reason}, gross={grossPnl:F6}, fees={entryFee + exitFee:F6}, net={estimatedNetPnl:F6}, required={threshold:F6}.";
     }
 
     private static bool IsFeeProtectedExitReason(string reason) =>
         string.Equals(reason, "take-profit", StringComparison.OrdinalIgnoreCase) ||
         string.Equals(reason, "partial-take-profit", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(reason, "trailing-profit", StringComparison.OrdinalIgnoreCase) ||
         string.Equals(reason, "exit-signal", StringComparison.OrdinalIgnoreCase);
+
+    private string? GetEntryFeeOpportunityBlockReason(
+        FuturesTradeIntent intent,
+        IReadOnlyList<Candle> candles)
+    {
+        if (intent.NotionalUsdt <= 0m || intent.Price <= 0m)
+        {
+            return null;
+        }
+
+        var estimatedMovePercent = CalculateEntryOpportunityPercent(candles);
+        var estimatedGrossPnl = intent.NotionalUsdt * estimatedMovePercent / 100m;
+        var roundTripFees = intent.NotionalUsdt * DefaultFuturesFeeRatePercent / 100m * 2m;
+        var threshold = ResolveMinNetProfitThreshold(intent.NotionalUsdt);
+        var requiredGrossPnl = roundTripFees + threshold;
+        if (estimatedGrossPnl >= requiredGrossPnl)
+        {
+            return null;
+        }
+
+        return $"Fee protection: entry skipped because expected ATR/range opportunity does not cover round-trip fees plus min profit. ExpectedGross={estimatedGrossPnl:F6}, fees={roundTripFees:F6}, requiredNet={threshold:F6}.";
+    }
+
+    private decimal ResolveMinNetProfitThreshold(decimal notionalUsdt)
+    {
+        var minUsdt = decimal.Max(0m, _riskOptions.MinNetProfitUsdt);
+        var minPercent = decimal.Max(0m, _riskOptions.MinNetProfitPercent);
+        var percentThreshold = notionalUsdt * minPercent / 100m;
+        return decimal.Max(minUsdt, percentThreshold);
+    }
 
     private async Task<string?> GetAggressiveEntryBlockReasonAsync(
         FuturesBotSettings settings,
@@ -893,13 +926,27 @@ public sealed class FuturesBotWorker : BackgroundService
         }, cancellationToken);
     }
 
-    private static string NormalizeStrategyNoTradeReason(string reason) =>
-        reason.StartsWith("Position is full;", StringComparison.Ordinal) ||
-        reason.StartsWith("Position is at max notional;", StringComparison.Ordinal)
-            ? "Position is full; waiting for net-positive exit or breakout continuation."
-            : reason.StartsWith("Fee protection blocked ", StringComparison.Ordinal)
-                ? "Fee protection blocked close because estimated net PnL after round-trip fees is not positive."
-            : reason;
+    private static string NormalizeStrategyNoTradeReason(string reason)
+    {
+        if (reason.StartsWith("Position is full;", StringComparison.Ordinal) ||
+            reason.StartsWith("Position is at max notional;", StringComparison.Ordinal))
+        {
+            return "Position is full; waiting for net-positive exit or breakout continuation.";
+        }
+
+        if (reason.StartsWith("Fee protection blocked ", StringComparison.Ordinal) ||
+            reason.StartsWith("Fee protection: waiting for net profit threshold.", StringComparison.Ordinal))
+        {
+            return "Fee protection: waiting for net profit threshold.";
+        }
+
+        if (reason.StartsWith("Fee protection: entry skipped ", StringComparison.Ordinal))
+        {
+            return "Fee protection: entry skipped because expected opportunity does not cover fees plus min profit.";
+        }
+
+        return reason;
+    }
 
     private static int CountConsecutiveLosingExits(IReadOnlyCollection<FuturesFillRecord> fills)
     {
@@ -1236,6 +1283,23 @@ public sealed class FuturesBotWorker : BackgroundService
 
         var atr = total / Math.Max(1, lookback.Length - 1);
         return atr / ordered[^1].Close * 100m;
+    }
+
+    private static decimal CalculateEntryOpportunityPercent(IReadOnlyList<Candle> candles)
+    {
+        var ordered = candles.OrderBy(candle => candle.OpenTime).ToArray();
+        if (ordered.Length < 2 || ordered[^1].Close <= 0m)
+        {
+            return 0m;
+        }
+
+        var lookback = ordered.TakeLast(Math.Min(30, ordered.Length)).ToArray();
+        var lastPrice = ordered[^1].Close;
+        var atrPercent = CalculateAtrPercent(lookback);
+        var rangePercent = lastPrice > 0m
+            ? (lookback.Max(candle => candle.High) - lookback.Min(candle => candle.Low)) / lastPrice * 100m
+            : 0m;
+        return decimal.Max(atrPercent, rangePercent * 0.25m);
     }
 
     private static decimal CalculateMovePercent(IReadOnlyList<Candle> candles)
