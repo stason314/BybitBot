@@ -14,5 +14,5 @@ public sealed class FuturesStrategyConfig
 
     public decimal StopLossPercent { get; init; } = 2m;
 
-    public decimal TakeProfitPercent { get; init; } = 4m;
+    public decimal TakeProfitPercent { get; init; } = 6m;
 }

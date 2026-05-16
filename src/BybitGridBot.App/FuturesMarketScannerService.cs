@@ -2,6 +2,7 @@ using System.Text.Json;
 using BybitGridBot.Bybit;
 using BybitGridBot.Domain;
 using BybitGridBot.Risk;
+using BybitGridBot.Storage;
 using BybitGridBot.Strategy;
 using Microsoft.Extensions.Options;
 
@@ -18,6 +19,7 @@ public sealed class FuturesMarketScannerService : IFuturesMarketScannerService
     private const int ScanCandles = 72;
     private const int MaxConcurrency = 6;
     private const int DefaultLimit = 120;
+    private const decimal DefaultFuturesFeeRatePercent = 0.06m;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     private readonly IBybitRestClient _bybitRestClient;
@@ -25,6 +27,7 @@ public sealed class FuturesMarketScannerService : IFuturesMarketScannerService
     private readonly FuturesStrategyFitAnalyzer _fitAnalyzer;
     private readonly FuturesOptions _futuresOptions;
     private readonly FuturesRiskOptions _riskOptions;
+    private readonly IGridRepository _repository;
     private readonly ILogger<FuturesMarketScannerService> _logger;
 
     public FuturesMarketScannerService(
@@ -33,6 +36,7 @@ public sealed class FuturesMarketScannerService : IFuturesMarketScannerService
         FuturesStrategyFitAnalyzer fitAnalyzer,
         IOptions<FuturesOptions> futuresOptions,
         IOptions<FuturesRiskOptions> riskOptions,
+        IGridRepository repository,
         ILogger<FuturesMarketScannerService> logger)
     {
         _bybitRestClient = bybitRestClient;
@@ -40,6 +44,7 @@ public sealed class FuturesMarketScannerService : IFuturesMarketScannerService
         _fitAnalyzer = fitAnalyzer;
         _futuresOptions = futuresOptions.Value;
         _riskOptions = riskOptions.Value;
+        _repository = repository;
         _logger = logger;
     }
 
@@ -97,7 +102,8 @@ public sealed class FuturesMarketScannerService : IFuturesMarketScannerService
             FailedCount = failures,
             GeneratedAt = DateTimeOffset.UtcNow,
             Items = results
-                .OrderByDescending(item => item.Score)
+                .OrderByDescending(item => item.ActionabilityScore)
+                .ThenByDescending(item => item.MarketFitScore)
                 .ThenByDescending(item => item.Volume6hUsdt)
                 .ToArray()
         };
@@ -164,12 +170,33 @@ public sealed class FuturesMarketScannerService : IFuturesMarketScannerService
             support,
             resistance,
             lastPrice);
+        var position = await _repository.GetFuturesPositionAsync(instrument.Symbol, cancellationToken);
+        var recentRiskDecisions = await _repository.GetFuturesRiskDecisionsAsync(instrument.Symbol, 20, cancellationToken);
+        var actionability = BuildActionability(
+            score,
+            strategy,
+            direction,
+            position,
+            maxNotional,
+            entryNotional,
+            atrPercent,
+            volatilityPercent,
+            spreadPercent,
+            recommendation.TakeProfitPercent,
+            recentRiskDecisions);
+        foreach (var reason in actionability.Reasons)
+        {
+            reasons.Add(reason);
+        }
 
         return new FuturesMarketScanItem
         {
             Symbol = instrument.Symbol,
             Category = "linear",
             Score = score,
+            MarketFitScore = score,
+            ActionabilityScore = actionability.Score,
+            ActionabilityLabel = actionability.Label,
             Label = label,
             RecommendedStrategy = FormatEnum(strategy),
             RecommendedDirection = FormatEnum(direction),
@@ -197,6 +224,115 @@ public sealed class FuturesMarketScannerService : IFuturesMarketScannerService
         };
     }
 
+    private FuturesActionabilityView BuildActionability(
+        decimal marketFitScore,
+        FuturesStrategyType strategy,
+        FuturesDirection direction,
+        FuturesPositionSnapshot? position,
+        decimal maxNotional,
+        decimal entryNotional,
+        decimal atrPercent,
+        decimal volatilityPercent,
+        decimal spreadPercent,
+        decimal takeProfitPercent,
+        IReadOnlyCollection<FuturesRiskDecisionRecord> recentRiskDecisions)
+    {
+        var score = marketFitScore;
+        var reasons = new List<string>();
+
+        if (position is { Size: > 0m })
+        {
+            if (IsOppositePosition(position.Side, direction))
+            {
+                score -= 45m;
+                reasons.Add($"action blocked: opposite open position {position.Side}");
+            }
+            else
+            {
+                reasons.Add($"action compatible with open position {position.Side}");
+            }
+
+            var remainingNotional = maxNotional - position.PositionValueUsdt;
+            if (remainingNotional < entryNotional)
+            {
+                score -= 30m;
+                reasons.Add($"action blocked: position full remaining {remainingNotional:0.####} < next {entryNotional:0.####}");
+            }
+        }
+        else
+        {
+            reasons.Add("action no open position");
+        }
+
+        var estimatedMovePercent = decimal.Max(atrPercent, volatilityPercent * 0.25m);
+        var estimatedGrossPnl = entryNotional * estimatedMovePercent / 100m;
+        var roundTripFees = entryNotional * DefaultFuturesFeeRatePercent / 100m * 2m;
+        var minNetProfit = ResolveMinNetProfitThreshold(entryNotional);
+        if (estimatedGrossPnl < roundTripFees + minNetProfit)
+        {
+            score -= 25m;
+            reasons.Add("action weak: ATR/range does not cover fees plus min profit");
+        }
+        else
+        {
+            reasons.Add("action fee opportunity ok");
+        }
+
+        if (takeProfitPercent > 0m && volatilityPercent < takeProfitPercent * 0.5m)
+        {
+            score -= 10m;
+            reasons.Add("action weak: TP outside recent range");
+        }
+        else
+        {
+            reasons.Add("action TP reachable by recent range");
+        }
+
+        if (spreadPercent > 0.15m)
+        {
+            score -= 10m;
+            reasons.Add("action weak: spread reduces net profit");
+        }
+
+        var activeBlock = recentRiskDecisions
+            .Where(decision => !decision.IsAllowed)
+            .Where(decision => DateTimeOffset.UtcNow - decision.CreatedAt <= TimeSpan.FromMinutes(2))
+            .Where(IsActionabilityBlockingSource)
+            .OrderByDescending(decision => decision.CreatedAt)
+            .FirstOrDefault();
+        if (activeBlock is not null)
+        {
+            score -= 20m;
+            reasons.Add($"action blocked by {activeBlock.Source}: {activeBlock.Reason}");
+        }
+
+        score = Math.Clamp(decimal.Round(score, 2, MidpointRounding.AwayFromZero), 0m, 100m);
+        return new FuturesActionabilityView(score, ResolveLabel(score, strategy), reasons);
+    }
+
+    private static bool IsOppositePosition(string side, FuturesDirection direction) =>
+        (string.Equals(side, "Buy", StringComparison.OrdinalIgnoreCase) && direction == FuturesDirection.ShortOnly) ||
+        (string.Equals(side, "Sell", StringComparison.OrdinalIgnoreCase) && direction == FuturesDirection.LongOnly);
+
+    private static bool IsActionabilityBlockingSource(FuturesRiskDecisionRecord decision) =>
+        string.Equals(decision.Source, "Risk", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(decision.Source, "StrategyFilter", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(decision.Source, "AggressiveGuard", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(decision.Source, "AggressiveNoTrade", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(decision.Source, "AutoRecommendationSkipped", StringComparison.OrdinalIgnoreCase);
+
+    private decimal ResolveMinNetProfitThreshold(decimal notionalUsdt)
+    {
+        var minUsdt = decimal.Max(0m, _riskOptions.MinNetProfitUsdt);
+        var minPercent = decimal.Max(0m, _riskOptions.MinNetProfitPercent);
+        return decimal.Max(minUsdt, notionalUsdt * minPercent / 100m);
+    }
+
+    private readonly record struct FuturesActionabilityView(
+        decimal Score,
+        string Label,
+        IReadOnlyList<string> Reasons);
+
     private FuturesBotSettings BuildBaseSettings(string symbol) => new()
     {
         Enabled = true,
@@ -208,7 +344,7 @@ public sealed class FuturesMarketScannerService : IFuturesMarketScannerService
         MaxNotionalUsdt = ResolveMaxNotional(),
         MaxMarginUsdt = ResolveMaxMargin(ResolveMaxNotional(), _futuresOptions.Leverage),
         StopLossPercent = 2m,
-        TakeProfitPercent = 4m,
+        TakeProfitPercent = 6m,
         LiquidationBufferPercent = _riskOptions.MinLiquidationBufferPercent,
         ReduceOnlyEnabled = true,
         AggressiveModeEnabled = _futuresOptions.AggressiveModeEnabled,
@@ -352,6 +488,9 @@ public sealed class FuturesMarketScannerService : IFuturesMarketScannerService
         Symbol = instrument.Symbol,
         Category = "linear",
         Score = 0m,
+        MarketFitScore = 0m,
+        ActionabilityScore = 0m,
+        ActionabilityLabel = "NO_TRADE",
         Label = "NO_TRADE",
         RecommendedStrategy = "pause",
         RecommendedDirection = "long-only",

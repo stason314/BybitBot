@@ -146,6 +146,22 @@ public sealed class FuturesProtectionService
         }
     }
 
+    public async Task<FuturesProtectionTargets> ResolveTargetsAsync(
+        FuturesBotSettings settings,
+        FuturesPositionSnapshot position,
+        CancellationToken cancellationToken)
+    {
+        if (position.Size <= 0m || position.EntryPrice <= 0m)
+        {
+            return new FuturesProtectionTargets(0m, 0m);
+        }
+
+        var instrument = await _bybitRestClient.GetInstrumentInfoAsync(settings.Category, settings.Symbol, cancellationToken);
+        return new FuturesProtectionTargets(
+            ResolveStopLoss(settings, position, instrument),
+            ResolveTakeProfit(settings, position, instrument));
+    }
+
     private Task RecordDecisionAsync(string source, string symbol, bool isAllowed, string reason, CancellationToken cancellationToken) =>
         _repository.AddFuturesRiskDecisionAsync(new FuturesRiskDecisionRecord
         {
@@ -192,3 +208,5 @@ public sealed class FuturesProtectionService
     private static string FormatDecimal(decimal value) =>
         value.ToString("0.####################", CultureInfo.InvariantCulture);
 }
+
+public readonly record struct FuturesProtectionTargets(decimal StopLoss, decimal TakeProfit);

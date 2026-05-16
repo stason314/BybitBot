@@ -271,7 +271,7 @@ public sealed class FuturesStrategiesTests
             MaxNotionalUsdt = 100m,
             MaxMarginUsdt = 50m,
             StopLossPercent = 1m,
-            TakeProfitPercent = 2m,
+            TakeProfitPercent = 3m,
             AggressiveModeEnabled = aggressiveModeEnabled,
             AggressiveModeKind = aggressiveModeKind
         },

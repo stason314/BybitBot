@@ -117,6 +117,7 @@ FUTURES_MAINNET_CONFIRM_TELEGRAM_ALERTS=false
 BYBIT_PRIVATE_WS_URL=
 ```
 
+Futures auto recommendation and market scanner use a minimum 3:1 risk/reward profile: take profit must be at least 3x stop loss.
 Cross margin and hedge mode are deliberately rejected by the futures API until the second phase.
 Shorts are paper-only by default and can be enabled on testnet only with `FUTURES_TESTNET_SHORTS_ENABLED=true`.
 Mainnet order placement requires both `FUTURES_MAINNET_ENABLED=true` and `FUTURES_MAINNET_ORDER_PLACEMENT_ENABLED=true` plus the checklist flags.

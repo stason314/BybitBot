@@ -43,6 +43,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
     private readonly AppOptions _appOptions;
     private readonly FuturesExecutionService _executionService;
     private readonly FuturesOptions _futuresOptions;
+    private readonly FuturesProtectionService _protectionService;
     private readonly FuturesRiskManager _riskManager;
     private readonly FuturesRiskOptions _riskOptions;
     private readonly FuturesStrategyQualityOptions _strategyQualityOptions;
@@ -55,6 +56,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         BybitUserStreamTelemetry userStreamTelemetry,
         IOptions<AppOptions> appOptions,
         FuturesExecutionService executionService,
+        FuturesProtectionService protectionService,
         IOptions<FuturesOptions> futuresOptions,
         IOptions<FuturesRiskOptions> riskOptions,
         IOptions<FuturesStrategyQualityOptions> strategyQualityOptions,
@@ -67,6 +69,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         _userStreamTelemetry = userStreamTelemetry;
         _appOptions = appOptions.Value;
         _executionService = executionService;
+        _protectionService = protectionService;
         _futuresOptions = futuresOptions.Value;
         _riskOptions = riskOptions.Value;
         _strategyQualityOptions = strategyQualityOptions.Value;
@@ -139,11 +142,11 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             PaperAccount = BuildPaperAccount(state, position, _futuresOptions.PaperInitialEquityUsdt, fillLedger, _appOptions.TradingMode),
             PnlStats = BuildPnlStats(recentFills, fillLedger),
             TestnetSoak = BuildTestnetSoakStatus(position, activeOrders, recentOrders, recentFills, riskDecisions),
-            ProtectionStatus = BuildProtectionStatus(selectedSettings, position, bybitPositionSnapshot, riskDecisions),
+            ProtectionStatus = BuildProtectionStatus(selectedSettings, recommendation, position, bybitPositionSnapshot, riskDecisions, _appOptions.TradingMode == TradingMode.Paper),
             UserStreamStatus = BuildUserStreamStatus(),
             RuntimeControls = runtimeControls,
             AggressiveMode = BuildAggressiveModeStatus(selectedSettings, recentFills, riskDecisions),
-            StrategyQuality = BuildStrategyQuality(selectedSettings, positionSnapshot, selectedInstrumentRules, riskDecisions),
+            StrategyQuality = BuildStrategyQuality(selectedSettings, positionSnapshot, selectedInstrumentRules, riskDecisions, recentFills),
             AutoRecommendation = MapAutoRecommendation(
                 recommendation,
                 selectedSettings,
@@ -240,6 +243,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             SuggestedAction = RiskSuggestedAction.Allow.ToString(),
             CreatedAt = DateTimeOffset.UtcNow
         }, cancellationToken);
+        await TryUpdateProtectionAfterRecommendationApplyAsync(settings, recommendedSettings, position, cancellationToken);
 
         return new UpdateSettingsResponse
         {
@@ -247,6 +251,54 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             Symbol = settings.Symbol,
             Message = $"Futures auto recommendation applied: {recommendation.StrategyType}. {recommendation.Reason}"
         };
+    }
+
+    private async Task TryUpdateProtectionAfterRecommendationApplyAsync(
+        FuturesBotSettings currentSettings,
+        FuturesBotSettings recommendedSettings,
+        FuturesPositionSnapshot position,
+        CancellationToken cancellationToken)
+    {
+        if (position.Size <= 0m || position.EntryPrice <= 0m)
+        {
+            return;
+        }
+
+        var currentTargets = await _protectionService.ResolveTargetsAsync(currentSettings, position, cancellationToken);
+        var recommendedTargets = await _protectionService.ResolveTargetsAsync(recommendedSettings, position, cancellationToken);
+        if (recommendedTargets.StopLoss <= 0m ||
+            recommendedTargets.TakeProfit <= 0m ||
+            TargetsMatch(currentTargets, recommendedTargets))
+        {
+            return;
+        }
+
+        if (WouldWorsenStopRisk(position.Side, currentTargets.StopLoss, recommendedTargets.StopLoss))
+        {
+            await _repository.AddFuturesRiskDecisionAsync(new FuturesRiskDecisionRecord
+            {
+                Symbol = currentSettings.Symbol,
+                Source = "AutoRecommendationProtectionSkipped",
+                IsAllowed = false,
+                Reason = $"Auto recommendation protection update skipped because recommended stop-loss would increase risk. Current StopLoss={currentTargets.StopLoss}, TakeProfit={currentTargets.TakeProfit}; Recommended StopLoss={recommendedTargets.StopLoss}, TakeProfit={recommendedTargets.TakeProfit}.",
+                Severity = RiskSeverity.Warning.ToString(),
+                SuggestedAction = RiskSuggestedAction.BlockNewOrders.ToString(),
+                CreatedAt = DateTimeOffset.UtcNow
+            }, cancellationToken);
+            return;
+        }
+
+        await _protectionService.EnsureProtectiveStopAsync(recommendedSettings, position, cancellationToken);
+        await _repository.AddFuturesRiskDecisionAsync(new FuturesRiskDecisionRecord
+        {
+            Symbol = currentSettings.Symbol,
+            Source = "AutoRecommendationProtectionUpdate",
+            IsAllowed = true,
+            Reason = $"Auto recommendation protection update applied. Current StopLoss={currentTargets.StopLoss}, TakeProfit={currentTargets.TakeProfit}; Recommended StopLoss={recommendedTargets.StopLoss}, TakeProfit={recommendedTargets.TakeProfit}.",
+            Severity = RiskSeverity.Info.ToString(),
+            SuggestedAction = RiskSuggestedAction.Allow.ToString(),
+            CreatedAt = DateTimeOffset.UtcNow
+        }, cancellationToken);
     }
 
     public async Task<UpdateSettingsResponse> UpdateSettingsAsync(UpdateFuturesSettingsRequest request, CancellationToken cancellationToken)
@@ -1164,7 +1216,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         <table>
           <thead>
             <tr>
-              <th>Symbol</th><th>Score</th><th>Strategy</th><th>Fit</th><th>Entry</th><th>Price</th><th>ATR</th><th>6h Volume</th><th>Support / Resistance</th><th>Reasons</th><th>Action</th>
+              <th>Symbol</th><th>Actionability</th><th>Market</th><th>Strategy</th><th>Fit</th><th>Entry</th><th>Price</th><th>ATR</th><th>6h Volume</th><th>Support / Resistance</th><th>Reasons</th><th>Action</th>
             </tr>
           </thead>
           <tbody id="futuresMarketScanRows"></tbody>
@@ -1199,6 +1251,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
           <div><label for="positionMode">Position Mode</label><select id="positionMode" name="positionMode"><option value="oneway">One-way</option></select></div>
           <div><label for="maxNotionalUsdt">Max Notional USDT</label><input id="maxNotionalUsdt" name="maxNotionalUsdt" type="number" step="0.00000001" required /></div>
           <div><label for="maxMarginUsdt">Max Margin USDT</label><input id="maxMarginUsdt" name="maxMarginUsdt" type="number" step="0.00000001" required /></div>
+          <div><label for="rrPreset">RR Preset</label><select id="rrPreset" name="rrPreset"><option value="2/6">Conservative 2/6</option><option value="3/9">Balanced 3/9</option><option value="10/30">Swing 10/30</option><option value="custom">Custom</option></select></div>
           <div><label for="stopLossPercent">Stop Loss %</label><input id="stopLossPercent" name="stopLossPercent" type="number" step="0.0001" required /></div>
           <div><label for="takeProfitPercent">Take Profit %</label><input id="takeProfitPercent" name="takeProfitPercent" type="number" step="0.0001" required /></div>
           <div><label for="liquidationBufferPercent">Liquidation Buffer %</label><input id="liquidationBufferPercent" name="liquidationBufferPercent" type="number" step="0.0001" required /></div>
@@ -1252,6 +1305,11 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
   <script>
     const byId = (id) => document.getElementById(id);
     const fields = ['symbol','category','enabled','strategyType','strategyConfigJson','leverage','marginMode','positionMode','direction','maxNotionalUsdt','maxMarginUsdt','stopLossPercent','takeProfitPercent','liquidationBufferPercent','reduceOnlyEnabled','aggressiveModeEnabled','aggressiveModeKind','aggressiveEntryMultiplier','aggressiveMaxOrdersPerHour','aggressiveMinSecondsBetweenEntries','aggressiveMaxConsecutiveLosses'];
+    const rrPresets = {
+      '2/6': { stopLossPercent: 2, takeProfitPercent: 6 },
+      '3/9': { stopLossPercent: 3, takeProfitPercent: 9 },
+      '10/30': { stopLossPercent: 10, takeProfitPercent: 30 }
+    };
     const defaults = {
       symbol: 'BTCUSDT',
       category: 'linear',
@@ -1265,7 +1323,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
       maxNotionalUsdt: 100,
       maxMarginUsdt: 50,
       stopLossPercent: 2,
-      takeProfitPercent: 4,
+      takeProfitPercent: 6,
       liquidationBufferPercent: 15,
       reduceOnlyEnabled: true,
       aggressiveModeEnabled: false,
@@ -1319,6 +1377,25 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
       controlStatusKind = kind || null;
     };
     const clearControlStatus = () => setControlStatus('', '', null);
+    const resolveRrPreset = (stopLossPercent, takeProfitPercent) => {
+      const sl = Number(stopLossPercent || 0);
+      const tp = Number(takeProfitPercent || 0);
+      const match = Object.entries(rrPresets).find(([, preset]) =>
+        Math.abs(preset.stopLossPercent - sl) < 0.0001 &&
+        Math.abs(preset.takeProfitPercent - tp) < 0.0001);
+      return match ? match[0] : 'custom';
+    };
+    const updateStrategyRiskConfig = () => {
+      const raw = byId('strategyConfigJson').value || '{}';
+      try {
+        const config = JSON.parse(raw);
+        config.stopLossPercent = Number(byId('stopLossPercent').value || 0);
+        config.takeProfitPercent = Number(byId('takeProfitPercent').value || 0);
+        byId('strategyConfigJson').value = JSON.stringify(config);
+      } catch {
+        // Keep invalid JSON untouched so validation can report the real error on save.
+      }
+    };
     const updateForm = (settings) => {
       byId('symbol').value = settings.symbol;
       byId('category').value = settings.category;
@@ -1333,6 +1410,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
       byId('maxMarginUsdt').value = settings.maxMarginUsdt;
       byId('stopLossPercent').value = settings.stopLossPercent;
       byId('takeProfitPercent').value = settings.takeProfitPercent;
+      byId('rrPreset').value = resolveRrPreset(settings.stopLossPercent, settings.takeProfitPercent);
       byId('liquidationBufferPercent').value = settings.liquidationBufferPercent;
       byId('reduceOnlyEnabled').value = String(settings.reduceOnlyEnabled);
       byId('aggressiveModeEnabled').value = String(settings.aggressiveModeEnabled);
@@ -1397,13 +1475,15 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
     };
     const renderFuturesMarketScanRows = (items) => {
       byId('futuresMarketScanRows').innerHTML = !items || items.length === 0
-        ? '<tr><td colspan="11">No futures scan results yet.</td></tr>'
+        ? '<tr><td colspan="12">No futures scan results yet.</td></tr>'
         : items.map(item => {
-            const canApply = item.settings && item.score >= 15;
+            const actionabilityScore = Number(item.actionabilityScore ?? item.score ?? 0);
+            const canApply = item.settings && actionabilityScore >= 15;
             return `
               <tr>
                 <td><strong>${escapeHtml(item.symbol)}</strong><br><span class="subtle">${escapeHtml(item.category)}</span></td>
-                <td><strong>${formatNumber(item.score)}</strong><br><span class="subtle">${escapeHtml(item.label)}</span></td>
+                <td><strong>${formatNumber(item.actionabilityScore)}</strong><br><span class="subtle">${escapeHtml(item.actionabilityLabel || item.label)}</span></td>
+                <td><strong>${formatNumber(item.marketFitScore || item.score)}</strong><br><span class="subtle">${escapeHtml(item.label)}</span></td>
                 <td>${escapeHtml(item.recommendedStrategy)}<br><span class="subtle">${escapeHtml(item.recommendedDirection)}</span></td>
                 <td title="Grid L/S ${formatNumber(item.gridLongFitScore)} / ${formatNumber(item.gridShortFitScore)}; Trend L/S ${formatNumber(item.trendLongFitScore)} / ${formatNumber(item.trendShortFitScore)}; BO/BD ${formatNumber(item.breakoutFitScore)} / ${formatNumber(item.breakdownFitScore)}">
                   <strong>${formatNumber(item.strategyFitScore)}</strong><br><span class="subtle">${escapeHtml(item.strategyFitName || 'Fit')}</span>
@@ -1506,6 +1586,8 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         ['Gross Loss', formatPnl(stats.grossLoss)],
         ['Trading PnL', formatPnl(stats.realizedTradingPnl)],
         ['Net PnL', formatPnl(stats.netPnl)],
+        ['Fee / Trading PnL', `${formatNumber(stats.feeToTradingPnlPercent)}%`],
+        ['Profit Efficiency', stats.profitEfficiencyStatus || '-'],
         ['Fees', formatPnl(-Math.abs(Number(stats.feesPaid || 0)))],
         ['Entry Fees', formatPnl(-Math.abs(Number(stats.entryFeesPaid || 0)))],
         ['Exit Fees', formatPnl(-Math.abs(Number(stats.exitFeesPaid || 0)))],
@@ -1623,6 +1705,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
       testnetSoak: latest?.testnetSoak,
       runtimeControls: latest?.runtimeControls,
       userStreamStatus: latest?.userStreamStatus,
+      protectionStatus: latest?.protectionStatus,
       aggressiveMode: latest?.aggressiveMode,
       strategyQuality: latest?.strategyQuality,
       position: latest?.position,
@@ -1724,9 +1807,11 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         ['Expected TP', formatNumber(protection.expectedTakeProfit)],
         ['Current SL', formatNumber(protection.currentStopLoss)],
         ['Current TP', formatNumber(protection.currentTakeProfit)],
+        ['Recommended SL', formatNumber(protection.recommendedStopLoss)],
+        ['Recommended TP', formatNumber(protection.recommendedTakeProfit)],
         ['Last Check', protection.lastCheckedAt ? formatDate(protection.lastCheckedAt) : '-']
       ].map(([label, value]) => `<div class="stat"><div class="label">${label}</div><div class="value">${escapeHtml(value)}</div></div>`).join('');
-      byId('protectionReason').textContent = `${protection.lastSource || '-'}: ${protection.lastReason || '-'}`;
+      byId('protectionReason').textContent = `${protection.lastSource || '-'}: ${protection.lastReason || '-'} | Update: ${protection.lastUpdateReason || '-'}`;
       const stream = latest?.userStreamStatus || {};
       byId('userStreamStats').innerHTML = [
         ['WS Enabled', stream.enabled ? 'yes' : 'no'],
@@ -1773,6 +1858,14 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         ['Position Capacity', quality.positionCapacityStatus || '-'],
         ['Remaining Notional', formatNumber(quality.remainingNotionalUsdt)],
         ['Next Order', formatNumber(quality.nextOrderNotionalUsdt)],
+        ['Capital Used %', `${formatNumber(quality.capitalUtilizationPercent)}%`],
+        ['Remaining Margin', formatNumber(quality.remainingMarginUsdt)],
+        ['Entry Capacity', formatNumber(quality.entriesCapacityLeft)],
+        ['Exit Stage', quality.exitStage || '-'],
+        ['Current R', formatNumber(quality.currentR)],
+        ['Next Exit', formatNumber(quality.nextExitPrice)],
+        ['Fee / Trading PnL', `${formatNumber(quality.feeToTradingPnlPercent)}%`],
+        ['Profit Efficiency', quality.profitEfficiencyStatus || '-'],
         ['No Trade', formatNumber(quality.noTradeReasonCount)],
         ['Filter Blocks', formatNumber(quality.strategyFilterBlockCount)],
         ['Risk Blocks', formatNumber(quality.riskBlockCount)],
@@ -1829,7 +1922,24 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
       }
     };
 
-    fields.forEach(id => byId(id).addEventListener('input', () => { dirty = true; }));
+    fields.forEach(id => byId(id).addEventListener('input', () => {
+      dirty = true;
+      if (id === 'stopLossPercent' || id === 'takeProfitPercent') {
+        byId('rrPreset').value = resolveRrPreset(byId('stopLossPercent').value, byId('takeProfitPercent').value);
+        updateStrategyRiskConfig();
+      }
+    }));
+    byId('rrPreset').addEventListener('change', () => {
+      const preset = rrPresets[byId('rrPreset').value];
+      if (!preset) {
+        return;
+      }
+
+      byId('stopLossPercent').value = preset.stopLossPercent;
+      byId('takeProfitPercent').value = preset.takeProfitPercent;
+      updateStrategyRiskConfig();
+      dirty = true;
+    });
     const saveAggressiveSettings = async () => {
       if (!latest?.settings) return;
       const payload = {
@@ -2251,6 +2361,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         var realizedTradingPnl = closingFills.Sum(fill => fill.RealizedPnl + fill.Fee - fill.Funding);
         var fundingPaid = fillLedger.TotalFunding;
         var netPnl = realizedTradingPnl - fillLedger.FeesPaid - fundingPaid;
+        var feeToTradingPnlPercent = CalculateFeeToTradingPnlPercent(fillLedger.FeesPaid, realizedTradingPnl);
 
         return new FuturesPnlStatsView
         {
@@ -2259,6 +2370,8 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             NetPnl = netPnl,
             RealizedTradingPnl = realizedTradingPnl,
             FeesPaid = fillLedger.FeesPaid,
+            FeeToTradingPnlPercent = feeToTradingPnlPercent,
+            ProfitEfficiencyStatus = ResolveProfitEfficiencyStatus(feeToTradingPnlPercent, realizedTradingPnl, fillLedger.FeesPaid),
             EntryFeesPaid = entryFeesPaid,
             ExitFeesPaid = exitFeesPaid,
             FundingPaid = fundingPaid,
@@ -2273,6 +2386,56 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             AverageLoss = losses.Length == 0 ? 0m : losses.Average()
         };
     }
+
+    private static FuturesProfitEfficiencyView BuildProfitEfficiency(IReadOnlyCollection<FuturesFillRecord> fills)
+    {
+        var filled = fills
+            .Where(fill => fill.Quantity > 0m)
+            .Where(fill => fill.Action != FuturesTradeAction.Funding)
+            .ToArray();
+        var closingFills = filled
+            .Where(fill => fill.Action is FuturesTradeAction.CloseLong or FuturesTradeAction.CloseShort or FuturesTradeAction.ReduceOnlyClose)
+            .ToArray();
+        var realizedTradingPnl = closingFills.Sum(fill => fill.RealizedPnl + fill.Fee - fill.Funding);
+        var feesPaid = filled.Sum(fill => fill.Fee);
+        var feeToTradingPnlPercent = CalculateFeeToTradingPnlPercent(feesPaid, realizedTradingPnl);
+
+        return new FuturesProfitEfficiencyView(
+            feeToTradingPnlPercent,
+            ResolveProfitEfficiencyStatus(feeToTradingPnlPercent, realizedTradingPnl, feesPaid));
+    }
+
+    private static decimal CalculateFeeToTradingPnlPercent(decimal feesPaid, decimal realizedTradingPnl)
+    {
+        if (feesPaid <= 0m)
+        {
+            return 0m;
+        }
+
+        if (realizedTradingPnl <= 0m)
+        {
+            return 100m;
+        }
+
+        return decimal.Round(feesPaid / realizedTradingPnl * 100m, 4, MidpointRounding.AwayFromZero);
+    }
+
+    private static string ResolveProfitEfficiencyStatus(decimal feeToTradingPnlPercent, decimal realizedTradingPnl, decimal feesPaid)
+    {
+        if (feesPaid <= 0m)
+        {
+            return "good";
+        }
+
+        if (realizedTradingPnl <= 0m || feeToTradingPnlPercent > 25m)
+        {
+            return "bad";
+        }
+
+        return feeToTradingPnlPercent >= 20m ? "warning" : "good";
+    }
+
+    private readonly record struct FuturesProfitEfficiencyView(decimal FeeToTradingPnlPercent, string Status);
 
     private FuturesSoakStatusView BuildTestnetSoakStatus(
         FuturesPositionView position,
@@ -2299,14 +2462,22 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
 
     private static FuturesProtectionStatusView BuildProtectionStatus(
         FuturesBotSettings settings,
+        FuturesAutoConfigRecommendation recommendation,
         FuturesPositionView position,
         BybitPositionSnapshot? bybitPosition,
-        IReadOnlyCollection<FuturesRiskDecisionRecord> riskDecisions)
+        IReadOnlyCollection<FuturesRiskDecisionRecord> riskDecisions,
+        bool isPaperMode)
     {
         var expectedStopLoss = ResolveExpectedStopLoss(settings, position);
         var expectedTakeProfit = ResolveExpectedTakeProfit(settings, position);
+        var recommendedStopLoss = ResolveRecommendedStopLoss(recommendation, position);
+        var recommendedTakeProfit = ResolveRecommendedTakeProfit(recommendation, position);
         var lastProtection = riskDecisions
             .Where(decision => IsProtectionDecision(decision.Source))
+            .OrderByDescending(decision => decision.CreatedAt)
+            .FirstOrDefault();
+        var lastProtectionUpdate = riskDecisions
+            .Where(decision => IsProtectionUpdateDecision(decision.Source))
             .OrderByDescending(decision => decision.CreatedAt)
             .FirstOrDefault();
         return new FuturesProtectionStatusView
@@ -2314,11 +2485,14 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             HasOpenPosition = position.Size > 0m,
             ExpectedStopLoss = expectedStopLoss,
             ExpectedTakeProfit = expectedTakeProfit,
-            CurrentStopLoss = bybitPosition?.StopLossPrice ?? 0m,
-            CurrentTakeProfit = bybitPosition?.TakeProfitPrice ?? 0m,
+            CurrentStopLoss = bybitPosition?.StopLossPrice ?? (isPaperMode ? expectedStopLoss : 0m),
+            CurrentTakeProfit = bybitPosition?.TakeProfitPrice ?? (isPaperMode ? expectedTakeProfit : 0m),
+            RecommendedStopLoss = recommendedStopLoss,
+            RecommendedTakeProfit = recommendedTakeProfit,
             Status = ResolveProtectionStatus(position, bybitPosition, expectedStopLoss, expectedTakeProfit, lastProtection),
             LastSource = lastProtection?.Source ?? "-",
             LastReason = lastProtection?.Reason ?? "-",
+            LastUpdateReason = lastProtectionUpdate?.Reason ?? "-",
             LastCheckedAt = lastProtection?.CreatedAt
         };
     }
@@ -2342,6 +2516,8 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             .Where(decision => IsNoTradeDecision(decision.Source))
             .OrderByDescending(decision => decision.CreatedAt)
             .FirstOrDefault();
+        var efficiency = BuildProfitEfficiency(fills);
+        var configuredMaxOrdersPerHour = ResolveAggressiveMaxOrdersPerHour(settings);
         return new FuturesAggressiveModeView
         {
             Enabled = settings.AggressiveModeEnabled,
@@ -2350,7 +2526,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             PaperOnly = true,
             EntryMultiplier = ResolveAggressiveEntryMultiplier(settings),
             EntriesLastHour = entriesLastHour,
-            MaxEntriesPerHour = ResolveAggressiveMaxOrdersPerHour(settings),
+            MaxEntriesPerHour = ApplyProfitEfficiencyMaxOrdersCap(configuredMaxOrdersPerHour, efficiency),
             MinSecondsBetweenEntries = ResolveAggressiveMinSecondsBetweenEntries(settings),
             ConsecutiveLosses = consecutiveLosses,
             MaxConsecutiveLosses = ResolveAggressiveMaxConsecutiveLosses(settings),
@@ -2381,6 +2557,19 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         return count;
     }
 
+    private static int ApplyProfitEfficiencyMaxOrdersCap(
+        int configuredMaxOrdersPerHour,
+        FuturesProfitEfficiencyView efficiency)
+    {
+        if (configuredMaxOrdersPerHour <= 0 || efficiency.Status == "good")
+        {
+            return configuredMaxOrdersPerHour;
+        }
+
+        var cap = efficiency.Status == "bad" ? 2 : 3;
+        return Math.Min(configuredMaxOrdersPerHour, cap);
+    }
+
     private static bool IsNoTradeDecision(string source) =>
         string.Equals(source, "AggressiveNoTrade", StringComparison.OrdinalIgnoreCase) ||
         string.Equals(source, "StrategyNoTrade", StringComparison.OrdinalIgnoreCase) ||
@@ -2390,7 +2579,12 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
     private static bool IsProtectionDecision(string source) =>
         string.Equals(source, "ProtectionVerify", StringComparison.OrdinalIgnoreCase) ||
         string.Equals(source, "ProtectionRestore", StringComparison.OrdinalIgnoreCase) ||
-        string.Equals(source, "ProtectionFailed", StringComparison.OrdinalIgnoreCase);
+        string.Equals(source, "ProtectionFailed", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(source, "AutoRecommendationProtectionUpdate", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsProtectionUpdateDecision(string source) =>
+        string.Equals(source, "AutoRecommendationProtectionUpdate", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(source, "AutoRecommendationProtectionSkipped", StringComparison.OrdinalIgnoreCase);
 
     private static string ResolveProtectionStatus(
         FuturesPositionView position,
@@ -2412,7 +2606,8 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
 
         if (lastProtection is not null &&
             (string.Equals(lastProtection.Source, "ProtectionVerify", StringComparison.OrdinalIgnoreCase) ||
-             string.Equals(lastProtection.Source, "ProtectionRestore", StringComparison.OrdinalIgnoreCase)) &&
+             string.Equals(lastProtection.Source, "ProtectionRestore", StringComparison.OrdinalIgnoreCase) ||
+             string.Equals(lastProtection.Source, "AutoRecommendationProtectionUpdate", StringComparison.OrdinalIgnoreCase)) &&
             bybitPosition is null)
         {
             return "verified";
@@ -2451,6 +2646,48 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         return IsShort(position.Side)
             ? position.EntryPrice * (1m - settings.TakeProfitPercent / 100m)
             : position.EntryPrice * (1m + settings.TakeProfitPercent / 100m);
+    }
+
+    private static decimal ResolveRecommendedStopLoss(FuturesAutoConfigRecommendation recommendation, FuturesPositionView position)
+    {
+        if (position.Size <= 0m || position.EntryPrice <= 0m)
+        {
+            return 0m;
+        }
+
+        return IsShort(position.Side)
+            ? position.EntryPrice * (1m + recommendation.StopLossPercent / 100m)
+            : position.EntryPrice * (1m - recommendation.StopLossPercent / 100m);
+    }
+
+    private static decimal ResolveRecommendedTakeProfit(FuturesAutoConfigRecommendation recommendation, FuturesPositionView position)
+    {
+        if (position.Size <= 0m || position.EntryPrice <= 0m)
+        {
+            return 0m;
+        }
+
+        return IsShort(position.Side)
+            ? position.EntryPrice * (1m - recommendation.TakeProfitPercent / 100m)
+            : position.EntryPrice * (1m + recommendation.TakeProfitPercent / 100m);
+    }
+
+    private static bool TargetsMatch(FuturesProtectionTargets current, FuturesProtectionTargets recommended) =>
+        current.StopLoss > 0m &&
+        current.TakeProfit > 0m &&
+        Matches(current.StopLoss, recommended.StopLoss) &&
+        Matches(current.TakeProfit, recommended.TakeProfit);
+
+    private static bool WouldWorsenStopRisk(string positionSide, decimal currentStopLoss, decimal recommendedStopLoss)
+    {
+        if (currentStopLoss <= 0m || recommendedStopLoss <= 0m)
+        {
+            return false;
+        }
+
+        return IsShort(positionSide)
+            ? recommendedStopLoss > currentStopLoss
+            : recommendedStopLoss < currentStopLoss;
     }
 
     private static bool Matches(decimal actual, decimal expected)
@@ -2500,7 +2737,8 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         FuturesBotSettings settings,
         FuturesPositionSnapshot position,
         FuturesInstrumentRules? instrument,
-        IReadOnlyCollection<FuturesRiskDecisionRecord> riskDecisions)
+        IReadOnlyCollection<FuturesRiskDecisionRecord> riskDecisions,
+        IReadOnlyCollection<FuturesFillRecord> fills)
     {
         var noTradeDecisions = riskDecisions
             .Where(decision => IsNoTradeDecision(decision.Source))
@@ -2518,6 +2756,8 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             .OrderByDescending(decision => decision.CreatedAt)
             .FirstOrDefault();
         var positionCapacity = BuildPositionCapacity(settings, position, instrument);
+        var efficiency = BuildProfitEfficiency(fills);
+        var exitLadder = BuildExitLadderStatus(settings, position, fills);
 
         return new FuturesStrategyQualityView
         {
@@ -2533,13 +2773,22 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             PositionCapacityStatus = positionCapacity.Status,
             RemainingNotionalUsdt = positionCapacity.RemainingNotionalUsdt,
             NextOrderNotionalUsdt = positionCapacity.NextOrderNotionalUsdt,
+            CapitalUtilizationPercent = positionCapacity.CapitalUtilizationPercent,
+            RemainingMarginUsdt = positionCapacity.RemainingMarginUsdt,
+            EntriesCapacityLeft = positionCapacity.EntriesCapacityLeft,
+            ExitStage = exitLadder.Stage,
+            CurrentR = exitLadder.CurrentR,
+            NextExitPrice = exitLadder.NextExitPrice,
             CurrentActiveBlockReason = currentActiveBlock?.Reason ?? "-",
             CurrentActiveBlockSource = currentActiveBlock?.Source ?? "-",
             CurrentActiveBlockAt = currentActiveBlock?.CreatedAt,
             LastNoTradeReason = lastHistoricalNoTrade?.Reason ?? "-",
-            LastHistoricalNoTradeReason = lastHistoricalNoTrade?.Reason ?? "-"
+            LastHistoricalNoTradeReason = lastHistoricalNoTrade?.Reason ?? "-",
+            FeeToTradingPnlPercent = efficiency.FeeToTradingPnlPercent,
+            ProfitEfficiencyStatus = efficiency.Status
         };
     }
+
 
     private static bool IsCurrentActiveBlock(FuturesRiskDecisionRecord decision) =>
         !decision.IsAllowed &&
@@ -2552,7 +2801,90 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
     private readonly record struct FuturesPositionCapacityView(
         string Status,
         decimal RemainingNotionalUsdt,
-        decimal NextOrderNotionalUsdt);
+        decimal NextOrderNotionalUsdt,
+        decimal CapitalUtilizationPercent,
+        decimal RemainingMarginUsdt,
+        int EntriesCapacityLeft);
+
+    private readonly record struct FuturesExitLadderView(
+        string Stage,
+        decimal CurrentR,
+        decimal NextExitPrice);
+
+    private static FuturesExitLadderView BuildExitLadderStatus(
+        FuturesBotSettings settings,
+        FuturesPositionSnapshot position,
+        IReadOnlyCollection<FuturesFillRecord> fills)
+    {
+        if (position.Size <= 0m || position.EntryPrice <= 0m || position.MarkPrice <= 0m || settings.StopLossPercent <= 0m)
+        {
+            return new FuturesExitLadderView("no-position", 0m, 0m);
+        }
+
+        var isShort = string.Equals(position.Side, "Sell", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(position.Side, "Short", StringComparison.OrdinalIgnoreCase);
+        var profitPercent = isShort
+            ? (position.EntryPrice - position.MarkPrice) / position.EntryPrice * 100m
+            : (position.MarkPrice - position.EntryPrice) / position.EntryPrice * 100m;
+        var currentR = profitPercent / settings.StopLossPercent;
+        var hasPartial = HasCloseAfterLastEntry(
+            fills,
+            isShort ? FuturesTradeAction.OpenShort : FuturesTradeAction.OpenLong,
+            isShort ? FuturesTradeAction.CloseShort : FuturesTradeAction.CloseLong);
+        var finalR = settings.TakeProfitPercent > 0m
+            ? settings.TakeProfitPercent / settings.StopLossPercent
+            : 3m;
+        var stage = currentR >= finalR
+            ? "final-tp"
+            : hasPartial
+                ? "trailing"
+                : currentR >= 1m
+                    ? "partial-taken"
+                    : "waiting-1r";
+        var nextExitPrice = stage switch
+        {
+            "waiting-1r" or "partial-taken" => CalculateRPrice(position.EntryPrice, settings.StopLossPercent, 1m, isShort),
+            "trailing" => CalculateTrailingExitPrice(position.MarkPrice, position.EntryPrice, settings.StopLossPercent, isShort),
+            _ => CalculateRPrice(position.EntryPrice, settings.StopLossPercent, finalR, isShort)
+        };
+
+        return new FuturesExitLadderView(
+            stage,
+            decimal.Round(currentR, 4, MidpointRounding.AwayFromZero),
+            decimal.Round(nextExitPrice, 8, MidpointRounding.AwayFromZero));
+    }
+
+    private static decimal CalculateRPrice(decimal entryPrice, decimal stopLossPercent, decimal r, bool isShort)
+    {
+        var move = entryPrice * stopLossPercent / 100m * r;
+        return isShort ? entryPrice - move : entryPrice + move;
+    }
+
+    private static decimal CalculateTrailingExitPrice(decimal markPrice, decimal entryPrice, decimal stopLossPercent, bool isShort)
+    {
+        var riskDistance = entryPrice * stopLossPercent / 100m;
+        var raw = isShort ? markPrice + riskDistance : markPrice - riskDistance;
+        return isShort ? decimal.Min(entryPrice, raw) : decimal.Max(entryPrice, raw);
+    }
+
+    private static bool HasCloseAfterLastEntry(
+        IReadOnlyCollection<FuturesFillRecord> fills,
+        FuturesTradeAction entryAction,
+        FuturesTradeAction closeAction)
+    {
+        var lastEntry = fills
+            .Where(fill => fill.Action == entryAction)
+            .OrderByDescending(fill => fill.CreatedAt)
+            .FirstOrDefault();
+        if (lastEntry is null)
+        {
+            return false;
+        }
+
+        return fills.Any(fill =>
+            fill.CreatedAt > lastEntry.CreatedAt &&
+            (fill.Action == closeAction || fill.Action == FuturesTradeAction.ReduceOnlyClose));
+    }
 
     private async Task<FuturesInstrumentRules?> TryGetInstrumentRulesAsync(
         FuturesBotSettings settings,
@@ -2577,17 +2909,28 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         var maxNotional = decimal.Max(0m, settings.MaxNotionalUsdt);
         var currentNotional = decimal.Max(0m, position.PositionValueUsdt);
         var remainingNotional = maxNotional > 0m ? decimal.Max(0m, maxNotional - currentNotional) : 0m;
+        var maxMargin = decimal.Max(0m, settings.MaxMarginUsdt);
+        var usedMargin = decimal.Max(0m, position.MarginUsedUsdt);
+        var remainingMargin = maxMargin > 0m ? decimal.Max(0m, maxMargin - usedMargin) : 0m;
         var nextOrderNotional = EstimateNextOrderNotional(settings, position, instrument);
+        var nextOrderMargin = settings.Leverage > 0m ? nextOrderNotional / settings.Leverage : nextOrderNotional;
+        var entriesByNotional = nextOrderNotional > 0m ? decimal.Floor(remainingNotional / nextOrderNotional) : 0m;
+        var entriesByMargin = nextOrderMargin > 0m ? decimal.Floor(remainingMargin / nextOrderMargin) : 0m;
+        var entriesCapacityLeft = (int)decimal.Max(0m, decimal.Min(entriesByNotional, entriesByMargin));
+        var utilizationPercent = maxNotional > 0m ? currentNotional / maxNotional * 100m : 0m;
         var status = position.Size <= 0m
             ? "no-position"
-            : remainingNotional >= nextOrderNotional && nextOrderNotional > 0m
+            : entriesCapacityLeft > 0
                 ? "can-scale-in"
                 : "full";
 
         return new FuturesPositionCapacityView(
             status,
             decimal.Round(remainingNotional, 4, MidpointRounding.AwayFromZero),
-            decimal.Round(nextOrderNotional, 4, MidpointRounding.AwayFromZero));
+            decimal.Round(nextOrderNotional, 4, MidpointRounding.AwayFromZero),
+            decimal.Round(utilizationPercent, 4, MidpointRounding.AwayFromZero),
+            decimal.Round(remainingMargin, 4, MidpointRounding.AwayFromZero),
+            entriesCapacityLeft);
     }
 
     private static decimal EstimateNextOrderNotional(
@@ -3301,6 +3644,10 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         if (request.TakeProfitPercent <= 0m)
         {
             errors.Add("Take profit percent must be positive.");
+        }
+        else if (request.StopLossPercent > 0m && request.TakeProfitPercent < request.StopLossPercent * 3m)
+        {
+            errors.Add("Futures take profit must be at least 3x stop loss for 3:1 risk/reward.");
         }
 
         if (request.LiquidationBufferPercent < 0m)

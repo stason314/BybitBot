@@ -345,7 +345,7 @@ internal static class FuturesLongOnlySignals
 
         if (context.CurrentPrice >= takeProfitPrice)
         {
-            reason = "take-profit";
+            reason = "final-tp";
             return true;
         }
 
@@ -370,13 +370,19 @@ internal static class FuturesLongOnlySignals
             return false;
         }
 
+        if (HasCloseAfterLastEntry(context, FuturesTradeAction.OpenLong, FuturesTradeAction.CloseLong))
+        {
+            return false;
+        }
+
         var profitPercent = (context.CurrentPrice - context.Position.EntryPrice) / context.Position.EntryPrice * 100m;
         var retracementFromResistance = signal.Resistance > 0m
             ? (signal.Resistance - context.CurrentPrice) / signal.Resistance * 100m
             : 0m;
-        var adaptiveTakeProfit = decimal.Min(context.Settings.TakeProfitPercent, 1.2m);
+        var minimumRewardExit = MinimumRewardExitPercent(context);
+        var adaptiveTakeProfit = decimal.Min(context.Settings.TakeProfitPercent, minimumRewardExit);
         return profitPercent >= adaptiveTakeProfit ||
-            (profitPercent >= 0.6m && retracementFromResistance >= 0.35m);
+            (profitPercent >= minimumRewardExit && retracementFromResistance >= 0.35m);
     }
 
     public static bool ShouldCloseTrailingProfit(FuturesStrategyContext context, FuturesLongOnlySignal signal)
@@ -386,8 +392,14 @@ internal static class FuturesLongOnlySignals
             return false;
         }
 
+        if (!HasCloseAfterLastEntry(context, FuturesTradeAction.OpenLong, FuturesTradeAction.CloseLong))
+        {
+            return false;
+        }
+
         var profitPercent = (context.CurrentPrice - context.Position.EntryPrice) / context.Position.EntryPrice * 100m;
-        if (profitPercent < 0.35m)
+        var minimumRewardExit = MinimumRewardExitPercent(context);
+        if (profitPercent < minimumRewardExit)
         {
             return false;
         }
@@ -396,7 +408,26 @@ internal static class FuturesLongOnlySignals
             ? (signal.Resistance - context.CurrentPrice) / signal.Resistance * 100m
             : 0m;
         return retracementFromResistance >= 0.25m ||
-            (profitPercent >= 0.6m && signal.MovePercent < 0m);
+            (profitPercent >= minimumRewardExit && signal.MovePercent < 0m);
+    }
+
+    public static bool HasCloseAfterLastEntry(
+        FuturesStrategyContext context,
+        FuturesTradeAction entryAction,
+        FuturesTradeAction closeAction)
+    {
+        var lastEntry = context.RecentFills
+            .Where(fill => fill.Action == entryAction)
+            .OrderByDescending(fill => fill.CreatedAt)
+            .FirstOrDefault();
+        if (lastEntry is null)
+        {
+            return false;
+        }
+
+        return context.RecentFills.Any(fill =>
+            fill.CreatedAt > lastEntry.CreatedAt &&
+            (fill.Action == closeAction || fill.Action == FuturesTradeAction.ReduceOnlyClose));
     }
 
     public static bool ShouldOpenAggressiveTestLong(FuturesStrategyContext context, FuturesLongOnlySignal signal) =>
@@ -574,6 +605,9 @@ internal static class FuturesLongOnlySignals
     private static bool IsLong(string side) =>
         string.Equals(side, "Buy", StringComparison.OrdinalIgnoreCase) ||
         string.Equals(side, "Long", StringComparison.OrdinalIgnoreCase);
+
+    private static decimal MinimumRewardExitPercent(FuturesStrategyContext context) =>
+        decimal.Max(0.6m, context.Settings.StopLossPercent);
 }
 
 internal readonly record struct FuturesLongOnlySignal(
@@ -608,7 +642,7 @@ internal static class FuturesShortOnlySignals
 
         if (context.CurrentPrice <= takeProfitPrice)
         {
-            reason = "take-profit";
+            reason = "final-tp";
             return true;
         }
 
@@ -633,13 +667,19 @@ internal static class FuturesShortOnlySignals
             return false;
         }
 
+        if (FuturesLongOnlySignals.HasCloseAfterLastEntry(context, FuturesTradeAction.OpenShort, FuturesTradeAction.CloseShort))
+        {
+            return false;
+        }
+
         var profitPercent = (context.Position.EntryPrice - context.CurrentPrice) / context.Position.EntryPrice * 100m;
         var reboundFromSupport = signal.Support > 0m
             ? (context.CurrentPrice - signal.Support) / signal.Support * 100m
             : 0m;
-        var adaptiveTakeProfit = decimal.Min(context.Settings.TakeProfitPercent, 1.2m);
+        var minimumRewardExit = MinimumRewardExitPercent(context);
+        var adaptiveTakeProfit = decimal.Min(context.Settings.TakeProfitPercent, minimumRewardExit);
         return profitPercent >= adaptiveTakeProfit ||
-            (profitPercent >= 0.6m && reboundFromSupport >= 0.35m);
+            (profitPercent >= minimumRewardExit && reboundFromSupport >= 0.35m);
     }
 
     public static bool ShouldCloseTrailingProfit(FuturesStrategyContext context, FuturesLongOnlySignal signal)
@@ -649,8 +689,14 @@ internal static class FuturesShortOnlySignals
             return false;
         }
 
+        if (!FuturesLongOnlySignals.HasCloseAfterLastEntry(context, FuturesTradeAction.OpenShort, FuturesTradeAction.CloseShort))
+        {
+            return false;
+        }
+
         var profitPercent = (context.Position.EntryPrice - context.CurrentPrice) / context.Position.EntryPrice * 100m;
-        if (profitPercent < 0.35m)
+        var minimumRewardExit = MinimumRewardExitPercent(context);
+        if (profitPercent < minimumRewardExit)
         {
             return false;
         }
@@ -659,7 +705,7 @@ internal static class FuturesShortOnlySignals
             ? (context.CurrentPrice - signal.Support) / signal.Support * 100m
             : 0m;
         return reboundFromSupport >= 0.25m ||
-            (profitPercent >= 0.6m && signal.MovePercent > 0m);
+            (profitPercent >= minimumRewardExit && signal.MovePercent > 0m);
     }
 
     public static bool ShouldOpenAggressiveTestShort(FuturesStrategyContext context, FuturesLongOnlySignal signal) =>
@@ -768,4 +814,7 @@ internal static class FuturesShortOnlySignals
     private static bool IsLong(string side) =>
         string.Equals(side, "Buy", StringComparison.OrdinalIgnoreCase) ||
         string.Equals(side, "Long", StringComparison.OrdinalIgnoreCase);
+
+    private static decimal MinimumRewardExitPercent(FuturesStrategyContext context) =>
+        decimal.Max(0.6m, context.Settings.StopLossPercent);
 }

@@ -57,7 +57,7 @@ public sealed class FuturesAutoRecommendationSafetyTests
         MaxNotionalUsdt = 10m,
         MaxMarginUsdt = 5m,
         StopLossPercent = 2m,
-        TakeProfitPercent = 4m,
+        TakeProfitPercent = 6m,
         LiquidationBufferPercent = 15m,
         StrategyConfigJson = "{}"
     };

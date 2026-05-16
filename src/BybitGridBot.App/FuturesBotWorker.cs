@@ -189,11 +189,13 @@ public sealed class FuturesBotWorker : BackgroundService
         var recommendation = _recommender.Recommend(settings, candles, position.Size > 0m);
         settings = await TryApplyAutoRecommendationAsync(settings, recommendation, position, cancellationToken);
         await RecordPositionStrategyGuardIfNeededAsync(settings, recommendation, position, cancellationToken);
+        var recentFills = await _repository.GetFuturesFillsAsync(settings.Symbol, 1000, cancellationToken);
         var decision = _strategyRouter.Decide(new FuturesStrategyContext
         {
             Settings = settings,
             Candles = candles,
             Position = position,
+            RecentFills = recentFills,
             CurrentPrice = currentPrice,
             Instrument = instrumentRules
         });
@@ -204,6 +206,18 @@ public sealed class FuturesBotWorker : BackgroundService
 
         foreach (var intent in decision.TradeIntents)
         {
+            var exposureNoTradeReason = GetStrategyExposureNoTradeReason(settings, position, intent);
+            if (exposureNoTradeReason is not null)
+            {
+                await RecordStrategyNoTradeDecisionAsync(settings.Symbol, exposureNoTradeReason, cancellationToken, intent.Action);
+                _logger.LogInformation(
+                    "Futures strategy skipped intent for {Symbol}. Action: {Action}. Reason: {Reason}",
+                    settings.Symbol,
+                    intent.Action,
+                    exposureNoTradeReason);
+                continue;
+            }
+
             var strategyBlockReason = await GetStrategyEntryBlockReasonAsync(settings, position, intent, candles, cancellationToken);
             if (strategyBlockReason is not null)
             {
@@ -225,18 +239,6 @@ public sealed class FuturesBotWorker : BackgroundService
                     settings.Symbol,
                     intent.Action,
                     aggressiveBlockReason);
-                continue;
-            }
-
-            var exposureNoTradeReason = GetStrategyExposureNoTradeReason(settings, position, intent);
-            if (exposureNoTradeReason is not null)
-            {
-                await RecordStrategyNoTradeDecisionAsync(settings.Symbol, exposureNoTradeReason, cancellationToken, intent.Action);
-                _logger.LogInformation(
-                    "Futures strategy skipped intent for {Symbol}. Action: {Action}. Reason: {Reason}",
-                    settings.Symbol,
-                    intent.Action,
-                    exposureNoTradeReason);
                 continue;
             }
 
@@ -401,6 +403,7 @@ public sealed class FuturesBotWorker : BackgroundService
             RiskSeverity.Info,
             RiskSuggestedAction.Allow,
             cancellationToken);
+        await TryUpdateProtectionAfterAutoRecommendationAsync(settings, recommendedSettings, position, cancellationToken);
         await _notifier.NotifyAsync(
             $"Futures auto recommendation applied.\nSymbol: `{settings.Symbol}`\nStrategy: `{recommendation.StrategyType}`\nDirection: `{recommendation.Direction}`\nReason: `{recommendation.Reason}`",
             cancellationToken);
@@ -409,6 +412,68 @@ public sealed class FuturesBotWorker : BackgroundService
             recommendation.StrategyType,
             recommendation.Reason);
         return recommendedSettings;
+    }
+
+    private async Task TryUpdateProtectionAfterAutoRecommendationAsync(
+        FuturesBotSettings currentSettings,
+        FuturesBotSettings recommendedSettings,
+        FuturesPositionSnapshot position,
+        CancellationToken cancellationToken)
+    {
+        if (position.Size <= 0m || position.EntryPrice <= 0m)
+        {
+            return;
+        }
+
+        var currentTargets = await _protectionService.ResolveTargetsAsync(currentSettings, position, cancellationToken);
+        var recommendedTargets = await _protectionService.ResolveTargetsAsync(recommendedSettings, position, cancellationToken);
+        if (recommendedTargets.StopLoss <= 0m ||
+            recommendedTargets.TakeProfit <= 0m ||
+            TargetsMatch(currentTargets, recommendedTargets))
+        {
+            return;
+        }
+
+        if (WouldWorsenStopRisk(position.Side, currentTargets.StopLoss, recommendedTargets.StopLoss))
+        {
+            await RecordThrottledRiskDecisionAsync(
+                currentSettings.Symbol,
+                "AutoRecommendationProtectionSkipped",
+                false,
+                $"Auto recommendation protection update skipped because recommended stop-loss would increase risk. Current StopLoss={currentTargets.StopLoss}, TakeProfit={currentTargets.TakeProfit}; Recommended StopLoss={recommendedTargets.StopLoss}, TakeProfit={recommendedTargets.TakeProfit}.",
+                RiskSeverity.Warning,
+                RiskSuggestedAction.BlockNewOrders,
+                cancellationToken);
+            return;
+        }
+
+        await _protectionService.EnsureProtectiveStopAsync(recommendedSettings, position, cancellationToken);
+        await RecordThrottledRiskDecisionAsync(
+            currentSettings.Symbol,
+            "AutoRecommendationProtectionUpdate",
+            true,
+            $"Auto recommendation protection update applied. Current StopLoss={currentTargets.StopLoss}, TakeProfit={currentTargets.TakeProfit}; Recommended StopLoss={recommendedTargets.StopLoss}, TakeProfit={recommendedTargets.TakeProfit}.",
+            RiskSeverity.Info,
+            RiskSuggestedAction.Allow,
+            cancellationToken);
+    }
+
+    private static bool TargetsMatch(FuturesProtectionTargets current, FuturesProtectionTargets recommended) =>
+        current.StopLoss > 0m &&
+        current.TakeProfit > 0m &&
+        Math.Abs(current.StopLoss - recommended.StopLoss) <= decimal.Max(0.00000001m, recommended.StopLoss * 0.000001m) &&
+        Math.Abs(current.TakeProfit - recommended.TakeProfit) <= decimal.Max(0.00000001m, recommended.TakeProfit * 0.000001m);
+
+    private static bool WouldWorsenStopRisk(string positionSide, decimal currentStopLoss, decimal recommendedStopLoss)
+    {
+        if (currentStopLoss <= 0m || recommendedStopLoss <= 0m)
+        {
+            return false;
+        }
+
+        return IsShort(positionSide)
+            ? recommendedStopLoss > currentStopLoss
+            : recommendedStopLoss < currentStopLoss;
     }
 
     private async Task<string?> GetAutoRecommendationHoldReasonAsync(
@@ -633,7 +698,9 @@ public sealed class FuturesBotWorker : BackgroundService
             return $"FUTURES_MAX_ENTRY_ATR_PERCENT filter blocked entry. ATR={atrPercent:F4}%.";
         }
 
-        var feeOpportunityReason = GetEntryFeeOpportunityBlockReason(intent, candles);
+        var fills = await _repository.GetFuturesFillsAsync(settings.Symbol, 1000, cancellationToken);
+        var profitEfficiency = BuildProfitEfficiency(fills);
+        var feeOpportunityReason = GetEntryFeeOpportunityBlockReason(intent, candles, profitEfficiency);
         if (feeOpportunityReason is not null)
         {
             return feeOpportunityReason;
@@ -718,13 +785,15 @@ public sealed class FuturesBotWorker : BackgroundService
 
     private static bool IsFeeProtectedExitReason(string reason) =>
         string.Equals(reason, "take-profit", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(reason, "final-tp", StringComparison.OrdinalIgnoreCase) ||
         string.Equals(reason, "partial-take-profit", StringComparison.OrdinalIgnoreCase) ||
         string.Equals(reason, "trailing-profit", StringComparison.OrdinalIgnoreCase) ||
         string.Equals(reason, "exit-signal", StringComparison.OrdinalIgnoreCase);
 
     private string? GetEntryFeeOpportunityBlockReason(
         FuturesTradeIntent intent,
-        IReadOnlyList<Candle> candles)
+        IReadOnlyList<Candle> candles,
+        FuturesProfitEfficiencySnapshot profitEfficiency)
     {
         if (intent.NotionalUsdt <= 0m || intent.Price <= 0m)
         {
@@ -734,11 +803,16 @@ public sealed class FuturesBotWorker : BackgroundService
         var estimatedMovePercent = CalculateEntryOpportunityPercent(candles);
         var estimatedGrossPnl = intent.NotionalUsdt * estimatedMovePercent / 100m;
         var roundTripFees = intent.NotionalUsdt * DefaultFuturesFeeRatePercent / 100m * 2m;
-        var threshold = ResolveMinNetProfitThreshold(intent.NotionalUsdt);
+        var threshold = ResolveMinNetProfitThreshold(intent.NotionalUsdt) * profitEfficiency.MinNetProfitMultiplier;
         var requiredGrossPnl = roundTripFees + threshold;
         if (estimatedGrossPnl >= requiredGrossPnl)
         {
             return null;
+        }
+
+        if (profitEfficiency.Status != "good")
+        {
+            return $"Fee efficiency guard active. Fees are {profitEfficiency.FeeToTradingPnlPercent:F2}% of trading PnL; entry skipped until expected opportunity covers fees plus adjusted min profit. ExpectedGross={estimatedGrossPnl:F6}, fees={roundTripFees:F6}, requiredNet={threshold:F6}.";
         }
 
         return $"Fee protection: entry skipped because expected ATR/range opportunity does not cover round-trip fees plus min profit. ExpectedGross={estimatedGrossPnl:F6}, fees={roundTripFees:F6}, requiredNet={threshold:F6}.";
@@ -781,7 +855,9 @@ public sealed class FuturesBotWorker : BackgroundService
 
         var fills = await _repository.GetFuturesFillsAsync(settings.Symbol, 1000, cancellationToken);
         var now = DateTimeOffset.UtcNow;
-        var maxOrdersPerHour = ResolveAggressiveMaxOrdersPerHour(settings);
+        var profitEfficiency = BuildProfitEfficiency(fills);
+        var configuredMaxOrdersPerHour = ResolveAggressiveMaxOrdersPerHour(settings);
+        var maxOrdersPerHour = ApplyProfitEfficiencyMaxOrdersCap(configuredMaxOrdersPerHour, profitEfficiency);
         if (maxOrdersPerHour > 0)
         {
             var cutoff = now.AddHours(-1);
@@ -790,6 +866,11 @@ public sealed class FuturesBotWorker : BackgroundService
                 fill.CreatedAt >= cutoff);
             if (entriesLastHour >= maxOrdersPerHour)
             {
+                if (profitEfficiency.Status != "good" && maxOrdersPerHour < configuredMaxOrdersPerHour)
+                {
+                    return $"Fee efficiency guard active. Fees are {profitEfficiency.FeeToTradingPnlPercent:F2}% of trading PnL; aggressive entries reduced to {maxOrdersPerHour}/h.";
+                }
+
                 return "FUTURES_AGGRESSIVE_MAX_ORDERS_PER_HOUR limit reached.";
             }
         }
@@ -945,6 +1026,11 @@ public sealed class FuturesBotWorker : BackgroundService
             return "Fee protection: entry skipped because expected opportunity does not cover fees plus min profit.";
         }
 
+        if (reason.StartsWith("Fee efficiency guard active.", StringComparison.Ordinal))
+        {
+            return "Fee efficiency guard active.";
+        }
+
         return reason;
     }
 
@@ -968,6 +1054,77 @@ public sealed class FuturesBotWorker : BackgroundService
 
         return count;
     }
+
+    private static FuturesProfitEfficiencySnapshot BuildProfitEfficiency(IReadOnlyCollection<FuturesFillRecord> fills)
+    {
+        var filled = fills
+            .Where(fill => fill.Quantity > 0m)
+            .Where(fill => fill.Action != FuturesTradeAction.Funding)
+            .ToArray();
+        var closingFills = filled
+            .Where(fill => fill.Action is FuturesTradeAction.CloseLong or FuturesTradeAction.CloseShort or FuturesTradeAction.ReduceOnlyClose)
+            .ToArray();
+        var realizedTradingPnl = closingFills.Sum(fill => fill.RealizedPnl + fill.Fee - fill.Funding);
+        var feesPaid = filled.Sum(fill => fill.Fee);
+        var feeToTradingPnlPercent = CalculateFeeToTradingPnlPercent(feesPaid, realizedTradingPnl);
+        var status = ResolveProfitEfficiencyStatus(feeToTradingPnlPercent, realizedTradingPnl, feesPaid);
+        var minNetProfitMultiplier = status switch
+        {
+            "bad" => 2m,
+            "warning" => 1.5m,
+            _ => 1m
+        };
+
+        return new FuturesProfitEfficiencySnapshot(feeToTradingPnlPercent, status, minNetProfitMultiplier);
+    }
+
+    private static int ApplyProfitEfficiencyMaxOrdersCap(
+        int configuredMaxOrdersPerHour,
+        FuturesProfitEfficiencySnapshot profitEfficiency)
+    {
+        if (configuredMaxOrdersPerHour <= 0 || profitEfficiency.Status == "good")
+        {
+            return configuredMaxOrdersPerHour;
+        }
+
+        var cap = profitEfficiency.Status == "bad" ? 2 : 3;
+        return Math.Min(configuredMaxOrdersPerHour, cap);
+    }
+
+    private static decimal CalculateFeeToTradingPnlPercent(decimal feesPaid, decimal realizedTradingPnl)
+    {
+        if (feesPaid <= 0m)
+        {
+            return 0m;
+        }
+
+        if (realizedTradingPnl <= 0m)
+        {
+            return 100m;
+        }
+
+        return decimal.Round(feesPaid / realizedTradingPnl * 100m, 4, MidpointRounding.AwayFromZero);
+    }
+
+    private static string ResolveProfitEfficiencyStatus(decimal feeToTradingPnlPercent, decimal realizedTradingPnl, decimal feesPaid)
+    {
+        if (feesPaid <= 0m)
+        {
+            return "good";
+        }
+
+        if (realizedTradingPnl <= 0m || feeToTradingPnlPercent > 25m)
+        {
+            return "bad";
+        }
+
+        return feeToTradingPnlPercent >= 20m ? "warning" : "good";
+    }
+
+    private readonly record struct FuturesProfitEfficiencySnapshot(
+        decimal FeeToTradingPnlPercent,
+        string Status,
+        decimal MinNetProfitMultiplier);
 
     private FuturesRiskOptions ResolveProfileRiskOptions(FuturesBotSettings settings) => new()
     {

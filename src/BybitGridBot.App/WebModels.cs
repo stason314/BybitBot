@@ -512,6 +512,12 @@ public sealed class FuturesMarketScanItem
 
     public decimal Score { get; init; }
 
+    public decimal MarketFitScore { get; init; }
+
+    public decimal ActionabilityScore { get; init; }
+
+    public required string ActionabilityLabel { get; init; }
+
     public required string Label { get; init; }
 
     public required string RecommendedStrategy { get; init; }
@@ -781,6 +787,18 @@ public sealed class FuturesStrategyQualityView
 
     public decimal NextOrderNotionalUsdt { get; init; }
 
+    public decimal CapitalUtilizationPercent { get; init; }
+
+    public decimal RemainingMarginUsdt { get; init; }
+
+    public int EntriesCapacityLeft { get; init; }
+
+    public string ExitStage { get; init; } = "no-position";
+
+    public decimal CurrentR { get; init; }
+
+    public decimal NextExitPrice { get; init; }
+
     public string CurrentActiveBlockReason { get; init; } = "-";
 
     public string CurrentActiveBlockSource { get; init; } = "-";
@@ -790,6 +808,10 @@ public sealed class FuturesStrategyQualityView
     public string LastNoTradeReason { get; init; } = "-";
 
     public string LastHistoricalNoTradeReason { get; init; } = "-";
+
+    public decimal FeeToTradingPnlPercent { get; init; }
+
+    public string ProfitEfficiencyStatus { get; init; } = "good";
 }
 
 public sealed class FuturesOrderView
@@ -864,6 +886,10 @@ public sealed class FuturesPnlStatsView
 
     public decimal FeesPaid { get; init; }
 
+    public decimal FeeToTradingPnlPercent { get; init; }
+
+    public string ProfitEfficiencyStatus { get; init; } = "good";
+
     public decimal EntryFeesPaid { get; init; }
 
     public decimal ExitFeesPaid { get; init; }
@@ -924,11 +950,17 @@ public sealed class FuturesProtectionStatusView
 
     public decimal CurrentTakeProfit { get; init; }
 
+    public decimal RecommendedStopLoss { get; init; }
+
+    public decimal RecommendedTakeProfit { get; init; }
+
     public required string Status { get; init; }
 
     public required string LastSource { get; init; }
 
     public required string LastReason { get; init; }
+
+    public required string LastUpdateReason { get; init; }
 
     public DateTimeOffset? LastCheckedAt { get; init; }
 }
@@ -1091,7 +1123,7 @@ public sealed class UpdateFuturesSettingsRequest
 
     public decimal StopLossPercent { get; init; } = 2m;
 
-    public decimal TakeProfitPercent { get; init; } = 4m;
+    public decimal TakeProfitPercent { get; init; } = 6m;
 
     public decimal LiquidationBufferPercent { get; init; } = 15m;
 
