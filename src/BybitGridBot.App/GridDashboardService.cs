@@ -881,6 +881,8 @@ public sealed class GridDashboardService : IGridDashboardService
             item,
             dailyPnl,
             state?.BaseAssetQuantity > 0m,
+            CalculateDashboardStateEquityUsdt(state, market.LastPrice),
+            CalculateDashboardActiveExposureUsdt(state, orders, market.LastPrice),
             profitStats,
             IsDashboardTopPairTradingProfile(profile));
     }
@@ -1000,8 +1002,56 @@ public sealed class GridDashboardService : IGridDashboardService
             return CopyDashboardPairScoreItem(candidate.Item, multiplier, reasons);
         }
 
+        var remainingExposure = ResolveDashboardTopPairRemainingExposure(candidate);
+        if (remainingExposure == 0m)
+        {
+            reasons.Add("top-pair exposure cap reached");
+            return CopyDashboardPairScoreItem(candidate.Item, 0m, reasons);
+        }
+
+        multiplier = ApplyDashboardProfitReinvest(candidate, multiplier, reasons);
         reasons.Add($"top-pair rank {rank}");
         return CopyDashboardPairScoreItem(candidate.Item, multiplier, reasons);
+    }
+
+    private decimal ApplyDashboardProfitReinvest(
+        DashboardPairScoreCandidate candidate,
+        decimal multiplier,
+        List<string> reasons)
+    {
+        if (!_defaultGridOptions.ProfitReinvestEnabled ||
+            _defaultGridOptions.ProfitReinvestDailyPnlPercent <= 0m ||
+            _defaultGridOptions.ProfitReinvestMultiplier <= 0m ||
+            candidate.DailyPnl <= 0m ||
+            candidate.EquityUsdt <= 0m)
+        {
+            return multiplier;
+        }
+
+        var triggerPnl = candidate.EquityUsdt * _defaultGridOptions.ProfitReinvestDailyPnlPercent / 100m;
+        if (candidate.DailyPnl < triggerPnl)
+        {
+            return multiplier;
+        }
+
+        reasons.Add($"profit reinvest +{(_defaultGridOptions.ProfitReinvestMultiplier - 1m) * 100m:0.#}%");
+        return multiplier * _defaultGridOptions.ProfitReinvestMultiplier;
+    }
+
+    private decimal? ResolveDashboardTopPairRemainingExposure(DashboardPairScoreCandidate candidate)
+    {
+        var cap = _defaultGridOptions.TopPairMaxExposureUsdt > 0m
+            ? _defaultGridOptions.TopPairMaxExposureUsdt
+            : 0m;
+        if (_defaultGridOptions.TopPairMaxExposurePercent > 0m && candidate.EquityUsdt > 0m)
+        {
+            var percentCap = candidate.EquityUsdt * _defaultGridOptions.TopPairMaxExposurePercent / 100m;
+            cap = cap > 0m ? decimal.Min(cap, percentCap) : percentCap;
+        }
+
+        return cap > 0m
+            ? decimal.Max(0m, cap - candidate.ActiveExposureUsdt)
+            : null;
     }
 
     private decimal ResolveDashboardNonTopPairMultiplier(DashboardPairScoreCandidate candidate)
@@ -1091,8 +1141,50 @@ public sealed class GridDashboardService : IGridDashboardService
         DashboardPairScoreItem Item,
         decimal DailyPnl,
         bool HasPosition,
+        decimal EquityUsdt,
+        decimal ActiveExposureUsdt,
         DashboardPairProfitStats ProfitStats,
         bool IsTradingProfile);
+
+    private static decimal CalculateDashboardStateEquityUsdt(BotState? state, decimal currentPrice)
+    {
+        if (state is null)
+        {
+            return 0m;
+        }
+
+        var resolvedPrice = ResolveDashboardCurrentPrice(state, currentPrice);
+        return state.QuoteAssetBalance + (resolvedPrice > 0m ? state.BaseAssetQuantity * resolvedPrice : 0m);
+    }
+
+    private static decimal CalculateDashboardActiveExposureUsdt(
+        BotState? state,
+        IReadOnlyCollection<GridOrder> orders,
+        decimal currentPrice)
+    {
+        if (state is null)
+        {
+            return 0m;
+        }
+
+        var resolvedPrice = ResolveDashboardCurrentPrice(state, currentPrice);
+        var positionNotional = resolvedPrice > 0m
+            ? Math.Max(0m, state.BaseAssetQuantity * resolvedPrice)
+            : 0m;
+        var activeBuyNotional = orders
+            .Where(order => order.IsActive && order.Side == TradeSide.Buy)
+            .Sum(order => Math.Max(0m, order.Quantity - order.FilledQuantity) * order.Price);
+        return positionNotional + activeBuyNotional;
+    }
+
+    private static decimal ResolveDashboardCurrentPrice(BotState state, decimal currentPrice) =>
+        currentPrice > 0m
+            ? currentPrice
+            : state.LastObservedPrice is > 0m
+                ? state.LastObservedPrice.Value
+                : state.MarkPrice > 0m
+                    ? state.MarkPrice
+                    : state.AverageEntryPrice;
 
     private static DashboardPairProfitStats CalculateDashboardPairProfitStats(IReadOnlyCollection<GridOrder> orders)
     {

@@ -150,6 +150,33 @@ public sealed class GridOptions
     [Range(typeof(decimal), "0", "1000")]
     public decimal NonTopPairProbationMultiplier { get; init; } = 0.25m;
 
+    [ConfigurationKeyName("TOP_PAIR_MAX_EXPOSURE_USDT")]
+    [Range(typeof(decimal), "0", "999999999")]
+    public decimal TopPairMaxExposureUsdt { get; init; } = 0m;
+
+    [ConfigurationKeyName("TOP_PAIR_MAX_EXPOSURE_PERCENT")]
+    [Range(typeof(decimal), "0", "100")]
+    public decimal TopPairMaxExposurePercent { get; init; } = 40m;
+
+    [ConfigurationKeyName("PROFIT_REINVEST_ENABLED")]
+    public bool ProfitReinvestEnabled { get; init; } = true;
+
+    [ConfigurationKeyName("PROFIT_REINVEST_DAILY_PNL_PERCENT")]
+    [Range(typeof(decimal), "0", "100")]
+    public decimal ProfitReinvestDailyPnlPercent { get; init; } = 0.5m;
+
+    [ConfigurationKeyName("PROFIT_REINVEST_MULTIPLIER")]
+    [Range(typeof(decimal), "0", "1000")]
+    public decimal ProfitReinvestMultiplier { get; init; } = 1.2m;
+
+    [ConfigurationKeyName("TOP_PAIR_DIP_PERCENT")]
+    [Range(typeof(decimal), "0", "100")]
+    public decimal TopPairDipPercent { get; init; } = 0.35m;
+
+    [ConfigurationKeyName("TOP_PAIR_LIMIT_OFFSET_PERCENT")]
+    [Range(typeof(decimal), "0", "100")]
+    public decimal TopPairLimitOffsetPercent { get; init; } = 0.05m;
+
     [ConfigurationKeyName("STOP_LOWER_PRICE")]
     public decimal StopLowerPrice { get; init; } = 0.09m;
 

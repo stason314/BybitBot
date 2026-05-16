@@ -712,6 +712,7 @@ public sealed class GridBotWorker : BackgroundService
         var currentPrice = ticker.LastPrice;
         state.LastObservedPrice = currentPrice;
         state.UpdatedAt = DateTimeOffset.UtcNow;
+        config = await ApplyTopPairPullbackTuningAsync(config, state, cancellationToken);
 
         _logger.LogInformation("Current price for {Symbol}: {Price}", _gridOptions.Symbol, currentPrice);
 
@@ -808,6 +809,7 @@ public sealed class GridBotWorker : BackgroundService
         var currentPrice = ticker.LastPrice;
         state.LastObservedPrice = currentPrice;
         state.UpdatedAt = DateTimeOffset.UtcNow;
+        config = await ApplyTopPairPullbackTuningAsync(config, state, cancellationToken);
 
         _logger.LogInformation("Current price for {Symbol}: {Price}", _gridOptions.Symbol, currentPrice);
 
@@ -1072,7 +1074,7 @@ public sealed class GridBotWorker : BackgroundService
             return await FinishProtectiveReduceOnlyCycleAsync(profile, result, levels, currentPrice.Value, cancellationToken);
         }
 
-        var config = ParseComboStrategyConfig(profile);
+        var config = await ApplyTopPairPullbackTuningAsync(ParseComboStrategyConfig(profile), result, cancellationToken);
         var dcaBelowPrice = config.DcaBelowPrice ?? _gridOptions.LowerPrice;
         if (currentPrice.Value > dcaBelowPrice)
         {
@@ -1114,9 +1116,10 @@ public sealed class GridBotWorker : BackgroundService
         }
 
         var currentPrice = result.LastObservedPrice.Value;
+        var btdConfig = await ApplyTopPairPullbackTuningAsync(ParseBtdStrategyConfig(profile), result, cancellationToken);
         await EnsureBtdOverlayOrderAsync(
             profile,
-            ParseBtdStrategyConfig(profile),
+            btdConfig,
             result,
             instrument,
             currentPrice,
@@ -2754,7 +2757,8 @@ public sealed class GridBotWorker : BackgroundService
         CancellationToken cancellationToken)
     {
         var buyLevels = _strategy.GetBuyLevels(levels, currentPrice).OrderByDescending(level => level.Price).ToArray();
-        var buyOrderSizeMultiplier = await GetPairScoreOrderSizeMultiplierAsync(state, cancellationToken);
+        var buyOrderSizing = await GetPairScoreOrderSizeMultiplierAsync(state, cancellationToken);
+        var remainingPairBuyExposure = buyOrderSizing.MaxAdditionalBuyNotionalUsdt;
 
         foreach (var level in buyLevels)
         {
@@ -2773,7 +2777,9 @@ public sealed class GridBotWorker : BackgroundService
 
             var buyExpectedProfitPercent = ExpectedProfitFilter.CalculateLongRoundTripPercent(level.Price, targetSellLevel.Price);
 
-            var orderSizeUsdt = ApplyPairScoreOrderSizeMultiplier(GetOrderSizeUsdt(TradeSide.Buy, level.Price, state), buyOrderSizeMultiplier);
+            var orderSizeUsdt = ApplyPairScoreOrderSizeMultiplier(
+                GetOrderSizeUsdt(TradeSide.Buy, level.Price, state),
+                buyOrderSizing with { MaxAdditionalBuyNotionalUsdt = remainingPairBuyExposure });
             var quantity = instrument.RoundQuantity(orderSizeUsdt / level.Price);
             if (quantity <= 0m || quantity < instrument.MinOrderQty)
             {
@@ -2819,6 +2825,10 @@ public sealed class GridBotWorker : BackgroundService
 
             var createdOrder = createdOrders[0];
             activeOrders = activeOrders.Append(createdOrder).ToArray();
+            if (remainingPairBuyExposure is not null)
+            {
+                remainingPairBuyExposure = decimal.Max(0m, remainingPairBuyExposure.Value - orderSizeUsdt);
+            }
         }
     }
 
@@ -4407,11 +4417,11 @@ public sealed class GridBotWorker : BackgroundService
         return Math.Max(orderSize, 0m);
     }
 
-    private async Task<decimal> GetPairScoreOrderSizeMultiplierAsync(BotState state, CancellationToken cancellationToken)
+    private async Task<PairScoreSizingDecision> GetPairScoreOrderSizeMultiplierAsync(BotState state, CancellationToken cancellationToken)
     {
         if (!_gridOptions.PairScoreCapitalAllocationEnabled)
         {
-            return 1m;
+            return PairScoreSizingDecision.Unrestricted;
         }
 
         var orders = await _repository.GetOrdersAsync(_gridOptions.Symbol, cancellationToken);
@@ -4429,7 +4439,7 @@ public sealed class GridBotWorker : BackgroundService
                 "Execution readiness blocked buy sizing for {Symbol}: {Reason}",
                 _gridOptions.Symbol,
                 executionBlockReason);
-            return 0m;
+            return PairScoreSizingDecision.Blocked;
         }
 
         var score = CalculateCapitalPairScore(state, orders, lastNoTradeReason);
@@ -4445,7 +4455,7 @@ public sealed class GridBotWorker : BackgroundService
                 _gridOptions.Symbol,
                 score,
                 _gridOptions.PairScoreMinBuyScore);
-            return 0m;
+            return PairScoreSizingDecision.Blocked;
         }
 
         var profitStats = CalculatePairProfitStats(orders);
@@ -4471,7 +4481,17 @@ public sealed class GridBotWorker : BackgroundService
                 topPairGate.Reason,
                 topPairGate.Rank,
                 nonTopMultiplier);
-            return nonTopMultiplier;
+            return new PairScoreSizingDecision(nonTopMultiplier, null);
+        }
+
+        multiplier = ApplyProfitReinvestMultiplier(state, multiplier);
+        var maxAdditionalBuyNotionalUsdt = await ResolveTopPairMaxAdditionalBuyNotionalAsync(
+            profile,
+            state,
+            cancellationToken);
+        if (maxAdditionalBuyNotionalUsdt == 0m)
+        {
+            return PairScoreSizingDecision.Blocked;
         }
 
         if (_gridOptions.TopPairActiveCount <= 0 && score >= 75m && _gridOptions.PairScoreMaxHotPairs > 0)
@@ -4503,7 +4523,7 @@ public sealed class GridBotWorker : BackgroundService
                     _gridOptions.Symbol,
                     activeBuyNotional,
                     _gridOptions.PairScoreGlobalActiveBuyCapUsdt);
-                return 0m;
+                return PairScoreSizingDecision.Blocked;
             }
 
             if (activeBuyNotional > 0m && activeBuyNotional >= _gridOptions.PairScoreGlobalActiveBuyCapUsdt * 0.8m)
@@ -4521,7 +4541,7 @@ public sealed class GridBotWorker : BackgroundService
                 multiplier);
         }
 
-        return multiplier;
+        return new PairScoreSizingDecision(multiplier, maxAdditionalBuyNotionalUsdt);
     }
 
     private string? ResolveExecutionGuardrailBlockReason(
@@ -4601,8 +4621,121 @@ public sealed class GridBotWorker : BackgroundService
             ? lastNoTradeReason.ReasonCode
             : NoTradeReason.CapitalRejected;
 
-    private static decimal ApplyPairScoreOrderSizeMultiplier(decimal orderSizeUsdt, decimal multiplier) =>
-        decimal.Max(0m, orderSizeUsdt * decimal.Max(0m, multiplier));
+    private static decimal ApplyPairScoreOrderSizeMultiplier(decimal orderSizeUsdt, PairScoreSizingDecision sizing)
+    {
+        var adjustedOrderSizeUsdt = decimal.Max(0m, orderSizeUsdt * decimal.Max(0m, sizing.Multiplier));
+        return sizing.MaxAdditionalBuyNotionalUsdt is { } maxAdditionalBuyNotionalUsdt
+            ? decimal.Min(adjustedOrderSizeUsdt, decimal.Max(0m, maxAdditionalBuyNotionalUsdt))
+            : adjustedOrderSizeUsdt;
+    }
+
+    private decimal ApplyProfitReinvestMultiplier(BotState state, decimal multiplier)
+    {
+        if (!_gridOptions.ProfitReinvestEnabled ||
+            _gridOptions.ProfitReinvestDailyPnlPercent <= 0m ||
+            _gridOptions.ProfitReinvestMultiplier <= 0m ||
+            state.DailyRealizedPnl <= 0m)
+        {
+            return multiplier;
+        }
+
+        var currentPrice = ResolveCurrentPrice(state);
+        var equity = CalculateStateEquityUsdt(state, currentPrice);
+        if (equity <= 0m)
+        {
+            return multiplier;
+        }
+
+        var triggerPnl = equity * _gridOptions.ProfitReinvestDailyPnlPercent / 100m;
+        if (state.DailyRealizedPnl < triggerPnl)
+        {
+            return multiplier;
+        }
+
+        var boostedMultiplier = multiplier * _gridOptions.ProfitReinvestMultiplier;
+        _logger.LogInformation(
+            "Profit reinvest boost for {Symbol}: daily PnL={DailyPnl:0.####}, trigger={TriggerPnl:0.####}, multiplier {Multiplier:0.####}->{BoostedMultiplier:0.####}.",
+            _gridOptions.Symbol,
+            state.DailyRealizedPnl,
+            triggerPnl,
+            multiplier,
+            boostedMultiplier);
+        return boostedMultiplier;
+    }
+
+    private async Task<decimal?> ResolveTopPairMaxAdditionalBuyNotionalAsync(
+        GridBotSettings? profile,
+        BotState state,
+        CancellationToken cancellationToken)
+    {
+        var currentPrice = ResolveCurrentPrice(state);
+        var cap = ResolveTopPairExposureCapUsdt(state, currentPrice);
+        if (cap <= 0m)
+        {
+            return null;
+        }
+
+        var activeOrders = await _repository.GetActiveOrdersAsync(_gridOptions.Symbol, cancellationToken);
+        var activeBuyNotional = activeOrders
+            .Where(order => order.Side == TradeSide.Buy)
+            .Sum(order => Math.Max(0m, order.Quantity - order.FilledQuantity) * order.Price);
+        var positionNotional = currentPrice > 0m
+            ? Math.Max(0m, state.BaseAssetQuantity * currentPrice)
+            : 0m;
+        var usedExposure = positionNotional + activeBuyNotional;
+        var remainingExposure = cap - usedExposure;
+        if (remainingExposure <= 0m)
+        {
+            await RecordNoTradeReasonAsync(
+                profile,
+                NoTradeReason.CapitalRejected,
+                $"Top-pair exposure cap reached. Position={positionNotional:0.####}, active buys={activeBuyNotional:0.####}, cap={cap:0.####}.",
+                cancellationToken);
+            _logger.LogInformation(
+                "Top-pair exposure cap blocks new buy sizing for {Symbol}. Position={PositionNotional}, active buys={ActiveBuyNotional}, cap={Cap}.",
+                _gridOptions.Symbol,
+                positionNotional,
+                activeBuyNotional,
+                cap);
+            return 0m;
+        }
+
+        return remainingExposure;
+    }
+
+    private decimal ResolveTopPairExposureCapUsdt(BotState state, decimal currentPrice)
+    {
+        var cap = _gridOptions.TopPairMaxExposureUsdt > 0m
+            ? _gridOptions.TopPairMaxExposureUsdt
+            : 0m;
+        if (_gridOptions.TopPairMaxExposurePercent > 0m)
+        {
+            var equity = CalculateStateEquityUsdt(state, currentPrice);
+            var percentCap = equity * _gridOptions.TopPairMaxExposurePercent / 100m;
+            cap = cap > 0m ? decimal.Min(cap, percentCap) : percentCap;
+        }
+
+        return decimal.Max(0m, cap);
+    }
+
+    private static decimal ResolveCurrentPrice(BotState state) =>
+        state.LastObservedPrice is > 0m
+            ? state.LastObservedPrice.Value
+            : state.MarkPrice > 0m
+                ? state.MarkPrice
+                : state.AverageEntryPrice;
+
+    private static decimal CalculateStateEquityUsdt(BotState state, decimal currentPrice) =>
+        state.QuoteAssetBalance + (currentPrice > 0m ? state.BaseAssetQuantity * currentPrice : 0m);
+
+    private sealed record PairScoreSizingDecision(
+        decimal Multiplier,
+        decimal? MaxAdditionalBuyNotionalUsdt)
+    {
+        public static PairScoreSizingDecision Unrestricted { get; } = new(1m, null);
+
+        public static PairScoreSizingDecision Blocked { get; } = new(0m, 0m);
+    }
 
     private decimal ResolvePairScoreStreakMultiplier(PairProfitStats profitStats, decimal dailyPnl)
     {
@@ -4652,6 +4785,123 @@ public sealed class GridBotWorker : BackgroundService
             ? new TopPairGateResult(true, rank, $"top-pair rank {rank}")
             : new TopPairGateResult(false, rank, $"rank {rank} outside top {_gridOptions.TopPairActiveCount}");
     }
+
+    private async Task<bool> IsCurrentTopPairAsync(BotState state, CancellationToken cancellationToken)
+    {
+        if (_gridOptions.TopPairActiveCount <= 0)
+        {
+            return false;
+        }
+
+        var orders = await _repository.GetOrdersAsync(_gridOptions.Symbol, cancellationToken);
+        var lastNoTradeReason = (await _repository.GetNoTradeReasonsAsync(_gridOptions.Symbol, 1, cancellationToken)).FirstOrDefault();
+        var score = CalculateCapitalPairScore(state, orders, lastNoTradeReason);
+        var profitStats = CalculatePairProfitStats(orders);
+        var topPairGate = await ResolveTopPairGateAsync(state, score, profitStats, cancellationToken);
+        return topPairGate.IsAllowed;
+    }
+
+    private async Task<DcaStrategyConfig> ApplyTopPairPullbackTuningAsync(
+        DcaStrategyConfig config,
+        BotState state,
+        CancellationToken cancellationToken)
+    {
+        var isTopPair = await IsCurrentTopPairAsync(state, cancellationToken);
+
+        return new DcaStrategyConfig
+        {
+            OrderSizeUsdt = config.OrderSizeUsdt,
+            BuyIntervalMinutes = ResolvePullbackBuyIntervalMinutes(config.BuyIntervalMinutes, isTopPair),
+            MaxActiveBuyOrders = config.MaxActiveBuyOrders,
+            TakeProfitPercent = config.TakeProfitPercent,
+            TakeProfitLadderEnabled = config.TakeProfitLadderEnabled,
+            TakeProfitLadderFirstPercent = config.TakeProfitLadderFirstPercent,
+            TakeProfitLadderFirstQuantityPercent = config.TakeProfitLadderFirstQuantityPercent,
+            TakeProfitLadderSecondPercent = config.TakeProfitLadderSecondPercent,
+            TakeProfitLadderSecondQuantityPercent = config.TakeProfitLadderSecondQuantityPercent,
+            TakeProfitLadderFinalPercent = config.TakeProfitLadderFinalPercent,
+            TakeProfitLadderFinalQuantityPercent = config.TakeProfitLadderFinalQuantityPercent,
+            LimitOffsetPercent = ResolvePullbackLimitOffsetPercent(config.LimitOffsetPercent, isTopPair),
+            DipPercent = ResolvePullbackDipPercent(config.DipPercent, isTopPair),
+            DipLookbackCandles = config.DipLookbackCandles,
+            CandleInterval = config.CandleInterval,
+            MaxPositionUsdt = config.MaxPositionUsdt
+        };
+    }
+
+    private async Task<BtdStrategyConfig> ApplyTopPairPullbackTuningAsync(
+        BtdStrategyConfig config,
+        BotState state,
+        CancellationToken cancellationToken)
+    {
+        var isTopPair = await IsCurrentTopPairAsync(state, cancellationToken);
+
+        return new BtdStrategyConfig
+        {
+            OrderSizeUsdt = config.OrderSizeUsdt,
+            BuyIntervalMinutes = ResolvePullbackBuyIntervalMinutes(config.BuyIntervalMinutes, isTopPair),
+            MaxActiveBuyOrders = config.MaxActiveBuyOrders,
+            TakeProfitPercent = config.TakeProfitPercent,
+            TakeProfitLadderEnabled = config.TakeProfitLadderEnabled,
+            TakeProfitLadderFirstPercent = config.TakeProfitLadderFirstPercent,
+            TakeProfitLadderFirstQuantityPercent = config.TakeProfitLadderFirstQuantityPercent,
+            TakeProfitLadderSecondPercent = config.TakeProfitLadderSecondPercent,
+            TakeProfitLadderSecondQuantityPercent = config.TakeProfitLadderSecondQuantityPercent,
+            TakeProfitLadderFinalPercent = config.TakeProfitLadderFinalPercent,
+            TakeProfitLadderFinalQuantityPercent = config.TakeProfitLadderFinalQuantityPercent,
+            LimitOffsetPercent = ResolvePullbackLimitOffsetPercent(config.LimitOffsetPercent, isTopPair),
+            DipPercent = ResolvePullbackDipPercent(config.DipPercent, isTopPair),
+            DipLookbackCandles = config.DipLookbackCandles,
+            CandleInterval = config.CandleInterval,
+            MaxPositionUsdt = config.MaxPositionUsdt,
+            MaxBuys = config.MaxBuys,
+            MinMinutesBetweenBuys = isTopPair
+                ? Math.Min(Math.Max(1, config.MinMinutesBetweenBuys), 10)
+                : config.MinMinutesBetweenBuys
+        };
+    }
+
+    private async Task<ComboStrategyConfig> ApplyTopPairPullbackTuningAsync(
+        ComboStrategyConfig config,
+        BotState state,
+        CancellationToken cancellationToken)
+    {
+        var isTopPair = await IsCurrentTopPairAsync(state, cancellationToken);
+
+        return new ComboStrategyConfig
+        {
+            OrderSizeUsdt = config.OrderSizeUsdt,
+            BuyIntervalMinutes = ResolvePullbackBuyIntervalMinutes(config.BuyIntervalMinutes, isTopPair),
+            MaxActiveBuyOrders = config.MaxActiveBuyOrders,
+            TakeProfitPercent = config.TakeProfitPercent,
+            TakeProfitLadderEnabled = config.TakeProfitLadderEnabled,
+            TakeProfitLadderFirstPercent = config.TakeProfitLadderFirstPercent,
+            TakeProfitLadderFirstQuantityPercent = config.TakeProfitLadderFirstQuantityPercent,
+            TakeProfitLadderSecondPercent = config.TakeProfitLadderSecondPercent,
+            TakeProfitLadderSecondQuantityPercent = config.TakeProfitLadderSecondQuantityPercent,
+            TakeProfitLadderFinalPercent = config.TakeProfitLadderFinalPercent,
+            TakeProfitLadderFinalQuantityPercent = config.TakeProfitLadderFinalQuantityPercent,
+            LimitOffsetPercent = ResolvePullbackLimitOffsetPercent(config.LimitOffsetPercent, isTopPair),
+            DipPercent = ResolvePullbackDipPercent(config.DipPercent, isTopPair),
+            DipLookbackCandles = config.DipLookbackCandles,
+            CandleInterval = config.CandleInterval,
+            MaxPositionUsdt = config.MaxPositionUsdt,
+            DcaBelowPrice = config.DcaBelowPrice
+        };
+    }
+
+    private static int ResolvePullbackBuyIntervalMinutes(int configuredMinutes, bool isTopPair) =>
+        isTopPair ? Math.Min(Math.Max(1, configuredMinutes), 15) : configuredMinutes;
+
+    private decimal ResolvePullbackDipPercent(decimal configuredDipPercent, bool isTopPair) =>
+        isTopPair && _gridOptions.TopPairDipPercent > 0m
+            ? _gridOptions.TopPairDipPercent
+            : decimal.Max(configuredDipPercent, 0.7m);
+
+    private decimal ResolvePullbackLimitOffsetPercent(decimal configuredLimitOffsetPercent, bool isTopPair) =>
+        isTopPair && _gridOptions.TopPairLimitOffsetPercent > 0m
+            ? _gridOptions.TopPairLimitOffsetPercent
+            : decimal.Max(configuredLimitOffsetPercent, 0.1m);
 
     private decimal ResolveNonTopPairMultiplier(BotState state, PairProfitStats profitStats)
     {
