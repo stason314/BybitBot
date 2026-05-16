@@ -1125,9 +1125,34 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
       <div class="subtle" id="autoRecommendationReason" style="margin-top:12px;"></div>
     </section>
 
+    <section class="panel" style="margin-bottom:18px;">
+      <div class="actions" style="justify-content:space-between;">
+        <div>
+          <h2 style="margin:0;">Futures Market Scanner</h2>
+          <div class="subtle">Ranks linear USDT futures by candle fit for futures strategies and prepares a config.</div>
+        </div>
+        <div class="actions">
+          <input class="hours-input" id="futuresMarketScanLimit" type="number" min="10" max="500" step="10" value="120" aria-label="Max futures pairs" />
+          <button type="button" id="runFuturesMarketScan">Scan Market</button>
+        </div>
+      </div>
+      <div class="status" id="futuresMarketScanStatus">Scanner has not run yet.</div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Symbol</th><th>Score</th><th>Strategy</th><th>Entry</th><th>Price</th><th>ATR</th><th>Fit Grid / Trend / BO</th><th>6h Volume</th><th>Support / Resistance</th><th>Reasons</th><th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="futuresMarketScanRows"></tbody>
+        </table>
+      </div>
+    </section>
+
     <div class="layout">
       <section class="panel">
         <h2>Futures Profiles</h2>
+        <div class="stats" id="futuresProfilesProfitStats" style="margin-bottom:12px;"></div>
         <div class="table-wrap">
           <table>
             <thead>
@@ -1231,6 +1256,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
     let creating = false;
     let dirty = false;
     let latest = null;
+    let latestFuturesMarketScanData = null;
     let controlStatusSymbol = null;
     let controlStatusKind = null;
     const lastPrices = new Map();
@@ -1325,6 +1351,12 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
           </button>`).join('');
     };
     const renderConfigs = (configs) => {
+      const dailyTotal = configs.reduce((sum, config) => sum + Number(config.dailyRealizedPnl || 0), 0);
+      const total = configs.reduce((sum, config) => sum + Number(config.totalRealizedPnl || 0), 0);
+      byId('futuresProfilesProfitStats').innerHTML = [
+        ['All Daily Profit', formatPnl(dailyTotal)],
+        ['All Total Profit', formatPnl(total)]
+      ].map(([label, value]) => `<div class="stat"><div class="label">${label}</div><div class="value">${value}</div></div>`).join('');
       byId('configRows').innerHTML = configs.length === 0
         ? '<tr><td colspan="9">No futures configs yet.</td></tr>'
         : configs.map(config => `
@@ -1339,6 +1371,70 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             <td>${formatPnl(config.totalRealizedPnl)}</td>
             <td>${formatDate(config.updatedAt)}</td>
           </tr>`).join('');
+    };
+    const renderFuturesMarketScanRows = (items) => {
+      byId('futuresMarketScanRows').innerHTML = !items || items.length === 0
+        ? '<tr><td colspan="11">No futures scan results yet.</td></tr>'
+        : items.map(item => {
+            const canApply = item.settings && item.score >= 15;
+            return `
+              <tr>
+                <td><strong>${escapeHtml(item.symbol)}</strong><br><span class="subtle">${escapeHtml(item.category)}</span></td>
+                <td><strong>${formatNumber(item.score)}</strong><br><span class="subtle">${escapeHtml(item.label)}</span></td>
+                <td>${escapeHtml(item.recommendedStrategy)}<br><span class="subtle">${escapeHtml(item.recommendedDirection)}</span></td>
+                <td>${formatNumber(item.entryNotionalUsdt)} USDT</td>
+                <td>${formatNumber(item.lastPrice)}</td>
+                <td>${formatNumber(item.atrPercent)}%</td>
+                <td>${formatNumber(item.gridFitScore)} / ${formatNumber(item.trendFitScore)} / ${formatNumber(item.breakoutFitScore)}</td>
+                <td>${formatNumber(item.volume6hUsdt)}</td>
+                <td>${formatNumber(item.support)} / ${formatNumber(item.resistance)}</td>
+                <td>${escapeHtml((item.reasons || []).join('; '))}</td>
+                <td><button type="button" class="compact-button primary" data-action="apply-futures-scan-profile" data-symbol="${escapeHtml(item.symbol)}" ${canApply ? '' : 'disabled'}>${canApply ? 'Apply Config' : 'View Only'}</button></td>
+              </tr>`;
+          }).join('');
+    };
+    const runFuturesMarketScan = async () => {
+      const status = byId('futuresMarketScanStatus');
+      const limit = Number(byId('futuresMarketScanLimit').value || 120);
+      status.className = 'status';
+      status.textContent = 'Scanning linear futures market...';
+      const response = await fetch(`/api/futures/market-scan?limit=${encodeURIComponent(limit)}`, { cache: 'no-store' });
+      const result = await response.json();
+      if (!response.ok) {
+        throw new Error(result?.errors?.join(' | ') || result?.message || 'Futures market scan failed.');
+      }
+
+      latestFuturesMarketScanData = result;
+      renderFuturesMarketScanRows(result.items || []);
+      status.className = 'status ok';
+      status.textContent = `Scanned ${result.scannedCount}/${result.candidateCount} linear futures. Failed: ${result.failedCount}.`;
+    };
+    const applyFuturesScanConfig = async (symbol) => {
+      const status = byId('futuresMarketScanStatus');
+      const item = latestFuturesMarketScanData?.items?.find(row => String(row.symbol || '').toUpperCase() === String(symbol || '').toUpperCase());
+      if (!item?.settings) {
+        status.className = 'status error';
+        status.textContent = `No futures scan settings found for ${symbol}.`;
+        return;
+      }
+
+      status.className = 'status';
+      status.textContent = `Applying futures config for ${item.symbol}...`;
+      const response = await fetch('/api/futures/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(item.settings)
+      });
+      const result = await response.json();
+      status.className = `status ${response.ok ? 'ok' : 'error'}`;
+      status.textContent = response.ok ? result.message : (result.errors?.join(' | ') || result.message || 'Failed to apply futures config.');
+      if (response.ok) {
+        selectedSymbol = (result.symbol || item.symbol).toUpperCase();
+        creating = false;
+        dirty = false;
+        setUrl();
+        await load(true);
+      }
     };
     const resolveCurrentPrice = (data) => Number(data.position?.markPrice || data.autoRecommendation?.lastPrice || 0);
     const renderMarketTicker = (data) => {
@@ -1755,6 +1851,23 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         setUrl();
         await load(true);
       }
+    });
+    byId('runFuturesMarketScan').addEventListener('click', () => {
+      runFuturesMarketScan().catch((error) => {
+        byId('futuresMarketScanStatus').className = 'status error';
+        byId('futuresMarketScanStatus').textContent = error.message;
+      });
+    });
+    byId('futuresMarketScanRows').addEventListener('click', (event) => {
+      const button = event.target.closest('[data-action="apply-futures-scan-profile"]');
+      if (!button) {
+        return;
+      }
+
+      applyFuturesScanConfig(button.dataset.symbol).catch((error) => {
+        byId('futuresMarketScanStatus').className = 'status error';
+        byId('futuresMarketScanStatus').textContent = error.message;
+      });
     });
     byId('profileTabs').addEventListener('click', async (event) => {
       const deleteSymbol = event.target.dataset.delete;

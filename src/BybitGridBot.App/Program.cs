@@ -76,6 +76,7 @@ builder.Services.AddSingleton<IFuturesStrategy, FuturesTrendFollowShortOnly>();
 builder.Services.AddSingleton<IFuturesStrategy, FuturesBreakdownShortOnly>();
 builder.Services.AddSingleton<IFuturesStrategy, FuturesGridShortOnly>();
 builder.Services.AddSingleton<FuturesStrategyRouter>();
+builder.Services.AddSingleton<FuturesStrategyFitAnalyzer>();
 builder.Services.AddSingleton<StrategyRouter>();
 builder.Services.AddSingleton<CapitalAllocator>();
 builder.Services.AddSingleton<ConflictResolver>();
@@ -85,6 +86,7 @@ builder.Services.AddSingleton<PauseStrategy>();
 builder.Services.AddSingleton<IGridDashboardService, GridDashboardService>();
 builder.Services.AddSingleton<IFuturesDashboardService, FuturesDashboardService>();
 builder.Services.AddSingleton<IMarketScannerService, MarketScannerService>();
+builder.Services.AddSingleton<IFuturesMarketScannerService, FuturesMarketScannerService>();
 
 builder.Services.AddHttpClient<IBybitRestClient, BybitRestClient>(client =>
 {
@@ -155,6 +157,9 @@ app.MapDelete("/api/settings/{symbol}", async (string symbol, IGridDashboardServ
 
 app.MapGet("/api/futures/dashboard", async (string? symbol, IFuturesDashboardService dashboardService, CancellationToken cancellationToken) =>
     Results.Ok(await dashboardService.GetDashboardAsync(symbol, cancellationToken)));
+
+app.MapGet("/api/futures/market-scan", async (int? limit, IFuturesMarketScannerService marketScannerService, CancellationToken cancellationToken) =>
+    Results.Ok(await marketScannerService.ScanAsync(limit, cancellationToken)));
 
 app.MapPost("/api/futures/settings", async (UpdateFuturesSettingsRequest request, IFuturesDashboardService dashboardService, CancellationToken cancellationToken) =>
 {
