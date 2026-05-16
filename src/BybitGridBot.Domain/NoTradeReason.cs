@@ -20,7 +20,8 @@ public enum NoTradeReason
     AggressiveCooldown,
     AggressiveStopLoss,
     AggressiveReenabled,
-    UnparentedSellCleanup
+    UnparentedSellCleanup,
+    ProtectiveExitNotFilled
 }
 
 public sealed class NoTradeReasonRecord

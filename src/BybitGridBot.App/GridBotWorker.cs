@@ -2462,7 +2462,7 @@ public sealed class GridBotWorker : BackgroundService
             _gridOptions.Symbol,
             reason,
             forceExit);
-        var forceExitAttempt = VerifyReduceOnlyForceExitProgress(state);
+        var forceExitAttempt = await VerifyReduceOnlyForceExitProgressAsync(profile, state, cancellationToken);
 
         var cancelledBuyCount = 0;
         foreach (var order in activeOrders.Where(order => order.IsActive && order.Side == TradeSide.Buy).ToArray())
@@ -2474,8 +2474,14 @@ public sealed class GridBotWorker : BackgroundService
         var cancelledSellCount = 0;
         if (forceExit)
         {
+            var now = DateTimeOffset.UtcNow;
             foreach (var order in activeOrders.Where(order => order.IsActive && order.Side == TradeSide.Sell).ToArray())
             {
+                if (IsReduceOnlyExitOrder(order) && IsFreshReduceOnlyExitOrder(order, now))
+                {
+                    continue;
+                }
+
                 await CancelManagedOrderAsync(order, cancellationToken);
                 cancelledSellCount++;
             }
@@ -2530,6 +2536,14 @@ public sealed class GridBotWorker : BackgroundService
     {
         if (state.BaseAssetQuantity <= 0m)
         {
+            return 0;
+        }
+
+        if (forceExit && ShouldDeferReduceOnlyExitCreation(state.BaseAssetQuantity))
+        {
+            _logger.LogInformation(
+                "ReduceOnly exit creation deferred for {Symbol}; a fresh reduce-only exit is still within anti-churn window.",
+                _gridOptions.Symbol);
             return 0;
         }
 
@@ -2598,7 +2612,10 @@ public sealed class GridBotWorker : BackgroundService
         _gridOptions.ReduceOnlyForceExitOnDrawdown &&
         CalculatePositionDrawdownPercent(state, currentPrice) >= _gridOptions.ReduceOnlyForceExitDrawdownPercent;
 
-    private int VerifyReduceOnlyForceExitProgress(BotState state)
+    private async Task<int> VerifyReduceOnlyForceExitProgressAsync(
+        GridBotSettings? profile,
+        BotState state,
+        CancellationToken cancellationToken)
     {
         if (!_reduceOnlyExitVerifications.TryGetValue(_gridOptions.Symbol, out var pending))
         {
@@ -2625,7 +2642,6 @@ public sealed class GridBotWorker : BackgroundService
         var nextAttempt = Math.Min(5, pending.Attempts + 1);
         _reduceOnlyExitVerifications[_gridOptions.Symbol] = pending with
         {
-            RequestedAt = DateTimeOffset.UtcNow,
             Attempts = nextAttempt
         };
         _logger.LogWarning(
@@ -2633,8 +2649,36 @@ public sealed class GridBotWorker : BackgroundService
             _gridOptions.Symbol,
             state.BaseAssetQuantity,
             nextAttempt);
+        if (nextAttempt == 2)
+        {
+            await RecordNoTradeReasonAsync(
+                profile,
+                NoTradeReason.ProtectiveExitNotFilled,
+                $"Protective reduce-only exit did not reduce position after {nextAttempt} attempts. Base quantity is still {state.BaseAssetQuantity}.",
+                cancellationToken);
+        }
+
         return nextAttempt;
     }
+
+    private bool ShouldDeferReduceOnlyExitCreation(decimal currentBaseQuantity)
+    {
+        if (!_reduceOnlyExitVerifications.TryGetValue(_gridOptions.Symbol, out var pending) ||
+            currentBaseQuantity <= 0m ||
+            currentBaseQuantity < pending.ExpectedBaseQuantity * 0.995m)
+        {
+            return false;
+        }
+
+        return DateTimeOffset.UtcNow - pending.RequestedAt < GetReduceOnlyExitAntiChurnWindow();
+    }
+
+    private TimeSpan GetReduceOnlyExitAntiChurnWindow() =>
+        TimeSpan.FromSeconds(Math.Max(0, _gridOptions.ReduceOnlyExitAntiChurnSeconds));
+
+    private bool IsFreshReduceOnlyExitOrder(GridOrder order, DateTimeOffset now) =>
+        _gridOptions.ReduceOnlyExitAntiChurnSeconds > 0 &&
+        now - order.CreatedAt < GetReduceOnlyExitAntiChurnWindow();
 
     private static decimal GetReduceOnlyForceExitOffsetPercent(int attempt) =>
         decimal.Min(0.5m, SignalMarketLikeLimitBufferPercent * (1m + Math.Max(0, attempt)));
@@ -2662,6 +2706,10 @@ public sealed class GridBotWorker : BackgroundService
         !string.Equals(order.ParentOrderLinkId, ReduceOnlyExitMarker, StringComparison.Ordinal) &&
         !string.Equals(order.ParentOrderLinkId, SignalExitMarker, StringComparison.Ordinal) &&
         !string.Equals(order.ParentOrderLinkId, TrendExitMarker, StringComparison.Ordinal);
+
+    private static bool IsReduceOnlyExitOrder(GridOrder order) =>
+        order.Side == TradeSide.Sell &&
+        string.Equals(order.ParentOrderLinkId, ReduceOnlyExitMarker, StringComparison.Ordinal);
 
     private IReadOnlyList<decimal> BuildReduceOnlySellLevels(
         IReadOnlyList<GridLevel> levels,
@@ -4497,6 +4545,7 @@ public sealed class GridBotWorker : BackgroundService
         NoTradeReason.HighVolatility or
         NoTradeReason.MaxPositionReached or
         NoTradeReason.PriceOutsideRange or
+        NoTradeReason.ProtectiveExitNotFilled or
         NoTradeReason.ExpectedProfitTooLow or
         NoTradeReason.RiskRejected or
         NoTradeReason.CapitalRejected;
@@ -4624,6 +4673,7 @@ public sealed class GridBotWorker : BackgroundService
         NoTradeReason.MaxPositionReached => 15m,
         NoTradeReason.PriceOutsideRange => 12m,
         NoTradeReason.UnparentedSellCleanup => 12m,
+        NoTradeReason.ProtectiveExitNotFilled => 12m,
         NoTradeReason.ExpectedProfitTooLow => 10m,
         NoTradeReason.ScoreTooLow => 8m,
         NoTradeReason.UnknownMarketPhase => 6m,
@@ -5217,6 +5267,11 @@ public sealed class GridBotWorker : BackgroundService
         decimal remainingQuantity,
         CancellationToken cancellationToken)
     {
+        if (IsReduceOnlyExitOrder(order))
+        {
+            return true;
+        }
+
         var entryPrice = state.AverageEntryPrice;
         var entryFee = 0m;
 

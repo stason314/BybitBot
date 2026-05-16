@@ -406,6 +406,10 @@ public sealed class GridOptions
     [Range(typeof(decimal), "0", "1000")]
     public decimal ReduceOnlyForceExitDrawdownPercent { get; init; } = 2m;
 
+    [ConfigurationKeyName("REDUCE_ONLY_EXIT_ANTI_CHURN_SECONDS")]
+    [Range(0, 3600)]
+    public int ReduceOnlyExitAntiChurnSeconds { get; init; } = 30;
+
     [ConfigurationKeyName("ENABLE_NO_TRADE_REASON_TRACKING")]
     public bool EnableNoTradeReasonTracking { get; init; } = true;
 

@@ -882,6 +882,7 @@ public sealed class GridDashboardService : IGridDashboardService
         NoTradeReason.HighVolatility => 20m,
         NoTradeReason.MaxPositionReached => 15m,
         NoTradeReason.PriceOutsideRange => 12m,
+        NoTradeReason.ProtectiveExitNotFilled => 12m,
         NoTradeReason.ExpectedProfitTooLow => 10m,
         NoTradeReason.ScoreTooLow => 8m,
         NoTradeReason.UnknownMarketPhase => 6m,
