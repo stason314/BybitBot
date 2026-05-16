@@ -70,6 +70,11 @@ public sealed class FuturesTrendFollowLongOnly : IFuturesStrategy
             return FuturesLongOnlySignals.CloseLong(context, "partial-take-profit", quantityMultiplier: 0.5m);
         }
 
+        if (FuturesLongOnlySignals.ShouldCloseTrailingProfit(context, signal))
+        {
+            return FuturesLongOnlySignals.CloseLong(context, "trailing-profit");
+        }
+
         if (FuturesLongOnlySignals.ShouldOpenAggressiveTestLong(context, signal))
         {
             return FuturesLongOnlySignals.OpenLong(context);
@@ -82,7 +87,7 @@ public sealed class FuturesTrendFollowLongOnly : IFuturesStrategy
 
         return signal.MovePercent >= 0.8m
             ? FuturesLongOnlySignals.OpenLong(context)
-            : FuturesStrategyDecision.Empty("No futures trend-follow long entry signal.");
+            : FuturesStrategyDecision.Empty($"Waiting long trend continuation. Move={signal.MovePercent:F2}%, required=0.80%.");
     }
 }
 
@@ -107,6 +112,11 @@ public sealed class FuturesBreakoutLongOnly : IFuturesStrategy
             return FuturesLongOnlySignals.CloseLong(context, "partial-take-profit", quantityMultiplier: 0.5m);
         }
 
+        if (FuturesLongOnlySignals.ShouldCloseTrailingProfit(context, signal))
+        {
+            return FuturesLongOnlySignals.CloseLong(context, "trailing-profit");
+        }
+
         if (FuturesLongOnlySignals.ShouldOpenAggressiveTestLong(context, signal))
         {
             return FuturesLongOnlySignals.OpenLong(context);
@@ -119,7 +129,7 @@ public sealed class FuturesBreakoutLongOnly : IFuturesStrategy
 
         return context.CurrentPrice >= signal.Resistance
             ? FuturesLongOnlySignals.OpenLong(context)
-            : FuturesStrategyDecision.Empty("No futures breakout long entry signal.");
+            : FuturesStrategyDecision.Empty($"Waiting breakout continuation. Price={context.CurrentPrice:F8}, resistance={signal.Resistance:F8}.");
     }
 }
 
@@ -144,6 +154,11 @@ public sealed class FuturesGridLongOnly : IFuturesStrategy
             return FuturesLongOnlySignals.CloseLong(context, "partial-take-profit", quantityMultiplier: 0.5m);
         }
 
+        if (FuturesLongOnlySignals.ShouldCloseTrailingProfit(context, signal))
+        {
+            return FuturesLongOnlySignals.CloseLong(context, "trailing-profit");
+        }
+
         if (FuturesLongOnlySignals.ShouldOpenAggressiveTestLong(context, signal))
         {
             return FuturesLongOnlySignals.OpenLong(context);
@@ -157,7 +172,7 @@ public sealed class FuturesGridLongOnly : IFuturesStrategy
         var entryBand = signal.Support + (signal.Range * 0.35m);
         return context.CurrentPrice <= entryBand
             ? FuturesLongOnlySignals.OpenLong(context)
-            : FuturesStrategyDecision.Empty("No futures grid long entry signal.");
+            : FuturesStrategyDecision.Empty($"Waiting pullback into long grid entry band. Price={context.CurrentPrice:F8}, entryBand={entryBand:F8}.");
     }
 }
 
@@ -182,6 +197,11 @@ public sealed class FuturesTrendFollowShortOnly : IFuturesStrategy
             return FuturesShortOnlySignals.CloseShort(context, "partial-take-profit", quantityMultiplier: 0.5m);
         }
 
+        if (FuturesShortOnlySignals.ShouldCloseTrailingProfit(context, signal))
+        {
+            return FuturesShortOnlySignals.CloseShort(context, "trailing-profit");
+        }
+
         if (FuturesShortOnlySignals.ShouldOpenAggressiveTestShort(context, signal))
         {
             return FuturesShortOnlySignals.OpenShort(context);
@@ -194,7 +214,7 @@ public sealed class FuturesTrendFollowShortOnly : IFuturesStrategy
 
         return signal.MovePercent <= -0.8m
             ? FuturesShortOnlySignals.OpenShort(context)
-            : FuturesStrategyDecision.Empty("No futures trend-follow short entry signal.");
+            : FuturesStrategyDecision.Empty($"Waiting short trend continuation. Move={signal.MovePercent:F2}%, required=-0.80%.");
     }
 }
 
@@ -219,6 +239,11 @@ public sealed class FuturesBreakdownShortOnly : IFuturesStrategy
             return FuturesShortOnlySignals.CloseShort(context, "partial-take-profit", quantityMultiplier: 0.5m);
         }
 
+        if (FuturesShortOnlySignals.ShouldCloseTrailingProfit(context, signal))
+        {
+            return FuturesShortOnlySignals.CloseShort(context, "trailing-profit");
+        }
+
         if (FuturesShortOnlySignals.ShouldOpenAggressiveTestShort(context, signal))
         {
             return FuturesShortOnlySignals.OpenShort(context);
@@ -231,7 +256,7 @@ public sealed class FuturesBreakdownShortOnly : IFuturesStrategy
 
         return context.CurrentPrice <= signal.Support
             ? FuturesShortOnlySignals.OpenShort(context)
-            : FuturesStrategyDecision.Empty("No futures breakdown short entry signal.");
+            : FuturesStrategyDecision.Empty($"Waiting breakdown continuation. Price={context.CurrentPrice:F8}, support={signal.Support:F8}.");
     }
 }
 
@@ -256,6 +281,11 @@ public sealed class FuturesGridShortOnly : IFuturesStrategy
             return FuturesShortOnlySignals.CloseShort(context, "partial-take-profit", quantityMultiplier: 0.5m);
         }
 
+        if (FuturesShortOnlySignals.ShouldCloseTrailingProfit(context, signal))
+        {
+            return FuturesShortOnlySignals.CloseShort(context, "trailing-profit");
+        }
+
         if (FuturesShortOnlySignals.ShouldOpenAggressiveTestShort(context, signal))
         {
             return FuturesShortOnlySignals.OpenShort(context);
@@ -269,7 +299,7 @@ public sealed class FuturesGridShortOnly : IFuturesStrategy
         var entryBand = signal.Resistance - (signal.Range * 0.35m);
         return context.CurrentPrice >= entryBand
             ? FuturesShortOnlySignals.OpenShort(context)
-            : FuturesStrategyDecision.Empty("No futures grid short entry signal.");
+            : FuturesStrategyDecision.Empty($"Waiting rebound into short grid entry band. Price={context.CurrentPrice:F8}, entryBand={entryBand:F8}.");
     }
 }
 
@@ -349,6 +379,26 @@ internal static class FuturesLongOnlySignals
             (profitPercent >= 0.6m && retracementFromResistance >= 0.35m);
     }
 
+    public static bool ShouldCloseTrailingProfit(FuturesStrategyContext context, FuturesLongOnlySignal signal)
+    {
+        if (context.Position.Size <= 0m || !IsLong(context.Position.Side) || context.Position.EntryPrice <= 0m)
+        {
+            return false;
+        }
+
+        var profitPercent = (context.CurrentPrice - context.Position.EntryPrice) / context.Position.EntryPrice * 100m;
+        if (profitPercent < 0.35m)
+        {
+            return false;
+        }
+
+        var retracementFromResistance = signal.Resistance > 0m
+            ? (signal.Resistance - context.CurrentPrice) / signal.Resistance * 100m
+            : 0m;
+        return retracementFromResistance >= 0.25m ||
+            (profitPercent >= 0.6m && signal.MovePercent < 0m);
+    }
+
     public static bool ShouldOpenAggressiveTestLong(FuturesStrategyContext context, FuturesLongOnlySignal signal) =>
         context.Settings.AggressiveModeEnabled &&
         context.Settings.AggressiveModeKind == FuturesAggressiveModeKind.Test &&
@@ -372,7 +422,7 @@ internal static class FuturesLongOnlySignals
         if (FuturesLongOnlySignals.TryAnalyze(context, out var signal) &&
             IsLongScaleInAfterRejection(context, signal))
         {
-            return FuturesStrategyDecision.Empty("Futures long scale-in blocked after rejection from resistance.");
+            return FuturesStrategyDecision.Empty("Rejection risk: long scale-in blocked below resistance; waiting breakout continuation.");
         }
 
         var entryIntent = FuturesStrategyIntentFactory.OpenLong(
@@ -592,6 +642,26 @@ internal static class FuturesShortOnlySignals
             (profitPercent >= 0.6m && reboundFromSupport >= 0.35m);
     }
 
+    public static bool ShouldCloseTrailingProfit(FuturesStrategyContext context, FuturesLongOnlySignal signal)
+    {
+        if (context.Position.Size <= 0m || !IsShort(context.Position.Side) || context.Position.EntryPrice <= 0m)
+        {
+            return false;
+        }
+
+        var profitPercent = (context.Position.EntryPrice - context.CurrentPrice) / context.Position.EntryPrice * 100m;
+        if (profitPercent < 0.35m)
+        {
+            return false;
+        }
+
+        var reboundFromSupport = signal.Support > 0m
+            ? (context.CurrentPrice - signal.Support) / signal.Support * 100m
+            : 0m;
+        return reboundFromSupport >= 0.25m ||
+            (profitPercent >= 0.6m && signal.MovePercent > 0m);
+    }
+
     public static bool ShouldOpenAggressiveTestShort(FuturesStrategyContext context, FuturesLongOnlySignal signal) =>
         context.Settings.AggressiveModeEnabled &&
         context.Settings.AggressiveModeKind == FuturesAggressiveModeKind.Test &&
@@ -615,7 +685,7 @@ internal static class FuturesShortOnlySignals
         if (TryAnalyze(context, out var signal) &&
             IsShortScaleInAfterRebound(context, signal))
         {
-            return FuturesStrategyDecision.Empty("Futures short scale-in blocked after rebound from support.");
+            return FuturesStrategyDecision.Empty("Rebound risk: short scale-in blocked above support; waiting breakdown continuation.");
         }
 
         var entryIntent = FuturesStrategyIntentFactory.OpenShort(

@@ -717,6 +717,7 @@ public sealed class FuturesBotWorker : BackgroundService
     private static bool IsFeeProtectedExitReason(string reason) =>
         string.Equals(reason, "take-profit", StringComparison.OrdinalIgnoreCase) ||
         string.Equals(reason, "partial-take-profit", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(reason, "trailing-profit", StringComparison.OrdinalIgnoreCase) ||
         string.Equals(reason, "exit-signal", StringComparison.OrdinalIgnoreCase);
 
     private async Task<string?> GetAggressiveEntryBlockReasonAsync(
