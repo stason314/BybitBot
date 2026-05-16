@@ -341,14 +341,14 @@ public sealed class GridOptions
 
     [ConfigurationKeyName("PROFIT_PROTECTION_TRIGGER_PERCENT")]
     [Range(typeof(decimal), "0", "1000")]
-    public decimal ProfitProtectionTriggerPercent { get; init; } = 5m;
+    public decimal ProfitProtectionTriggerPercent { get; init; } = 0.8m;
 
     [ConfigurationKeyName("TRAILING_STOP_ENABLED")]
     public bool TrailingStopEnabled { get; init; } = true;
 
     [ConfigurationKeyName("TRAILING_STOP_PERCENT")]
     [Range(typeof(decimal), "0", "100")]
-    public decimal TrailingStopPercent { get; init; } = 2.5m;
+    public decimal TrailingStopPercent { get; init; } = 0.45m;
 
     [ConfigurationKeyName("PARTIAL_TAKE_PROFIT_ENABLED")]
     public bool PartialTakeProfitEnabled { get; init; } = true;
@@ -373,6 +373,10 @@ public sealed class GridOptions
     [ConfigurationKeyName("AGGRESSIVE_STOP_LOSS_PERCENT")]
     [Range(typeof(decimal), "0", "100")]
     public decimal AggressiveStopLossPercent { get; init; } = 2m;
+
+    [ConfigurationKeyName("AUTO_RECOMMENDATION_APPLY_INTERVAL_MINUTES")]
+    [Range(1, 1440)]
+    public int AutoRecommendationApplyIntervalMinutes { get; init; } = 5;
 
     [ConfigurationKeyName("AUTO_RECENTER_ENABLED")]
     public bool AutoRecenterEnabled { get; init; } = false;

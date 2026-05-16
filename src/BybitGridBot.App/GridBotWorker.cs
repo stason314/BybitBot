@@ -36,7 +36,6 @@ public sealed class GridBotWorker : BackgroundService
     private const decimal SignalMarketLikeLimitBufferPercent = 0.05m;
     private const string ReduceOnlyReasonDanger = "danger-regime";
     private const string ReduceOnlyReasonTrailing = "trailing-protection";
-    private static readonly TimeSpan TimedAutoRecommendationApplyInterval = TimeSpan.FromMinutes(30);
     private static readonly JsonSerializerOptions StrategyJsonOptions = new(JsonSerializerDefaults.Web);
 
     private readonly AppOptions _appOptions;
@@ -412,14 +411,14 @@ public sealed class GridBotWorker : BackgroundService
         GridBotSettings profile,
         CancellationToken cancellationToken)
     {
+        var gridOptions = RuntimeGridOptionsFactory.ToGridOptions(profile, _defaultGridOptions);
         if (profile.StrategySelectionMode != StrategySelectionMode.Auto ||
-            !ShouldRunTimedAutoApplyCheck(profile, DateTimeOffset.UtcNow))
+            !ShouldRunTimedAutoApplyCheck(profile, gridOptions, DateTimeOffset.UtcNow))
         {
             return profile;
         }
 
         _lastTimedAutoApplyChecks[profile.Symbol] = DateTimeOffset.UtcNow;
-        var gridOptions = RuntimeGridOptionsFactory.ToGridOptions(profile, _defaultGridOptions);
         var candles = await _bybitRestClient.GetKlinesAsync(
             gridOptions.Category,
             gridOptions.Symbol,
@@ -537,7 +536,7 @@ public sealed class GridBotWorker : BackgroundService
         };
     }
 
-    private bool ShouldRunTimedAutoApplyCheck(GridBotSettings profile, DateTimeOffset now)
+    private bool ShouldRunTimedAutoApplyCheck(GridBotSettings profile, GridOptions gridOptions, DateTimeOffset now)
     {
         var lastCheck = profile.UpdatedAt;
         if (_lastTimedAutoApplyChecks.TryGetValue(profile.Symbol, out var cachedCheck) &&
@@ -546,7 +545,8 @@ public sealed class GridBotWorker : BackgroundService
             lastCheck = cachedCheck;
         }
 
-        return now - lastCheck >= TimedAutoRecommendationApplyInterval;
+        var interval = TimeSpan.FromMinutes(Math.Max(1, gridOptions.AutoRecommendationApplyIntervalMinutes));
+        return now - lastCheck >= interval;
     }
 
     private async Task<IReadOnlyList<Candle>> GetBtcCandlesForPhaseAsync(
@@ -4866,6 +4866,11 @@ public sealed class GridBotWorker : BackgroundService
              _gridOptions.TrailingProtectionPullbackPercent < 0m))
         {
             throw new InvalidOperationException("Trailing protection settings are invalid.");
+        }
+
+        if (_gridOptions.AutoRecommendationApplyIntervalMinutes <= 0)
+        {
+            throw new InvalidOperationException("AUTO_RECOMMENDATION_APPLY_INTERVAL_MINUTES must be positive.");
         }
 
         if (_appOptions.TradingMode is TradingMode.Testnet or TradingMode.Mainnet &&

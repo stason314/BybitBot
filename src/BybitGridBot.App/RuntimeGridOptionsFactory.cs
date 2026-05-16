@@ -69,6 +69,7 @@ internal static class RuntimeGridOptionsFactory
             AggressiveModeEnabled = defaults.AggressiveModeEnabled,
             AggressiveModeCooldownMinutes = defaults.AggressiveModeCooldownMinutes,
             AggressiveStopLossPercent = defaults.AggressiveStopLossPercent,
+            AutoRecommendationApplyIntervalMinutes = defaults.AutoRecommendationApplyIntervalMinutes,
             GridCapitalPercent = defaults.GridCapitalPercent,
             DcaOrderSizeUsdt = defaults.DcaOrderSizeUsdt,
             DcaMaxPositionUsdt = defaults.DcaMaxPositionUsdt,
