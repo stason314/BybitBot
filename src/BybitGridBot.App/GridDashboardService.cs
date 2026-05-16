@@ -1730,7 +1730,7 @@ public sealed class GridDashboardService : IGridDashboardService
         <div class="table-wrap">
           <table>
             <thead>
-              <tr><th>Source</th><th>Group</th><th>Side</th><th>Price</th><th>Qty</th><th>Filled</th><th>Status</th><th>Link</th></tr>
+              <tr><th>Source</th><th>Group</th><th>Side</th><th>Price</th><th>Qty</th><th>Filled</th><th>USDT</th><th>Status</th><th>Link</th></tr>
             </thead>
             <tbody id="activeOrders"></tbody>
           </table>
@@ -2415,7 +2415,7 @@ public sealed class GridDashboardService : IGridDashboardService
 
       byId('gridLevels').innerHTML = data.gridLevels.map(level => `<div class="grid-chip">${formatNumber(level)}</div>`).join('');
       byId('activeOrders').innerHTML = data.activeOrders.length === 0
-        ? `<tr><td colspan="8">No active orders.</td></tr>`
+        ? `<tr><td colspan="9">No active orders.</td></tr>`
         : data.activeOrders.map(order => `
             <tr>
               <td>${order.source}</td>
@@ -2424,6 +2424,7 @@ public sealed class GridDashboardService : IGridDashboardService
               <td>${formatNumber(order.price)}</td>
               <td>${formatNumber(order.quantity)}</td>
               <td>${formatNumber(order.filledQuantity)}</td>
+              <td>${formatNumber(order.remainingNotionalUsdt)}</td>
               <td>${order.status}</td>
               <td class="token">${order.orderLinkId}</td>
             </tr>`).join('');
@@ -2779,6 +2780,9 @@ public sealed class GridDashboardService : IGridDashboardService
             : ResolveOrderSource(order, sourceContext);
 
         var filledQuantity = order.FilledQuantity;
+        var remainingQuantity = decimal.Max(0m, order.Quantity - order.FilledQuantity);
+        var notionalUsdt = order.Price * order.Quantity;
+        var remainingNotionalUsdt = order.Price * remainingQuantity;
         var fillPrice = order.AverageFillPrice > 0m ? order.AverageFillPrice : order.Price;
         var filledNotional = fillPrice * filledQuantity;
         var tradePnl = order.Side == TradeSide.Sell ? order.RealizedPnl : 0m;
@@ -2801,6 +2805,8 @@ public sealed class GridDashboardService : IGridDashboardService
             Price = order.Price,
             Quantity = order.Quantity,
             FilledQuantity = filledQuantity,
+            NotionalUsdt = notionalUsdt,
+            RemainingNotionalUsdt = remainingNotionalUsdt,
             RealizedPnl = order.RealizedPnl,
             TradePnl = tradePnl,
             NetCashFlow = netCashFlow,
@@ -2822,6 +2828,11 @@ public sealed class GridDashboardService : IGridDashboardService
         if (order.Side != TradeSide.Sell || string.IsNullOrWhiteSpace(order.ParentOrderLinkId))
         {
             return null;
+        }
+
+        if (string.Equals(order.ParentOrderLinkId, "reduce-only-exit", StringComparison.Ordinal))
+        {
+            return "Reduce-only exit";
         }
 
         return source.Contains("Grid", StringComparison.OrdinalIgnoreCase)

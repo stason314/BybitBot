@@ -318,6 +318,10 @@ public sealed class DashboardOrderItem
 
     public decimal FilledQuantity { get; init; }
 
+    public decimal NotionalUsdt { get; init; }
+
+    public decimal RemainingNotionalUsdt { get; init; }
+
     public decimal RealizedPnl { get; init; }
 
     public decimal TradePnl { get; init; }
