@@ -43,6 +43,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
     private readonly AppOptions _appOptions;
     private readonly FuturesExecutionService _executionService;
     private readonly FuturesOptions _futuresOptions;
+    private readonly FuturesProtectionService _protectionService;
     private readonly FuturesRiskManager _riskManager;
     private readonly FuturesRiskOptions _riskOptions;
     private readonly FuturesStrategyQualityOptions _strategyQualityOptions;
@@ -55,6 +56,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         BybitUserStreamTelemetry userStreamTelemetry,
         IOptions<AppOptions> appOptions,
         FuturesExecutionService executionService,
+        FuturesProtectionService protectionService,
         IOptions<FuturesOptions> futuresOptions,
         IOptions<FuturesRiskOptions> riskOptions,
         IOptions<FuturesStrategyQualityOptions> strategyQualityOptions,
@@ -67,6 +69,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         _userStreamTelemetry = userStreamTelemetry;
         _appOptions = appOptions.Value;
         _executionService = executionService;
+        _protectionService = protectionService;
         _futuresOptions = futuresOptions.Value;
         _riskOptions = riskOptions.Value;
         _strategyQualityOptions = strategyQualityOptions.Value;
@@ -139,7 +142,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             PaperAccount = BuildPaperAccount(state, position, _futuresOptions.PaperInitialEquityUsdt, fillLedger, _appOptions.TradingMode),
             PnlStats = BuildPnlStats(recentFills, fillLedger),
             TestnetSoak = BuildTestnetSoakStatus(position, activeOrders, recentOrders, recentFills, riskDecisions),
-            ProtectionStatus = BuildProtectionStatus(selectedSettings, position, bybitPositionSnapshot, riskDecisions),
+            ProtectionStatus = BuildProtectionStatus(selectedSettings, recommendation, position, bybitPositionSnapshot, riskDecisions, _appOptions.TradingMode == TradingMode.Paper),
             UserStreamStatus = BuildUserStreamStatus(),
             RuntimeControls = runtimeControls,
             AggressiveMode = BuildAggressiveModeStatus(selectedSettings, recentFills, riskDecisions),
@@ -240,6 +243,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             SuggestedAction = RiskSuggestedAction.Allow.ToString(),
             CreatedAt = DateTimeOffset.UtcNow
         }, cancellationToken);
+        await TryUpdateProtectionAfterRecommendationApplyAsync(settings, recommendedSettings, position, cancellationToken);
 
         return new UpdateSettingsResponse
         {
@@ -247,6 +251,54 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             Symbol = settings.Symbol,
             Message = $"Futures auto recommendation applied: {recommendation.StrategyType}. {recommendation.Reason}"
         };
+    }
+
+    private async Task TryUpdateProtectionAfterRecommendationApplyAsync(
+        FuturesBotSettings currentSettings,
+        FuturesBotSettings recommendedSettings,
+        FuturesPositionSnapshot position,
+        CancellationToken cancellationToken)
+    {
+        if (position.Size <= 0m || position.EntryPrice <= 0m)
+        {
+            return;
+        }
+
+        var currentTargets = await _protectionService.ResolveTargetsAsync(currentSettings, position, cancellationToken);
+        var recommendedTargets = await _protectionService.ResolveTargetsAsync(recommendedSettings, position, cancellationToken);
+        if (recommendedTargets.StopLoss <= 0m ||
+            recommendedTargets.TakeProfit <= 0m ||
+            TargetsMatch(currentTargets, recommendedTargets))
+        {
+            return;
+        }
+
+        if (WouldWorsenStopRisk(position.Side, currentTargets.StopLoss, recommendedTargets.StopLoss))
+        {
+            await _repository.AddFuturesRiskDecisionAsync(new FuturesRiskDecisionRecord
+            {
+                Symbol = currentSettings.Symbol,
+                Source = "AutoRecommendationProtectionSkipped",
+                IsAllowed = false,
+                Reason = $"Auto recommendation protection update skipped because recommended stop-loss would increase risk. Current StopLoss={currentTargets.StopLoss}, TakeProfit={currentTargets.TakeProfit}; Recommended StopLoss={recommendedTargets.StopLoss}, TakeProfit={recommendedTargets.TakeProfit}.",
+                Severity = RiskSeverity.Warning.ToString(),
+                SuggestedAction = RiskSuggestedAction.BlockNewOrders.ToString(),
+                CreatedAt = DateTimeOffset.UtcNow
+            }, cancellationToken);
+            return;
+        }
+
+        await _protectionService.EnsureProtectiveStopAsync(recommendedSettings, position, cancellationToken);
+        await _repository.AddFuturesRiskDecisionAsync(new FuturesRiskDecisionRecord
+        {
+            Symbol = currentSettings.Symbol,
+            Source = "AutoRecommendationProtectionUpdate",
+            IsAllowed = true,
+            Reason = $"Auto recommendation protection update applied. Current StopLoss={currentTargets.StopLoss}, TakeProfit={currentTargets.TakeProfit}; Recommended StopLoss={recommendedTargets.StopLoss}, TakeProfit={recommendedTargets.TakeProfit}.",
+            Severity = RiskSeverity.Info.ToString(),
+            SuggestedAction = RiskSuggestedAction.Allow.ToString(),
+            CreatedAt = DateTimeOffset.UtcNow
+        }, cancellationToken);
     }
 
     public async Task<UpdateSettingsResponse> UpdateSettingsAsync(UpdateFuturesSettingsRequest request, CancellationToken cancellationToken)
@@ -1623,6 +1675,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
       testnetSoak: latest?.testnetSoak,
       runtimeControls: latest?.runtimeControls,
       userStreamStatus: latest?.userStreamStatus,
+      protectionStatus: latest?.protectionStatus,
       aggressiveMode: latest?.aggressiveMode,
       strategyQuality: latest?.strategyQuality,
       position: latest?.position,
@@ -1724,9 +1777,11 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         ['Expected TP', formatNumber(protection.expectedTakeProfit)],
         ['Current SL', formatNumber(protection.currentStopLoss)],
         ['Current TP', formatNumber(protection.currentTakeProfit)],
+        ['Recommended SL', formatNumber(protection.recommendedStopLoss)],
+        ['Recommended TP', formatNumber(protection.recommendedTakeProfit)],
         ['Last Check', protection.lastCheckedAt ? formatDate(protection.lastCheckedAt) : '-']
       ].map(([label, value]) => `<div class="stat"><div class="label">${label}</div><div class="value">${escapeHtml(value)}</div></div>`).join('');
-      byId('protectionReason').textContent = `${protection.lastSource || '-'}: ${protection.lastReason || '-'}`;
+      byId('protectionReason').textContent = `${protection.lastSource || '-'}: ${protection.lastReason || '-'} | Update: ${protection.lastUpdateReason || '-'}`;
       const stream = latest?.userStreamStatus || {};
       byId('userStreamStats').innerHTML = [
         ['WS Enabled', stream.enabled ? 'yes' : 'no'],
@@ -2299,14 +2354,22 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
 
     private static FuturesProtectionStatusView BuildProtectionStatus(
         FuturesBotSettings settings,
+        FuturesAutoConfigRecommendation recommendation,
         FuturesPositionView position,
         BybitPositionSnapshot? bybitPosition,
-        IReadOnlyCollection<FuturesRiskDecisionRecord> riskDecisions)
+        IReadOnlyCollection<FuturesRiskDecisionRecord> riskDecisions,
+        bool isPaperMode)
     {
         var expectedStopLoss = ResolveExpectedStopLoss(settings, position);
         var expectedTakeProfit = ResolveExpectedTakeProfit(settings, position);
+        var recommendedStopLoss = ResolveRecommendedStopLoss(recommendation, position);
+        var recommendedTakeProfit = ResolveRecommendedTakeProfit(recommendation, position);
         var lastProtection = riskDecisions
             .Where(decision => IsProtectionDecision(decision.Source))
+            .OrderByDescending(decision => decision.CreatedAt)
+            .FirstOrDefault();
+        var lastProtectionUpdate = riskDecisions
+            .Where(decision => IsProtectionUpdateDecision(decision.Source))
             .OrderByDescending(decision => decision.CreatedAt)
             .FirstOrDefault();
         return new FuturesProtectionStatusView
@@ -2314,11 +2377,14 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             HasOpenPosition = position.Size > 0m,
             ExpectedStopLoss = expectedStopLoss,
             ExpectedTakeProfit = expectedTakeProfit,
-            CurrentStopLoss = bybitPosition?.StopLossPrice ?? 0m,
-            CurrentTakeProfit = bybitPosition?.TakeProfitPrice ?? 0m,
+            CurrentStopLoss = bybitPosition?.StopLossPrice ?? (isPaperMode ? expectedStopLoss : 0m),
+            CurrentTakeProfit = bybitPosition?.TakeProfitPrice ?? (isPaperMode ? expectedTakeProfit : 0m),
+            RecommendedStopLoss = recommendedStopLoss,
+            RecommendedTakeProfit = recommendedTakeProfit,
             Status = ResolveProtectionStatus(position, bybitPosition, expectedStopLoss, expectedTakeProfit, lastProtection),
             LastSource = lastProtection?.Source ?? "-",
             LastReason = lastProtection?.Reason ?? "-",
+            LastUpdateReason = lastProtectionUpdate?.Reason ?? "-",
             LastCheckedAt = lastProtection?.CreatedAt
         };
     }
@@ -2390,7 +2456,12 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
     private static bool IsProtectionDecision(string source) =>
         string.Equals(source, "ProtectionVerify", StringComparison.OrdinalIgnoreCase) ||
         string.Equals(source, "ProtectionRestore", StringComparison.OrdinalIgnoreCase) ||
-        string.Equals(source, "ProtectionFailed", StringComparison.OrdinalIgnoreCase);
+        string.Equals(source, "ProtectionFailed", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(source, "AutoRecommendationProtectionUpdate", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsProtectionUpdateDecision(string source) =>
+        string.Equals(source, "AutoRecommendationProtectionUpdate", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(source, "AutoRecommendationProtectionSkipped", StringComparison.OrdinalIgnoreCase);
 
     private static string ResolveProtectionStatus(
         FuturesPositionView position,
@@ -2412,7 +2483,8 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
 
         if (lastProtection is not null &&
             (string.Equals(lastProtection.Source, "ProtectionVerify", StringComparison.OrdinalIgnoreCase) ||
-             string.Equals(lastProtection.Source, "ProtectionRestore", StringComparison.OrdinalIgnoreCase)) &&
+             string.Equals(lastProtection.Source, "ProtectionRestore", StringComparison.OrdinalIgnoreCase) ||
+             string.Equals(lastProtection.Source, "AutoRecommendationProtectionUpdate", StringComparison.OrdinalIgnoreCase)) &&
             bybitPosition is null)
         {
             return "verified";
@@ -2451,6 +2523,48 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         return IsShort(position.Side)
             ? position.EntryPrice * (1m - settings.TakeProfitPercent / 100m)
             : position.EntryPrice * (1m + settings.TakeProfitPercent / 100m);
+    }
+
+    private static decimal ResolveRecommendedStopLoss(FuturesAutoConfigRecommendation recommendation, FuturesPositionView position)
+    {
+        if (position.Size <= 0m || position.EntryPrice <= 0m)
+        {
+            return 0m;
+        }
+
+        return IsShort(position.Side)
+            ? position.EntryPrice * (1m + recommendation.StopLossPercent / 100m)
+            : position.EntryPrice * (1m - recommendation.StopLossPercent / 100m);
+    }
+
+    private static decimal ResolveRecommendedTakeProfit(FuturesAutoConfigRecommendation recommendation, FuturesPositionView position)
+    {
+        if (position.Size <= 0m || position.EntryPrice <= 0m)
+        {
+            return 0m;
+        }
+
+        return IsShort(position.Side)
+            ? position.EntryPrice * (1m - recommendation.TakeProfitPercent / 100m)
+            : position.EntryPrice * (1m + recommendation.TakeProfitPercent / 100m);
+    }
+
+    private static bool TargetsMatch(FuturesProtectionTargets current, FuturesProtectionTargets recommended) =>
+        current.StopLoss > 0m &&
+        current.TakeProfit > 0m &&
+        Matches(current.StopLoss, recommended.StopLoss) &&
+        Matches(current.TakeProfit, recommended.TakeProfit);
+
+    private static bool WouldWorsenStopRisk(string positionSide, decimal currentStopLoss, decimal recommendedStopLoss)
+    {
+        if (currentStopLoss <= 0m || recommendedStopLoss <= 0m)
+        {
+            return false;
+        }
+
+        return IsShort(positionSide)
+            ? recommendedStopLoss > currentStopLoss
+            : recommendedStopLoss < currentStopLoss;
     }
 
     private static bool Matches(decimal actual, decimal expected)

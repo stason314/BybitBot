@@ -43,7 +43,7 @@ public sealed class FuturesAutoConfigRecommender
         };
 
         var recommendedLeverage = RecommendLeverage(currentSettings.Leverage, atrPercent);
-        var stopLossPercent = RecommendStopLoss(currentSettings.StopLossPercent, atrPercent);
+        var stopLossPercent = RecommendStopLoss(atrPercent);
         var takeProfitPercent = decimal.Max(stopLossPercent * MinimumRiskRewardRatio, currentSettings.TakeProfitPercent);
         var exposureMultiplier = RecommendExposureMultiplier(atrPercent);
         var modeEntryMultiplier = 1m;
@@ -165,7 +165,7 @@ public sealed class FuturesAutoConfigRecommender
         var resolvedMaxNotional = decimal.Max(1m, maxNotionalUsdt ?? currentSettings.MaxNotionalUsdt);
         var resolvedMaxMargin = decimal.Max(1m, maxMarginUsdt ?? currentSettings.MaxMarginUsdt);
         var resolvedStopLoss = decimal.Max(0.1m, stopLossPercent ?? currentSettings.StopLossPercent);
-        var resolvedTakeProfit = decimal.Max(resolvedStopLoss * MinimumRiskRewardRatio, takeProfitPercent ?? currentSettings.TakeProfitPercent);
+        var resolvedTakeProfit = decimal.Max(resolvedStopLoss * MinimumRiskRewardRatio, takeProfitPercent ?? resolvedStopLoss * MinimumRiskRewardRatio);
 
         return new FuturesAutoConfigRecommendation
         {
@@ -231,10 +231,10 @@ public sealed class FuturesAutoConfigRecommender
         return decimal.Max(1m, decimal.Min(currentLeverage <= 0m ? 2m : currentLeverage, cap));
     }
 
-    private static decimal RecommendStopLoss(decimal currentStopLossPercent, decimal atrPercent)
+    private static decimal RecommendStopLoss(decimal atrPercent)
     {
         var atrStop = decimal.Max(1m, atrPercent * 1.8m);
-        return decimal.Max(currentStopLossPercent <= 0m ? 2m : currentStopLossPercent, atrStop);
+        return decimal.Max(2m, atrStop);
     }
 
     private static decimal RecommendExposureMultiplier(decimal atrPercent) =>

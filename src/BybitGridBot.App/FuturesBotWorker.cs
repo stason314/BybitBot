@@ -401,6 +401,7 @@ public sealed class FuturesBotWorker : BackgroundService
             RiskSeverity.Info,
             RiskSuggestedAction.Allow,
             cancellationToken);
+        await TryUpdateProtectionAfterAutoRecommendationAsync(settings, recommendedSettings, position, cancellationToken);
         await _notifier.NotifyAsync(
             $"Futures auto recommendation applied.\nSymbol: `{settings.Symbol}`\nStrategy: `{recommendation.StrategyType}`\nDirection: `{recommendation.Direction}`\nReason: `{recommendation.Reason}`",
             cancellationToken);
@@ -409,6 +410,68 @@ public sealed class FuturesBotWorker : BackgroundService
             recommendation.StrategyType,
             recommendation.Reason);
         return recommendedSettings;
+    }
+
+    private async Task TryUpdateProtectionAfterAutoRecommendationAsync(
+        FuturesBotSettings currentSettings,
+        FuturesBotSettings recommendedSettings,
+        FuturesPositionSnapshot position,
+        CancellationToken cancellationToken)
+    {
+        if (position.Size <= 0m || position.EntryPrice <= 0m)
+        {
+            return;
+        }
+
+        var currentTargets = await _protectionService.ResolveTargetsAsync(currentSettings, position, cancellationToken);
+        var recommendedTargets = await _protectionService.ResolveTargetsAsync(recommendedSettings, position, cancellationToken);
+        if (recommendedTargets.StopLoss <= 0m ||
+            recommendedTargets.TakeProfit <= 0m ||
+            TargetsMatch(currentTargets, recommendedTargets))
+        {
+            return;
+        }
+
+        if (WouldWorsenStopRisk(position.Side, currentTargets.StopLoss, recommendedTargets.StopLoss))
+        {
+            await RecordThrottledRiskDecisionAsync(
+                currentSettings.Symbol,
+                "AutoRecommendationProtectionSkipped",
+                false,
+                $"Auto recommendation protection update skipped because recommended stop-loss would increase risk. Current StopLoss={currentTargets.StopLoss}, TakeProfit={currentTargets.TakeProfit}; Recommended StopLoss={recommendedTargets.StopLoss}, TakeProfit={recommendedTargets.TakeProfit}.",
+                RiskSeverity.Warning,
+                RiskSuggestedAction.BlockNewOrders,
+                cancellationToken);
+            return;
+        }
+
+        await _protectionService.EnsureProtectiveStopAsync(recommendedSettings, position, cancellationToken);
+        await RecordThrottledRiskDecisionAsync(
+            currentSettings.Symbol,
+            "AutoRecommendationProtectionUpdate",
+            true,
+            $"Auto recommendation protection update applied. Current StopLoss={currentTargets.StopLoss}, TakeProfit={currentTargets.TakeProfit}; Recommended StopLoss={recommendedTargets.StopLoss}, TakeProfit={recommendedTargets.TakeProfit}.",
+            RiskSeverity.Info,
+            RiskSuggestedAction.Allow,
+            cancellationToken);
+    }
+
+    private static bool TargetsMatch(FuturesProtectionTargets current, FuturesProtectionTargets recommended) =>
+        current.StopLoss > 0m &&
+        current.TakeProfit > 0m &&
+        Math.Abs(current.StopLoss - recommended.StopLoss) <= decimal.Max(0.00000001m, recommended.StopLoss * 0.000001m) &&
+        Math.Abs(current.TakeProfit - recommended.TakeProfit) <= decimal.Max(0.00000001m, recommended.TakeProfit * 0.000001m);
+
+    private static bool WouldWorsenStopRisk(string positionSide, decimal currentStopLoss, decimal recommendedStopLoss)
+    {
+        if (currentStopLoss <= 0m || recommendedStopLoss <= 0m)
+        {
+            return false;
+        }
+
+        return IsShort(positionSide)
+            ? recommendedStopLoss > currentStopLoss
+            : recommendedStopLoss < currentStopLoss;
     }
 
     private async Task<string?> GetAutoRecommendationHoldReasonAsync(

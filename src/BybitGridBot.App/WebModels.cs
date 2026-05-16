@@ -924,11 +924,17 @@ public sealed class FuturesProtectionStatusView
 
     public decimal CurrentTakeProfit { get; init; }
 
+    public decimal RecommendedStopLoss { get; init; }
+
+    public decimal RecommendedTakeProfit { get; init; }
+
     public required string Status { get; init; }
 
     public required string LastSource { get; init; }
 
     public required string LastReason { get; init; }
+
+    public required string LastUpdateReason { get; init; }
 
     public DateTimeOffset? LastCheckedAt { get; init; }
 }
