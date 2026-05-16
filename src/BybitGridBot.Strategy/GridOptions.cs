@@ -63,6 +63,25 @@ public sealed class GridOptions
     [Range(typeof(decimal), "0.00000001", "1000")]
     public decimal DailyTakeProfitOrderMultiplier { get; init; } = 0.5m;
 
+    [ConfigurationKeyName("PAIR_SCORE_CAPITAL_ALLOCATION_ENABLED")]
+    public bool PairScoreCapitalAllocationEnabled { get; init; } = true;
+
+    [ConfigurationKeyName("PAIR_SCORE_HOT_MULTIPLIER")]
+    [Range(typeof(decimal), "0.00000001", "1000")]
+    public decimal PairScoreHotMultiplier { get; init; } = 1.4m;
+
+    [ConfigurationKeyName("PAIR_SCORE_GOOD_MULTIPLIER")]
+    [Range(typeof(decimal), "0.00000001", "1000")]
+    public decimal PairScoreGoodMultiplier { get; init; } = 1.15m;
+
+    [ConfigurationKeyName("PAIR_SCORE_NEUTRAL_MULTIPLIER")]
+    [Range(typeof(decimal), "0.00000001", "1000")]
+    public decimal PairScoreNeutralMultiplier { get; init; } = 1m;
+
+    [ConfigurationKeyName("PAIR_SCORE_AVOID_MULTIPLIER")]
+    [Range(typeof(decimal), "0.00000001", "1000")]
+    public decimal PairScoreAvoidMultiplier { get; init; } = 0.5m;
+
     [ConfigurationKeyName("STOP_LOWER_PRICE")]
     public decimal StopLowerPrice { get; init; } = 0.09m;
 

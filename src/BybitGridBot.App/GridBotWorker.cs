@@ -2591,6 +2591,7 @@ public sealed class GridBotWorker : BackgroundService
     {
         var buyLevels = _strategy.GetBuyLevels(levels, currentPrice).OrderByDescending(level => level.Price).ToArray();
         var sellLevels = _strategy.GetSellLevels(levels, currentPrice).OrderBy(level => level.Price).ToArray();
+        var buyOrderSizeMultiplier = await GetPairScoreOrderSizeMultiplierAsync(state, cancellationToken);
 
         foreach (var level in buyLevels)
         {
@@ -2609,7 +2610,7 @@ public sealed class GridBotWorker : BackgroundService
 
             var buyExpectedProfitPercent = ExpectedProfitFilter.CalculateLongRoundTripPercent(level.Price, targetSellLevel.Price);
 
-            var orderSizeUsdt = GetOrderSizeUsdt(TradeSide.Buy, level.Price, state);
+            var orderSizeUsdt = ApplyPairScoreOrderSizeMultiplier(GetOrderSizeUsdt(TradeSide.Buy, level.Price, state), buyOrderSizeMultiplier);
             var quantity = instrument.RoundQuantity(orderSizeUsdt / level.Price);
             if (quantity <= 0m || quantity < instrument.MinOrderQty)
             {
@@ -2772,7 +2773,9 @@ public sealed class GridBotWorker : BackgroundService
         string strategyName,
         CancellationToken cancellationToken)
     {
-        var orderSizeUsdt = GetDcaOrderSizeUsdt(config, state);
+        var orderSizeUsdt = ApplyPairScoreOrderSizeMultiplier(
+            GetDcaOrderSizeUsdt(config, state),
+            await GetPairScoreOrderSizeMultiplierAsync(state, cancellationToken));
         var limitPrice = instrument.RoundPrice(_dcaStrategy.CalculateLimitBuyPrice(currentPrice, config));
         if (limitPrice <= 0m)
         {
@@ -2864,7 +2867,9 @@ public sealed class GridBotWorker : BackgroundService
             return;
         }
 
-        var orderSizeUsdt = GetSignalOrderSizeUsdt(config, state);
+        var orderSizeUsdt = ApplyPairScoreOrderSizeMultiplier(
+            GetSignalOrderSizeUsdt(config, state),
+            await GetPairScoreOrderSizeMultiplierAsync(state, cancellationToken));
         var limitPrice = instrument.RoundPrice(CalculateSignalBuyPrice(currentPrice, config));
         if (limitPrice <= 0m)
         {
@@ -2996,7 +3001,9 @@ public sealed class GridBotWorker : BackgroundService
             return;
         }
 
-        var orderSizeUsdt = GetTrendOrderSizeUsdt(config, state);
+        var orderSizeUsdt = ApplyPairScoreOrderSizeMultiplier(
+            GetTrendOrderSizeUsdt(config, state),
+            await GetPairScoreOrderSizeMultiplierAsync(state, cancellationToken));
         var limitPrice = instrument.RoundPrice(CalculateTrendBuyPrice(currentPrice, config));
         if (limitPrice <= 0m || HasActiveOrderAtLevel(activeOrders, limitPrice))
         {
@@ -4213,6 +4220,99 @@ public sealed class GridBotWorker : BackgroundService
 
         return Math.Max(orderSize, 0m);
     }
+
+    private async Task<decimal> GetPairScoreOrderSizeMultiplierAsync(BotState state, CancellationToken cancellationToken)
+    {
+        if (!_gridOptions.PairScoreCapitalAllocationEnabled)
+        {
+            return 1m;
+        }
+
+        var orders = await _repository.GetOrdersAsync(_gridOptions.Symbol, cancellationToken);
+        var lastNoTradeReason = (await _repository.GetNoTradeReasonsAsync(_gridOptions.Symbol, 1, cancellationToken)).FirstOrDefault();
+        var score = CalculateCapitalPairScore(state, orders, lastNoTradeReason);
+        var multiplier = score >= 75m
+            ? _gridOptions.PairScoreHotMultiplier
+            : score >= 60m
+                ? _gridOptions.PairScoreGoodMultiplier
+                : score >= 40m
+                    ? _gridOptions.PairScoreNeutralMultiplier
+                    : _gridOptions.PairScoreAvoidMultiplier;
+
+        if (multiplier != 1m)
+        {
+            _logger.LogInformation(
+                "Pair score capital allocation for {Symbol}: score={Score}, buy order multiplier={Multiplier}.",
+                _gridOptions.Symbol,
+                score,
+                multiplier);
+        }
+
+        return multiplier;
+    }
+
+    private static decimal ApplyPairScoreOrderSizeMultiplier(decimal orderSizeUsdt, decimal multiplier) =>
+        decimal.Max(0m, orderSizeUsdt * decimal.Max(0m, multiplier));
+
+    private static decimal CalculateCapitalPairScore(
+        BotState state,
+        IReadOnlyCollection<GridOrder> orders,
+        NoTradeReasonRecord? lastNoTradeReason)
+    {
+        var score = 50m;
+
+        if (state.DailyRealizedPnl > 0m || state.TotalRealizedPnl > 0m)
+        {
+            score += 12m;
+        }
+        else if (state.DailyRealizedPnl < 0m)
+        {
+            score -= 12m;
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        var recentClosed = orders
+            .Where(order => order.Side == TradeSide.Sell &&
+                order.Status == OrderStatus.Filled &&
+                (order.FilledAt ?? order.UpdatedAt) >= now.AddHours(-48))
+            .ToArray();
+        if (recentClosed.Length >= 2)
+        {
+            var winRate = recentClosed.Count(order => order.RealizedPnl > order.FeePaid) / (decimal)recentClosed.Length * 100m;
+            score += winRate >= 50m ? 12m : -12m;
+        }
+
+        if (state.BaseAssetQuantity > 0m && state.AverageEntryPrice > 0m && state.LastObservedPrice is > 0m)
+        {
+            var drawdownPercent = state.LastObservedPrice.Value >= state.AverageEntryPrice
+                ? 0m
+                : (state.AverageEntryPrice - state.LastObservedPrice.Value) / state.AverageEntryPrice * 100m;
+            score -= drawdownPercent >= 3m ? 15m : drawdownPercent >= 1m ? 6m : 0m;
+        }
+
+        if (lastNoTradeReason is not null)
+        {
+            score -= GetPairScoreNoTradePenalty(lastNoTradeReason.ReasonCode);
+        }
+
+        return decimal.Max(0m, decimal.Min(100m, decimal.Round(score, 2, MidpointRounding.AwayFromZero)));
+    }
+
+    private static decimal GetPairScoreNoTradePenalty(NoTradeReason reason) => reason switch
+    {
+        NoTradeReason.DumpDetected => 30m,
+        NoTradeReason.BtcRiskOff => 30m,
+        NoTradeReason.DailyLossLimitReached => 30m,
+        NoTradeReason.AggressiveStopLoss => 25m,
+        NoTradeReason.AggressiveCooldown => 20m,
+        NoTradeReason.HighVolatility => 20m,
+        NoTradeReason.MaxPositionReached => 15m,
+        NoTradeReason.PriceOutsideRange => 12m,
+        NoTradeReason.ExpectedProfitTooLow => 10m,
+        NoTradeReason.ScoreTooLow => 8m,
+        NoTradeReason.UnknownMarketPhase => 6m,
+        _ => 0m
+    };
 
     private decimal GetDcaOrderSizeUsdt(DcaStrategyConfig config, BotState state)
     {
