@@ -72,6 +72,9 @@ builder.Services.AddSingleton<IFuturesStrategy, FuturesReduceOnly>();
 builder.Services.AddSingleton<IFuturesStrategy, FuturesTrendFollowLongOnly>();
 builder.Services.AddSingleton<IFuturesStrategy, FuturesBreakoutLongOnly>();
 builder.Services.AddSingleton<IFuturesStrategy, FuturesGridLongOnly>();
+builder.Services.AddSingleton<IFuturesStrategy, FuturesTrendFollowShortOnly>();
+builder.Services.AddSingleton<IFuturesStrategy, FuturesBreakdownShortOnly>();
+builder.Services.AddSingleton<IFuturesStrategy, FuturesGridShortOnly>();
 builder.Services.AddSingleton<FuturesStrategyRouter>();
 builder.Services.AddSingleton<StrategyRouter>();
 builder.Services.AddSingleton<CapitalAllocator>();
@@ -182,6 +185,12 @@ app.MapPost("/api/futures/position/{symbol}/close", async (string symbol, IFutur
 app.MapPost("/api/futures/position/{symbol}/paper-test-entry", async (string symbol, IFuturesDashboardService dashboardService, CancellationToken cancellationToken) =>
 {
     var response = await dashboardService.OpenPaperTestPositionAsync(symbol, cancellationToken);
+    return response.Success ? Results.Ok(response) : Results.BadRequest(response);
+});
+
+app.MapPost("/api/futures/position/{symbol}/paper-test-short-entry", async (string symbol, IFuturesDashboardService dashboardService, CancellationToken cancellationToken) =>
+{
+    var response = await dashboardService.OpenPaperTestShortPositionAsync(symbol, cancellationToken);
     return response.Success ? Results.Ok(response) : Results.BadRequest(response);
 });
 

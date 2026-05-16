@@ -641,11 +641,15 @@ public sealed class FuturesBotWorker : BackgroundService
         var entry = state.EntryPrice > 0m ? state.EntryPrice : state.AverageEntryPrice;
         var leverage = state.Leverage > 0m ? state.Leverage : settings.Leverage;
         var positionValue = size * currentPrice;
+        var side = size > 0m ? state.PositionSide ?? "Buy" : "None";
+        var unrealizedPnl = size > 0m && entry > 0m
+            ? CalculateUnrealizedPnl(side, size, entry, currentPrice)
+            : 0m;
         return new FuturesPositionSnapshot
         {
             Symbol = settings.Symbol,
             Category = settings.Category,
-            Side = size > 0m ? "Buy" : "None",
+            Side = side,
             Size = size,
             EntryPrice = entry,
             MarkPrice = currentPrice,
@@ -653,7 +657,7 @@ public sealed class FuturesBotWorker : BackgroundService
             PositionValueUsdt = positionValue,
             MarginUsedUsdt = leverage > 0m ? positionValue / leverage : 0m,
             Leverage = leverage,
-            UnrealizedPnl = size > 0m ? (currentPrice - entry) * size : 0m,
+            UnrealizedPnl = unrealizedPnl,
             RealizedPnl = state.TotalRealizedPnl,
             PositionIdx = state.PositionIdx,
             UpdatedAt = DateTimeOffset.UtcNow
@@ -665,12 +669,21 @@ public sealed class FuturesBotWorker : BackgroundService
         if (!string.Equals(settings.Category, "linear", StringComparison.OrdinalIgnoreCase) ||
             settings.MarginMode != FuturesMarginMode.Isolated ||
             settings.PositionMode != FuturesPositionMode.OneWay ||
-            settings.Direction != FuturesDirection.LongOnly ||
+            (settings.Direction != FuturesDirection.LongOnly && _appOptions.TradingMode != TradingMode.Paper) ||
             settings.Leverage > _futuresOptions.MvpMaxLeverage)
         {
-            throw new InvalidOperationException("Futures worker MVP supports only linear, isolated, one-way, long-only profiles within the leverage cap.");
+            throw new InvalidOperationException("Futures worker supports shorts only in paper mode; live/testnet remain linear, isolated, one-way, long-only within the leverage cap.");
         }
     }
+
+    private static decimal CalculateUnrealizedPnl(string side, decimal size, decimal entryPrice, decimal currentPrice) =>
+        IsShort(side)
+            ? (entryPrice - currentPrice) * size
+            : (currentPrice - entryPrice) * size;
+
+    private static bool IsShort(string side) =>
+        string.Equals(side, "Sell", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(side, "Short", StringComparison.OrdinalIgnoreCase);
 
     private static void ResetDailyPnlIfNeeded(BotState state)
     {
