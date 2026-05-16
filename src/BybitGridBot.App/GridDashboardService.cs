@@ -3356,15 +3356,27 @@ public sealed class GridDashboardService : IGridDashboardService
         var reason = aggressiveModeActive
             ? "BTD aggressive conditions pass. Trend filters are relaxed; hard risk filters remain active."
             : "BTD conditions pass.";
-        if (phase.Phase is MarketPhase.Dump or MarketPhase.HighVolatility or MarketPhase.BreakoutDown)
-        {
-            isAllowed = false;
-            reason = $"BTD silent: blocked by phase {phase.Phase}. {phase.Reason}";
-        }
-        else if (btcRiskOff)
+        if (btcRiskOff)
         {
             isAllowed = false;
             reason = "BTD silent: BTC risk-off is active.";
+        }
+        else if (phase.Phase is MarketPhase.HighVolatility or MarketPhase.BreakoutDown)
+        {
+            isAllowed = false;
+            reason = $"BTD silent: blocked by hard-risk phase {phase.Phase}. {phase.Reason}";
+        }
+        else if (phase.Phase == MarketPhase.Dump)
+        {
+            if (aggressiveModeActive && ReversalBtdDetector.TryDetect(ordered, out var reversalSetup))
+            {
+                reason = $"Reversal BTD allowed after dump: drawdown {reversalSetup.DrawdownPercent:F2}%, {reversalSetup.CandlesSinceLow} candles without a new low, buy volume {reversalSetup.BuyVolumeRatio:F2}x.";
+            }
+            else
+            {
+                isAllowed = false;
+                reason = $"BTD silent: dump has not stabilized for reversal. {phase.Reason}";
+            }
         }
         else if (!aggressiveModeActive && options.BtdRequireUptrend && phase.Phase != MarketPhase.PullbackInUptrend)
         {

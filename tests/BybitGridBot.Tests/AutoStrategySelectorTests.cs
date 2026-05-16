@@ -390,6 +390,97 @@ public sealed class AutoStrategySelectorTests
     }
 
     [Fact]
+    public void Recommend_ReturnsSmallReversalBtd_AfterConfirmedDumpStabilization()
+    {
+        var selector = new AutoStrategySelector();
+        var options = new GridOptions
+        {
+            LowerPrice = 0.15m,
+            UpperPrice = 0.18m,
+            Step = 0.001m,
+            OrderSizeUsdt = 20m,
+            MinOrderSizeUsdt = 10m,
+            StopLowerPrice = 0.13m,
+            StopUpperPrice = 0.20m
+        };
+        var candles = BuildReversalAfterDumpCandles();
+
+        var recommendation = selector.Recommend(
+            options,
+            new MarketRegimeAnalysis
+            {
+                Regime = MarketRegimeType.Danger,
+                MovePercent = -12m,
+                RangePercent = 18m,
+                VolumeRatio = 1.8m,
+                Recommendation = "Danger",
+                Support = candles.Min(candle => candle.Low),
+                Resistance = candles.Max(candle => candle.High)
+            },
+            new MarketPhaseResult
+            {
+                Phase = MarketPhase.Dump,
+                Confidence = 0.9m,
+                Score = 92m,
+                Reason = "Dump detected, but lows have stabilized.",
+                SuggestedStrategy = StrategyType.Pause,
+                DetectedAt = DateTimeOffset.UtcNow
+            },
+            candles);
+
+        using var config = JsonDocument.Parse(recommendation.StrategyConfigJson);
+
+        Assert.Equal(TradingStrategyType.Btd, recommendation.StrategyType);
+        Assert.Contains("Reversal BTD after dump", recommendation.Reason);
+        Assert.Equal(10m, recommendation.OrderSizeUsdt);
+        Assert.True(config.RootElement.GetProperty("reversalMode").GetBoolean());
+        Assert.True(config.RootElement.GetProperty("takeProfitLadderEnabled").GetBoolean());
+        Assert.Equal(2, config.RootElement.GetProperty("maxBuys").GetInt32());
+    }
+
+    [Fact]
+    public void Recommend_KeepsNoTrade_WhenDumpHasNoStabilization()
+    {
+        var selector = new AutoStrategySelector();
+        var options = new GridOptions
+        {
+            LowerPrice = 0.15m,
+            UpperPrice = 0.18m,
+            Step = 0.001m,
+            OrderSizeUsdt = 20m,
+            MinOrderSizeUsdt = 10m,
+            StopLowerPrice = 0.13m,
+            StopUpperPrice = 0.20m
+        };
+        var candles = BuildContinuingDumpCandles();
+
+        var recommendation = selector.Recommend(
+            options,
+            new MarketRegimeAnalysis
+            {
+                Regime = MarketRegimeType.Danger,
+                MovePercent = -14m,
+                RangePercent = 20m,
+                Recommendation = "Danger",
+                Support = candles.Min(candle => candle.Low),
+                Resistance = candles.Max(candle => candle.High)
+            },
+            new MarketPhaseResult
+            {
+                Phase = MarketPhase.Dump,
+                Confidence = 0.9m,
+                Score = 92m,
+                Reason = "Dump still making new lows.",
+                SuggestedStrategy = StrategyType.Pause,
+                DetectedAt = DateTimeOffset.UtcNow
+            },
+            candles);
+
+        Assert.Equal(TradingStrategyType.NoTrade, recommendation.StrategyType);
+        Assert.DoesNotContain("Reversal BTD", recommendation.Reason);
+    }
+
+    [Fact]
     public void Recommend_UsesCombo_WhenBtdPhaseIsBullishOverextended()
     {
         var selector = new AutoStrategySelector();
@@ -687,6 +778,84 @@ public sealed class AutoStrategySelectorTests
                     close,
                     1000m,
                     close * 1000m);
+            })
+            .ToArray();
+    }
+
+    private static IReadOnlyList<Candle> BuildReversalAfterDumpCandles()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var candles = new List<Candle>();
+        for (var index = 0; index < 22; index++)
+        {
+            var close = 0.235m - index * 0.0004m;
+            candles.Add(new Candle(
+                now.AddMinutes(index - 60),
+                close + 0.0002m,
+                close + 0.001m,
+                close - 0.001m,
+                close,
+                1000m,
+                close * 1000m));
+        }
+
+        for (var index = 0; index < 26; index++)
+        {
+            var close = 0.226m - index * 0.00255m;
+            candles.Add(new Candle(
+                now.AddMinutes(index - 38),
+                close + 0.001m,
+                close + 0.0018m,
+                close - 0.0018m,
+                close,
+                1200m,
+                close * 1200m));
+        }
+
+        var stabilizing = new[]
+        {
+            (Open: 0.1590m, High: 0.1602m, Low: 0.1580m, Close: 0.1592m, Volume: 1800m),
+            (Open: 0.1592m, High: 0.1610m, Low: 0.1587m, Close: 0.1606m, Volume: 2300m),
+            (Open: 0.1605m, High: 0.1624m, Low: 0.1598m, Close: 0.1620m, Volume: 2600m),
+            (Open: 0.1619m, High: 0.1635m, Low: 0.1609m, Close: 0.1631m, Volume: 2400m),
+            (Open: 0.1630m, High: 0.1650m, Low: 0.1622m, Close: 0.1644m, Volume: 2500m),
+            (Open: 0.1641m, High: 0.1662m, Low: 0.1634m, Close: 0.1652m, Volume: 2200m),
+            (Open: 0.1650m, High: 0.1672m, Low: 0.1642m, Close: 0.1664m, Volume: 2300m),
+            (Open: 0.1662m, High: 0.1680m, Low: 0.1655m, Close: 0.1672m, Volume: 2100m),
+            (Open: 0.1670m, High: 0.1688m, Low: 0.1662m, Close: 0.1680m, Volume: 2200m),
+            (Open: 0.1678m, High: 0.1694m, Low: 0.1670m, Close: 0.1686m, Volume: 2000m)
+        };
+        for (var index = 0; index < stabilizing.Length; index++)
+        {
+            var candle = stabilizing[index];
+            candles.Add(new Candle(
+                now.AddMinutes(index - stabilizing.Length),
+                candle.Open,
+                candle.High,
+                candle.Low,
+                candle.Close,
+                candle.Volume,
+                candle.Close * candle.Volume));
+        }
+
+        return candles;
+    }
+
+    private static IReadOnlyList<Candle> BuildContinuingDumpCandles()
+    {
+        var now = DateTimeOffset.UtcNow;
+        return Enumerable.Range(0, 55)
+            .Select(index =>
+            {
+                var close = 0.235m - index * 0.00145m;
+                return new Candle(
+                    now.AddMinutes(index - 55),
+                    close + 0.0008m,
+                    close + 0.0015m,
+                    close - 0.0018m,
+                    close,
+                    index >= 50 ? 2400m : 1100m,
+                    close * (index >= 50 ? 2400m : 1100m));
             })
             .ToArray();
     }
