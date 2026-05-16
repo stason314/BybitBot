@@ -8,6 +8,8 @@ public sealed class DashboardResponse
 
     public required IReadOnlyList<DashboardConfigSummaryItem> ConfigSummaries { get; init; }
 
+    public required IReadOnlyList<DashboardPairScoreItem> PairScores { get; init; }
+
     public required DashboardSettings Settings { get; init; }
 
     public required DashboardRuntime Runtime { get; init; }
@@ -71,9 +73,44 @@ public sealed class DashboardConfigSummaryItem
 
     public decimal TotalRealizedPnl { get; init; }
 
+    public decimal PairScore { get; init; }
+
+    public required string PairScoreLabel { get; init; }
+
+    public decimal SuggestedOrderSizeMultiplier { get; init; }
+
+    public required IReadOnlyList<string> PairScoreReasons { get; init; }
+
     public bool IsSelected { get; init; }
 
     public DateTimeOffset UpdatedAt { get; init; }
+}
+
+public sealed class DashboardPairScoreItem
+{
+    public required string Symbol { get; init; }
+
+    public required string Category { get; init; }
+
+    public decimal Score { get; init; }
+
+    public required string Label { get; init; }
+
+    public decimal SuggestedOrderSizeMultiplier { get; init; }
+
+    public decimal SpreadPercent { get; init; }
+
+    public decimal VolatilityPercent { get; init; }
+
+    public decimal VolumeRatio { get; init; }
+
+    public decimal RecentWinRate { get; init; }
+
+    public decimal CurrentDrawdownPercent { get; init; }
+
+    public string? LastNoTradeReason { get; init; }
+
+    public required IReadOnlyList<string> Reasons { get; init; }
 }
 
 public sealed class DashboardSettings
