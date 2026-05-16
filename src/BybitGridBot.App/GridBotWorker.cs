@@ -4508,6 +4508,14 @@ public sealed class GridBotWorker : BackgroundService
                 : $"runtime paused: {state.PauseReason}";
         }
 
+        var now = DateTimeOffset.UtcNow;
+        if (IsAggressiveModeCoolingDown(_gridOptions, state, now))
+        {
+            return string.IsNullOrWhiteSpace(state.AggressiveModeDisabledReason)
+                ? $"aggressive cooldown until {state.AggressiveModeDisabledUntil:O}"
+                : $"aggressive cooldown until {state.AggressiveModeDisabledUntil:O}: {state.AggressiveModeDisabledReason}";
+        }
+
         var currentPrice = state.LastObservedPrice ?? state.MarkPrice;
         if (currentPrice > 0m && (currentPrice < _gridOptions.LowerPrice || currentPrice > _gridOptions.UpperPrice))
         {
@@ -4527,7 +4535,7 @@ public sealed class GridBotWorker : BackgroundService
         }
 
         if (lastNoTradeReason is not null &&
-            DateTimeOffset.UtcNow - lastNoTradeReason.CreatedAt <= TimeSpan.FromMinutes(30) &&
+            now - lastNoTradeReason.CreatedAt <= TimeSpan.FromMinutes(30) &&
             IsHardExecutionBlockReason(lastNoTradeReason.ReasonCode))
         {
             return $"recent no-trade {lastNoTradeReason.ReasonCode}: {lastNoTradeReason.Reason}";

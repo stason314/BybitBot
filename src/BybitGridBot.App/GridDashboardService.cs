@@ -392,6 +392,14 @@ public sealed class GridDashboardService : IGridDashboardService
             return new ExecutionReadinessResult(false, "Blocked", string.Join("; ", reasons), reasons);
         }
 
+        if (IsAggressiveModeCoolingDown(state, DateTimeOffset.UtcNow))
+        {
+            reasons.Add(string.IsNullOrWhiteSpace(state!.AggressiveModeDisabledReason)
+                ? $"aggressive cooldown until {state.AggressiveModeDisabledUntil:O}"
+                : $"aggressive cooldown until {state.AggressiveModeDisabledUntil:O}: {state.AggressiveModeDisabledReason}");
+            return new ExecutionReadinessResult(false, "Blocked", string.Join("; ", reasons), reasons);
+        }
+
         if (profile.StrategyType == TradingStrategyType.ReduceOnly)
         {
             if (hasPosition)
@@ -481,6 +489,12 @@ public sealed class GridDashboardService : IGridDashboardService
         reasons.Add("price in range, no active orders, balance ok");
         return new ExecutionReadinessResult(true, "Ready", string.Join("; ", reasons), reasons);
     }
+
+    private static bool IsAggressiveModeCoolingDown(BotState? state, DateTimeOffset now) =>
+        state is not null &&
+        !state.AggressiveModeEnabled &&
+        state.AggressiveModeDisabledUntil is not null &&
+        state.AggressiveModeDisabledUntil > now;
 
     private static void AddStrategySpecificReadinessReasons(
         GridBotSettings profile,
