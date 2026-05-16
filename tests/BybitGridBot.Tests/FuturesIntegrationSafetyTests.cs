@@ -192,6 +192,49 @@ public sealed class FuturesIntegrationSafetyTests
     }
 
     [Fact]
+    public async Task Reconciliation_SyncsFundingExecutionsIntoLedger()
+    {
+        var repository = await CreateRepositoryAsync();
+        var bybitClient = new FakeBybitRestClient
+        {
+            Executions =
+            [
+                new BybitExecutionSnapshot
+                {
+                    ExecId = "funding-1",
+                    Symbol = "BTCUSDT",
+                    Side = "Buy",
+                    ExecType = "Funding",
+                    ExecPnl = -0.15m,
+                    ExecTime = DateTimeOffset.UtcNow
+                }
+            ]
+        };
+        var service = new FuturesReconciliationService(
+            Options.Create(new AppOptions { TradingMode = TradingMode.Testnet }),
+            bybitClient,
+            new FuturesProtectionService(
+                Options.Create(new AppOptions { TradingMode = TradingMode.Testnet }),
+                bybitClient,
+                repository,
+                NullLogger<FuturesProtectionService>.Instance),
+            repository,
+            NullLogger<FuturesReconciliationService>.Instance);
+        var state = new BotState { Symbol = FuturesStateKeys.ForSymbol("BTCUSDT"), TradingMode = TradingMode.Testnet };
+
+        var result = await service.ReconcileAsync(Settings(), state, 100m, CancellationToken.None);
+        var fills = await repository.GetFuturesFillsAsync("BTCUSDT", 10, CancellationToken.None);
+
+        Assert.Equal(1, result.SyncedFillCount);
+        var fill = Assert.Single(fills);
+        Assert.Equal(FuturesTradeAction.Funding, fill.Action);
+        Assert.Equal(-0.15m, fill.Funding);
+        Assert.Equal(0m, fill.RealizedPnl);
+        Assert.Equal(-0.15m, state.TotalRealizedPnl);
+        Assert.Equal(-0.15m, state.DailyRealizedPnl);
+    }
+
+    [Fact]
     public async Task Protection_RestoresMissingTradingStopOnTestnet()
     {
         var repository = await CreateRepositoryAsync();

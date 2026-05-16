@@ -106,6 +106,7 @@ public sealed class FuturesReconciliationService
             : MapPosition(settings, bybitPosition, fallbackMarkPrice);
         ValidateMvpPosition(position);
         ApplyPositionToState(state, position);
+        await ApplyFillLedgerToStateAsync(settings, state, cancellationToken);
         await _repository.SaveBotStateAsync(state, cancellationToken);
         await _repository.UpsertFuturesPositionAsync(position, _appOptions.TradingMode, cancellationToken);
         if (position.Size > 0m)
@@ -134,14 +135,14 @@ public sealed class FuturesReconciliationService
             settings.Category,
             settings.Symbol,
             null,
-            "Trade",
+            null,
             cancellationToken);
         var remoteReduceOnlyByLinkId = remoteSnapshots
             .Where(snapshot => !string.IsNullOrWhiteSpace(snapshot.OrderLinkId))
             .ToDictionary(snapshot => snapshot.OrderLinkId, snapshot => snapshot.ReduceOnly, StringComparer.OrdinalIgnoreCase);
         var syncedFills = 0;
 
-        foreach (var execution in executions.Where(execution => FuturesOrderLinkIds.IsManaged(execution.OrderLinkId)))
+        foreach (var execution in executions.Where(IsManagedOrFundingExecution))
         {
             if (await _repository.FuturesFillExistsAsync(execution.ExecId, cancellationToken))
             {
@@ -163,6 +164,20 @@ public sealed class FuturesReconciliationService
         }
 
         return syncedFills;
+    }
+
+    private async Task ApplyFillLedgerToStateAsync(
+        FuturesBotSettings settings,
+        BotState state,
+        CancellationToken cancellationToken)
+    {
+        var today = DateOnly.FromDateTime(DateTime.UtcNow);
+        var fills = await _repository.GetFuturesFillsAsync(settings.Symbol, FuturesFillLedger.QueryLimit, cancellationToken);
+        var ledger = FuturesFillLedger.Build(fills, today);
+        state.TotalRealizedPnl = ledger.TotalRealizedPnl + ledger.TotalFunding;
+        state.DailyRealizedPnl = ledger.DailyRealizedPnl + ledger.DailyFunding;
+        state.DailyPnlDate = today;
+        state.UpdatedAt = DateTimeOffset.UtcNow;
     }
 
     private GridOrder MapSnapshot(
@@ -284,19 +299,22 @@ public sealed class FuturesReconciliationService
     private static FuturesFillRecord MapFill(BybitExecutionSnapshot execution, bool reduceOnly)
     {
         var side = ParseSide(execution.Side);
+        var isFunding = IsFundingExecution(execution);
         return new FuturesFillRecord
         {
             ExecId = execution.ExecId,
-            OrderLinkId = execution.OrderLinkId,
+            OrderLinkId = string.IsNullOrWhiteSpace(execution.OrderLinkId) && isFunding
+                ? $"funding:{execution.ExecId}"
+                : execution.OrderLinkId,
             Symbol = execution.Symbol,
-            Action = ResolveAction(side, reduceOnly),
+            Action = isFunding ? FuturesTradeAction.Funding : ResolveAction(side, reduceOnly),
             Side = side,
             ExecType = string.IsNullOrWhiteSpace(execution.ExecType) ? "Trade" : execution.ExecType,
             Quantity = execution.ExecQty,
             Price = execution.ExecPrice,
             Fee = execution.ExecFee,
-            RealizedPnl = execution.ExecPnl,
-            Funding = 0m,
+            RealizedPnl = isFunding ? 0m : execution.ExecPnl - execution.ExecFee,
+            Funding = isFunding ? ResolveFundingPnl(execution) : 0m,
             CreatedAt = execution.ExecTime == DateTimeOffset.UnixEpoch ? DateTimeOffset.UtcNow : execution.ExecTime
         };
     }
@@ -375,6 +393,15 @@ public sealed class FuturesReconciliationService
 
     private static TradeSide ParseSide(string side) =>
         Enum.TryParse<TradeSide>(side, true, out var parsed) ? parsed : TradeSide.Buy;
+
+    private static bool IsManagedOrFundingExecution(BybitExecutionSnapshot execution) =>
+        FuturesOrderLinkIds.IsManaged(execution.OrderLinkId) || IsFundingExecution(execution);
+
+    private static bool IsFundingExecution(BybitExecutionSnapshot execution) =>
+        string.Equals(execution.ExecType, "Funding", StringComparison.OrdinalIgnoreCase);
+
+    private static decimal ResolveFundingPnl(BybitExecutionSnapshot execution) =>
+        execution.ExecPnl != 0m ? execution.ExecPnl : -Math.Abs(execution.ExecFee);
 
     private static bool IsLong(string? side) =>
         string.Equals(side, "Buy", StringComparison.OrdinalIgnoreCase) ||

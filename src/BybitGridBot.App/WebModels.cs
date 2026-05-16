@@ -656,7 +656,15 @@ public sealed class FuturesUserStreamStatusView
 
     public bool Stale { get; init; }
 
+    public bool FallbackActive { get; init; }
+
+    public string FallbackReason { get; init; } = "-";
+
     public DateTimeOffset? ConnectedAt { get; init; }
+
+    public DateTimeOffset? LastConnectAttemptAt { get; init; }
+
+    public DateTimeOffset? LastDisconnectedAt { get; init; }
 
     public DateTimeOffset? LastMessageAt { get; init; }
 
@@ -667,6 +675,8 @@ public sealed class FuturesUserStreamStatusView
     public string LastTopic { get; init; } = "-";
 
     public int DisconnectCount { get; init; }
+
+    public int ConnectAttemptCount { get; init; }
 
     public string LastError { get; init; } = "-";
 }

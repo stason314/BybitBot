@@ -105,7 +105,8 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         var activeOrders = await _repository.GetActiveFuturesOrdersAsync(selectedSettings.Symbol, cancellationToken);
         var riskDecisions = await _repository.GetFuturesRiskDecisionsAsync(selectedSettings.Symbol, 20, cancellationToken);
         var lastPreflight = riskDecisions.FirstOrDefault(decision => string.Equals(decision.Source, "Preflight", StringComparison.OrdinalIgnoreCase));
-        var recentFills = await _repository.GetFuturesFillsAsync(selectedSettings.Symbol, 1000, cancellationToken);
+        var recentFills = await _repository.GetFuturesFillsAsync(selectedSettings.Symbol, FuturesFillLedger.QueryLimit, cancellationToken);
+        var fillLedger = FuturesFillLedger.Build(recentFills, DateOnly.FromDateTime(DateTime.UtcNow));
 
         return new FuturesDashboardResponse
         {
@@ -135,8 +136,8 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
                 .ToArray(),
             Settings = MapSettings(selectedSettings),
             Position = position,
-            PaperAccount = BuildPaperAccount(state, position, _futuresOptions.PaperInitialEquityUsdt),
-            PnlStats = BuildPnlStats(recentFills),
+            PaperAccount = BuildPaperAccount(state, position, _futuresOptions.PaperInitialEquityUsdt, fillLedger, _appOptions.TradingMode),
+            PnlStats = BuildPnlStats(recentFills, fillLedger),
             TestnetSoak = BuildTestnetSoakStatus(position, activeOrders, recentOrders, recentFills, riskDecisions),
             ProtectionStatus = BuildProtectionStatus(selectedSettings, position, bybitPositionSnapshot, riskDecisions),
             UserStreamStatus = BuildUserStreamStatus(),
@@ -1438,7 +1439,12 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         ['WS Enabled', stream.enabled ? 'yes' : 'no'],
         ['WS Connected', stream.connected ? 'yes' : 'no'],
         ['WS Stale', stream.stale ? 'yes' : 'no'],
+        ['REST Fallback', stream.fallbackActive ? 'active' : 'idle'],
+        ['Fallback Reason', stream.fallbackReason || '-'],
+        ['Connect Attempts', formatNumber(stream.connectAttemptCount)],
         ['Disconnects', formatNumber(stream.disconnectCount)],
+        ['Last Connect Try', stream.lastConnectAttemptAt ? formatDate(stream.lastConnectAttemptAt) : '-'],
+        ['Last Disconnect', stream.lastDisconnectedAt ? formatDate(stream.lastDisconnectedAt) : '-'],
         ['Last Event', stream.lastEventAt ? formatDate(stream.lastEventAt) : '-'],
         ['Event Type', stream.lastEventType || '-'],
         ['Topic', stream.lastTopic || '-'],
@@ -1779,7 +1785,9 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
     private static FuturesPaperAccountView BuildPaperAccount(
         BotState? state,
         FuturesPositionView position,
-        decimal initialEquity)
+        decimal initialEquity,
+        FuturesFillLedger fillLedger,
+        TradingMode tradingMode)
     {
         var cash = state?.QuoteAssetBalance ?? initialEquity;
         if (cash <= 0m)
@@ -1788,6 +1796,12 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         }
 
         var unrealized = state?.UnrealizedPnl ?? position.UnrealizedPnl;
+        if (tradingMode != TradingMode.Paper)
+        {
+            unrealized = position.UnrealizedPnl;
+            cash = initialEquity + fillLedger.TotalRealizedPnl + fillLedger.TotalFunding;
+        }
+
         var currentEquity = cash + unrealized;
         var peakEquity = state is { PeakEquityUsdt: > 0m }
             ? state.PeakEquityUsdt
@@ -1807,33 +1821,38 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             PeakEquityUsdt = peakEquity,
             CurrentDrawdownUsdt = drawdownUsdt,
             CurrentDrawdownPercent = drawdownPercent,
-            TotalRealizedPnl = state?.TotalRealizedPnl ?? position.RealizedPnl,
-            DailyRealizedPnl = state?.DailyRealizedPnl ?? 0m,
+            TotalRealizedPnl = tradingMode == TradingMode.Paper
+                ? state?.TotalRealizedPnl ?? position.RealizedPnl
+                : fillLedger.TotalRealizedPnl + fillLedger.TotalFunding,
+            DailyRealizedPnl = tradingMode == TradingMode.Paper
+                ? state?.DailyRealizedPnl ?? 0m
+                : fillLedger.DailyRealizedPnl + fillLedger.DailyFunding,
             UnrealizedPnl = unrealized,
             ReturnPercent = initialEquity > 0m ? (currentEquity - initialEquity) / initialEquity * 100m : 0m
         };
     }
 
-    private static FuturesPnlStatsView BuildPnlStats(IReadOnlyCollection<FuturesFillRecord> fills)
+    private static FuturesPnlStatsView BuildPnlStats(
+        IReadOnlyCollection<FuturesFillRecord> fills,
+        FuturesFillLedger fillLedger)
     {
         var filled = fills
             .Where(fill => fill.Quantity > 0m)
+            .Where(fill => fill.Action != FuturesTradeAction.Funding)
             .ToArray();
         var realized = filled.Select(fill => fill.RealizedPnl).ToArray();
         var wins = realized.Where(pnl => pnl > 0m).ToArray();
         var losses = realized.Where(pnl => pnl < 0m).ToArray();
         var grossProfit = wins.Sum();
         var grossLoss = losses.Sum();
-        var fees = filled.Sum(fill => fill.Fee);
-        var funding = filled.Sum(fill => fill.Funding);
 
         return new FuturesPnlStatsView
         {
             GrossProfit = grossProfit,
             GrossLoss = grossLoss,
-            NetPnl = realized.Sum(),
-            FeesPaid = fees,
-            FundingPaid = funding,
+            NetPnl = fillLedger.TotalRealizedPnl + fillLedger.TotalFunding,
+            FeesPaid = fillLedger.FeesPaid,
+            FundingPaid = fillLedger.TotalFunding,
             FilledTradesCount = filled.Length,
             WinningTradesCount = wins.Length,
             LosingTradesCount = losses.Length,
@@ -2040,19 +2059,45 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         var lastEventAge = snapshot.LastEventAt is null
             ? (TimeSpan?)null
             : DateTimeOffset.UtcNow - snapshot.LastEventAt.Value;
+        var stale = enabled && (snapshot.LastEventAt is null || lastEventAge > TimeSpan.FromMinutes(2));
+        var fallbackActive = enabled && (!snapshot.IsConnected || stale);
         return new FuturesUserStreamStatusView
         {
             Enabled = enabled,
             Connected = snapshot.IsConnected,
-            Stale = enabled && (snapshot.LastEventAt is null || lastEventAge > TimeSpan.FromMinutes(2)),
+            Stale = stale,
+            FallbackActive = fallbackActive,
+            FallbackReason = fallbackActive
+                ? BuildUserStreamFallbackReason(snapshot, lastEventAge)
+                : "-",
             ConnectedAt = snapshot.ConnectedAt,
+            LastConnectAttemptAt = snapshot.LastConnectAttemptAt,
+            LastDisconnectedAt = snapshot.LastDisconnectedAt,
             LastMessageAt = snapshot.LastMessageAt,
             LastEventAt = snapshot.LastEventAt,
             LastEventType = snapshot.LastEventType ?? "-",
             LastTopic = snapshot.LastTopic ?? "-",
             DisconnectCount = snapshot.DisconnectCount,
+            ConnectAttemptCount = snapshot.ConnectAttemptCount,
             LastError = snapshot.LastError ?? "-"
         };
+    }
+
+    private static string BuildUserStreamFallbackReason(
+        BybitUserStreamTelemetrySnapshot snapshot,
+        TimeSpan? lastEventAge)
+    {
+        if (!snapshot.IsConnected)
+        {
+            return "disconnected";
+        }
+
+        if (snapshot.LastEventAt is null)
+        {
+            return "no events";
+        }
+
+        return $"stale {Math.Round(lastEventAge?.TotalSeconds ?? 0d)}s";
     }
 
     private static FuturesRiskDecisionView MapRiskDecision(FuturesRiskDecisionRecord decision) => new()

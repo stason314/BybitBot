@@ -6,5 +6,6 @@ public enum FuturesTradeAction
     CloseLong = 2,
     OpenShort = 3,
     CloseShort = 4,
-    ReduceOnlyClose = 5
+    ReduceOnlyClose = 5,
+    Funding = 6
 }

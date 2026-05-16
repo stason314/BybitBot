@@ -51,6 +51,7 @@ public sealed class BybitUserStreamClient : IBybitUserStreamClient
             {
                 using var socket = new ClientWebSocket();
                 var endpoint = new Uri(_options.ResolvePrivateWebSocketUrl());
+                _telemetry.MarkConnectAttempt();
                 await socket.ConnectAsync(endpoint, cancellationToken);
                 _telemetry.MarkConnected(endpoint.ToString());
                 _logger.LogInformation("Connected to Bybit private WebSocket: {Endpoint}", endpoint);

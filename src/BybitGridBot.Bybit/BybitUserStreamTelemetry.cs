@@ -20,6 +20,18 @@ public sealed class BybitUserStreamTelemetry
         }
     }
 
+    public void MarkConnectAttempt()
+    {
+        lock (_gate)
+        {
+            _snapshot = _snapshot with
+            {
+                ConnectAttemptCount = _snapshot.ConnectAttemptCount + 1,
+                LastConnectAttemptAt = DateTimeOffset.UtcNow
+            };
+        }
+    }
+
     public void MarkDisconnected(Exception? exception)
     {
         lock (_gate)
@@ -28,6 +40,7 @@ public sealed class BybitUserStreamTelemetry
             {
                 IsConnected = false,
                 DisconnectCount = _snapshot.DisconnectCount + 1,
+                LastDisconnectedAt = DateTimeOffset.UtcNow,
                 LastError = exception?.Message
             };
         }
@@ -75,6 +88,10 @@ public sealed record BybitUserStreamTelemetrySnapshot
 
     public DateTimeOffset? ConnectedAt { get; init; }
 
+    public DateTimeOffset? LastConnectAttemptAt { get; init; }
+
+    public DateTimeOffset? LastDisconnectedAt { get; init; }
+
     public DateTimeOffset? LastMessageAt { get; init; }
 
     public DateTimeOffset? LastEventAt { get; init; }
@@ -84,6 +101,8 @@ public sealed record BybitUserStreamTelemetrySnapshot
     public string? LastTopic { get; init; }
 
     public int DisconnectCount { get; init; }
+
+    public int ConnectAttemptCount { get; init; }
 
     public string? LastError { get; init; }
 }

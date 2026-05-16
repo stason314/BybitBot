@@ -12,9 +12,12 @@ namespace BybitGridBot.App;
 public sealed class FuturesBotWorker : BackgroundService
 {
     private static readonly TimeSpan LoopInterval = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan UserStreamStaleThreshold = TimeSpan.FromMinutes(2);
+    private static readonly TimeSpan UserStreamFallbackAlertCooldown = TimeSpan.FromMinutes(5);
 
     private readonly AppOptions _appOptions;
     private readonly IBybitRestClient _bybitRestClient;
+    private readonly BybitUserStreamTelemetry _userStreamTelemetry;
     private readonly FuturesExecutionService _executionService;
     private readonly FuturesOptions _futuresOptions;
     private readonly FuturesPreflightService _preflightService;
@@ -34,6 +37,7 @@ public sealed class FuturesBotWorker : BackgroundService
         IOptions<FuturesRiskOptions> riskOptions,
         IOptions<FuturesStrategyQualityOptions> strategyQualityOptions,
         IBybitRestClient bybitRestClient,
+        BybitUserStreamTelemetry userStreamTelemetry,
         FuturesExecutionService executionService,
         FuturesPreflightService preflightService,
         FuturesProtectionService protectionService,
@@ -49,6 +53,7 @@ public sealed class FuturesBotWorker : BackgroundService
         _riskOptions = riskOptions.Value;
         _strategyQualityOptions = strategyQualityOptions.Value;
         _bybitRestClient = bybitRestClient;
+        _userStreamTelemetry = userStreamTelemetry;
         _executionService = executionService;
         _preflightService = preflightService;
         _protectionService = protectionService;
@@ -155,6 +160,7 @@ public sealed class FuturesBotWorker : BackgroundService
                     reconciliation.FixedHangingOrderCount);
             }
         }
+        await RecordUserStreamFallbackIfNeededAsync(settings, cancellationToken);
 
         if (_riskOptions.EmergencyPause)
         {
@@ -264,8 +270,7 @@ public sealed class FuturesBotWorker : BackgroundService
             }, cancellationToken);
 
             position = result.Position;
-            FuturesReconciliationService.ApplyPositionToState(state, position, _appOptions.TradingMode == TradingMode.Paper);
-            await _repository.SaveBotStateAsync(state, cancellationToken);
+            await ApplyPositionSnapshotToStateAsync(settings, state, position, cancellationToken);
             await _repository.UpsertFuturesPositionAsync(position, _appOptions.TradingMode, cancellationToken);
             if (position.Size > 0m)
             {
@@ -282,10 +287,94 @@ public sealed class FuturesBotWorker : BackgroundService
 
         if (decision.TradeIntents.Count == 0)
         {
-            FuturesReconciliationService.ApplyPositionToState(state, position, _appOptions.TradingMode == TradingMode.Paper);
-            await _repository.SaveBotStateAsync(state, cancellationToken);
+            await ApplyPositionSnapshotToStateAsync(settings, state, position, cancellationToken);
             await _repository.UpsertFuturesPositionAsync(position, _appOptions.TradingMode, cancellationToken);
         }
+    }
+
+    private async Task ApplyPositionSnapshotToStateAsync(
+        FuturesBotSettings settings,
+        BotState state,
+        FuturesPositionSnapshot position,
+        CancellationToken cancellationToken)
+    {
+        FuturesReconciliationService.ApplyPositionToState(state, position, _appOptions.TradingMode == TradingMode.Paper);
+        if (_appOptions.TradingMode != TradingMode.Paper)
+        {
+            var today = DateOnly.FromDateTime(DateTime.UtcNow);
+            var fills = await _repository.GetFuturesFillsAsync(settings.Symbol, FuturesFillLedger.QueryLimit, cancellationToken);
+            var ledger = FuturesFillLedger.Build(fills, today);
+            state.TotalRealizedPnl = ledger.TotalRealizedPnl + ledger.TotalFunding;
+            state.DailyRealizedPnl = ledger.DailyRealizedPnl + ledger.DailyFunding;
+            state.DailyPnlDate = today;
+            state.UpdatedAt = DateTimeOffset.UtcNow;
+        }
+
+        await _repository.SaveBotStateAsync(state, cancellationToken);
+    }
+
+    private async Task RecordUserStreamFallbackIfNeededAsync(FuturesBotSettings settings, CancellationToken cancellationToken)
+    {
+        if (_appOptions.TradingMode == TradingMode.Paper || !_futuresOptions.UserStreamEnabled)
+        {
+            return;
+        }
+
+        var snapshot = _userStreamTelemetry.GetSnapshot();
+        var lastEventAge = snapshot.LastEventAt is null
+            ? (TimeSpan?)null
+            : DateTimeOffset.UtcNow - snapshot.LastEventAt.Value;
+        var stale = !snapshot.IsConnected ||
+            snapshot.LastEventAt is null ||
+            lastEventAge > UserStreamStaleThreshold;
+        if (!stale)
+        {
+            return;
+        }
+
+        var recentRiskDecisions = await _repository.GetFuturesRiskDecisionsAsync(settings.Symbol, 20, cancellationToken);
+        var lastFallback = recentRiskDecisions
+            .Where(decision => string.Equals(decision.Source, "UserStreamFallback", StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(decision => decision.CreatedAt)
+            .FirstOrDefault();
+        if (lastFallback is not null &&
+            DateTimeOffset.UtcNow - lastFallback.CreatedAt < UserStreamFallbackAlertCooldown)
+        {
+            return;
+        }
+
+        var reason = ResolveUserStreamFallbackReason(snapshot, lastEventAge);
+        await _repository.AddFuturesRiskDecisionAsync(new FuturesRiskDecisionRecord
+        {
+            Symbol = settings.Symbol,
+            Source = "UserStreamFallback",
+            IsAllowed = true,
+            Reason = reason,
+            Severity = RiskSeverity.Warning.ToString(),
+            SuggestedAction = RiskSuggestedAction.Allow.ToString(),
+            CreatedAt = DateTimeOffset.UtcNow
+        }, cancellationToken);
+        await _notifier.NotifyAsync(
+            $"Futures user stream fallback active.\nSymbol: `{settings.Symbol}`\nReason: `{reason}`",
+            cancellationToken);
+    }
+
+    private static string ResolveUserStreamFallbackReason(
+        BybitUserStreamTelemetrySnapshot snapshot,
+        TimeSpan? lastEventAge)
+    {
+        if (!snapshot.IsConnected)
+        {
+            return "Futures user stream disconnected; REST reconciliation fallback is active.";
+        }
+
+        if (snapshot.LastEventAt is null)
+        {
+            return "Futures user stream has no handled events yet; REST reconciliation fallback is active.";
+        }
+
+        var ageSeconds = Math.Round(lastEventAge?.TotalSeconds ?? 0d);
+        return $"Futures user stream stale for {ageSeconds}s; REST reconciliation fallback is active.";
     }
 
     private async Task<string?> GetStrategyEntryBlockReasonAsync(
