@@ -302,6 +302,10 @@ public sealed class DashboardOrderItem
 
     public string? ParentOrderLinkId { get; init; }
 
+    public string? OrderGroup { get; init; }
+
+    public string? LadderRole { get; init; }
+
     public required string Symbol { get; init; }
 
     public required string Side { get; init; }

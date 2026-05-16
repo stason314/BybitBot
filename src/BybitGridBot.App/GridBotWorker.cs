@@ -3225,12 +3225,14 @@ public sealed class GridBotWorker : BackgroundService
 
         if (config.TakeProfitLadderEnabled)
         {
+            var allOrders = await _repository.GetOrdersAsync(_gridOptions.Symbol, cancellationToken);
             await EnsureDcaTakeProfitLadderAsync(
                 instrument,
                 config,
                 filledOrder,
                 entryPrice,
                 activeOrders,
+                allOrders,
                 availableBase,
                 cancellationToken);
             return;
@@ -3264,16 +3266,23 @@ public sealed class GridBotWorker : BackgroundService
         GridOrder filledOrder,
         decimal entryPrice,
         IReadOnlyCollection<GridOrder> activeOrders,
+        IReadOnlyCollection<GridOrder> allOrders,
         decimal availableBase,
         CancellationToken cancellationToken)
     {
-        var remainingQuantity = decimal.Min(filledOrder.FilledQuantity, availableBase);
+        var remainingAvailableBase = decimal.Min(filledOrder.FilledQuantity, availableBase);
         var ladder = BuildTakeProfitLadder(config);
         var plannedPrices = new HashSet<decimal>();
+        var childSells = allOrders
+            .Where(order => order.Side == TradeSide.Sell &&
+                string.Equals(order.ParentOrderLinkId, filledOrder.OrderLinkId, StringComparison.Ordinal) &&
+                order.Status is not OrderStatus.Cancelled and not OrderStatus.Rejected)
+            .ToArray();
+        var plannedQuantity = 0m;
 
         foreach (var level in ladder)
         {
-            if (remainingQuantity <= 0m)
+            if (remainingAvailableBase <= 0m)
             {
                 return;
             }
@@ -3284,10 +3293,17 @@ public sealed class GridBotWorker : BackgroundService
                 continue;
             }
 
-            var targetQuantity = level.IsFinal
-                ? remainingQuantity
+            var desiredLevelQuantity = level.IsFinal
+                ? filledOrder.FilledQuantity - plannedQuantity
                 : filledOrder.FilledQuantity * level.QuantityPercent / 100m;
-            var quantity = instrument.RoundQuantity(decimal.Min(targetQuantity, remainingQuantity));
+            desiredLevelQuantity = instrument.RoundQuantity(decimal.Max(0m, desiredLevelQuantity));
+            plannedQuantity += desiredLevelQuantity;
+
+            var protectedAtLevel = childSells
+                .Where(order => order.Price == takeProfitPrice)
+                .Sum(order => order.FilledQuantity + (order.IsActive ? Math.Max(0m, order.Quantity - order.FilledQuantity) : 0m));
+            var missingQuantity = instrument.RoundQuantity(decimal.Max(0m, desiredLevelQuantity - protectedAtLevel));
+            var quantity = instrument.RoundQuantity(decimal.Min(missingQuantity, remainingAvailableBase));
             if (quantity <= 0m || quantity < instrument.MinOrderQty)
             {
                 continue;
@@ -3318,7 +3334,7 @@ public sealed class GridBotWorker : BackgroundService
                 },
                 cancellationToken);
 
-            remainingQuantity -= quantity;
+            remainingAvailableBase -= quantity;
         }
     }
 
@@ -3407,13 +3423,15 @@ public sealed class GridBotWorker : BackgroundService
 
             if (ShouldUseDcaFollowUp(profile, buy))
             {
-                await EnsureDcaTakeProfitOrderAsync(state, ParseDcaStrategyConfig(profile!), remainingBuy, cancellationToken);
+                var config = ParseDcaStrategyConfig(profile!);
+                await EnsureDcaTakeProfitOrderAsync(state, config, config.TakeProfitLadderEnabled ? buy : remainingBuy, cancellationToken);
                 continue;
             }
 
             if (ShouldUseBtdFollowUp(profile, buy))
             {
-                await EnsureDcaTakeProfitOrderAsync(state, ParseBtdStrategyConfig(profile!), remainingBuy, cancellationToken);
+                var config = ParseBtdStrategyConfig(profile!);
+                await EnsureDcaTakeProfitOrderAsync(state, config, config.TakeProfitLadderEnabled ? buy : remainingBuy, cancellationToken);
                 continue;
             }
 

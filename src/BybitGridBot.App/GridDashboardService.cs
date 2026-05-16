@@ -1702,7 +1702,7 @@ public sealed class GridDashboardService : IGridDashboardService
         <div class="table-wrap">
           <table>
             <thead>
-              <tr><th>Source</th><th>Side</th><th>Price</th><th>Qty</th><th>Filled</th><th>Status</th><th>Link</th></tr>
+              <tr><th>Source</th><th>Group</th><th>Side</th><th>Price</th><th>Qty</th><th>Filled</th><th>Status</th><th>Link</th></tr>
             </thead>
             <tbody id="activeOrders"></tbody>
           </table>
@@ -1724,7 +1724,7 @@ public sealed class GridDashboardService : IGridDashboardService
         <table>
           <thead>
             <tr>
-              <th>Time</th><th>Source</th><th>Side</th><th>Price</th><th>Qty</th><th>Filled</th><th>Status</th><th>Realized PnL</th><th>Fee</th><th>Order</th>
+              <th>Time</th><th>Source</th><th>Group</th><th>Side</th><th>Price</th><th>Qty</th><th>Filled</th><th>Status</th><th>Realized PnL</th><th>Fee</th><th>Order</th>
             </tr>
           </thead>
           <tbody id="historyRows"></tbody>
@@ -2386,10 +2386,11 @@ public sealed class GridDashboardService : IGridDashboardService
 
       byId('gridLevels').innerHTML = data.gridLevels.map(level => `<div class="grid-chip">${formatNumber(level)}</div>`).join('');
       byId('activeOrders').innerHTML = data.activeOrders.length === 0
-        ? `<tr><td colspan="7">No active orders.</td></tr>`
+        ? `<tr><td colspan="8">No active orders.</td></tr>`
         : data.activeOrders.map(order => `
             <tr>
               <td>${order.source}</td>
+              <td>${order.orderGroup ? `<span class="token" title="${escapeHtml(order.orderGroup)}">${escapeHtml(order.ladderRole || 'Grouped')}</span>` : '-'}</td>
               <td>${order.side}</td>
               <td>${formatNumber(order.price)}</td>
               <td>${formatNumber(order.quantity)}</td>
@@ -2399,11 +2400,12 @@ public sealed class GridDashboardService : IGridDashboardService
             </tr>`).join('');
 
       byId('historyRows').innerHTML = data.orders.length === 0
-        ? `<tr><td colspan="10">No orders yet.</td></tr>`
+        ? `<tr><td colspan="11">No orders yet.</td></tr>`
         : data.orders.map(order => `
             <tr>
               <td>${formatDate(order.filledAt || order.updatedAt || order.createdAt)}</td>
               <td>${order.source}</td>
+              <td>${order.orderGroup ? `<span class="token" title="${escapeHtml(order.orderGroup)}">${escapeHtml(order.ladderRole || 'Grouped')}</span>` : '-'}</td>
               <td>${order.side}</td>
               <td>${formatNumber(order.price)}</td>
               <td>${formatNumber(order.quantity)}</td>
@@ -2747,6 +2749,8 @@ public sealed class GridDashboardService : IGridDashboardService
             OrderLinkId = order.OrderLinkId,
             BybitOrderId = order.BybitOrderId,
             ParentOrderLinkId = order.ParentOrderLinkId,
+            OrderGroup = ResolveOrderGroup(order),
+            LadderRole = ResolveLadderRole(order),
             Symbol = order.Symbol,
             Side = order.Side.ToString(),
             Source = sourceLabels.TryGetValue(order.OrderLinkId, out var sourceLabel)
@@ -2763,6 +2767,16 @@ public sealed class GridDashboardService : IGridDashboardService
             FilledAt = order.FilledAt
         };
     }
+
+    private static string? ResolveOrderGroup(GridOrder order) =>
+        order.Side == TradeSide.Sell && !string.IsNullOrWhiteSpace(order.ParentOrderLinkId)
+            ? order.ParentOrderLinkId
+            : null;
+
+    private static string? ResolveLadderRole(GridOrder order) =>
+        order.Side == TradeSide.Sell && !string.IsNullOrWhiteSpace(order.ParentOrderLinkId)
+            ? "TP ladder"
+            : null;
 
     private static DashboardNoTradeReason MapNoTradeReason(NoTradeReasonRecord reason, DateTimeOffset now)
     {
