@@ -1858,6 +1858,9 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         ['Position Capacity', quality.positionCapacityStatus || '-'],
         ['Remaining Notional', formatNumber(quality.remainingNotionalUsdt)],
         ['Next Order', formatNumber(quality.nextOrderNotionalUsdt)],
+        ['Capital Used %', `${formatNumber(quality.capitalUtilizationPercent)}%`],
+        ['Remaining Margin', formatNumber(quality.remainingMarginUsdt)],
+        ['Entry Capacity', formatNumber(quality.entriesCapacityLeft)],
         ['Fee / Trading PnL', `${formatNumber(quality.feeToTradingPnlPercent)}%`],
         ['Profit Efficiency', quality.profitEfficiencyStatus || '-'],
         ['No Trade', formatNumber(quality.noTradeReasonCount)],
@@ -2510,6 +2513,8 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             .Where(decision => IsNoTradeDecision(decision.Source))
             .OrderByDescending(decision => decision.CreatedAt)
             .FirstOrDefault();
+        var efficiency = BuildProfitEfficiency(fills);
+        var configuredMaxOrdersPerHour = ResolveAggressiveMaxOrdersPerHour(settings);
         return new FuturesAggressiveModeView
         {
             Enabled = settings.AggressiveModeEnabled,
@@ -2518,7 +2523,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             PaperOnly = true,
             EntryMultiplier = ResolveAggressiveEntryMultiplier(settings),
             EntriesLastHour = entriesLastHour,
-            MaxEntriesPerHour = ResolveAggressiveMaxOrdersPerHour(settings),
+            MaxEntriesPerHour = ApplyProfitEfficiencyMaxOrdersCap(configuredMaxOrdersPerHour, efficiency),
             MinSecondsBetweenEntries = ResolveAggressiveMinSecondsBetweenEntries(settings),
             ConsecutiveLosses = consecutiveLosses,
             MaxConsecutiveLosses = ResolveAggressiveMaxConsecutiveLosses(settings),
@@ -2547,6 +2552,19 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         }
 
         return count;
+    }
+
+    private static int ApplyProfitEfficiencyMaxOrdersCap(
+        int configuredMaxOrdersPerHour,
+        FuturesProfitEfficiencyView efficiency)
+    {
+        if (configuredMaxOrdersPerHour <= 0 || efficiency.Status == "good")
+        {
+            return configuredMaxOrdersPerHour;
+        }
+
+        var cap = efficiency.Status == "bad" ? 2 : 3;
+        return Math.Min(configuredMaxOrdersPerHour, cap);
     }
 
     private static bool IsNoTradeDecision(string source) =>
@@ -2751,6 +2769,9 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             PositionCapacityStatus = positionCapacity.Status,
             RemainingNotionalUsdt = positionCapacity.RemainingNotionalUsdt,
             NextOrderNotionalUsdt = positionCapacity.NextOrderNotionalUsdt,
+            CapitalUtilizationPercent = positionCapacity.CapitalUtilizationPercent,
+            RemainingMarginUsdt = positionCapacity.RemainingMarginUsdt,
+            EntriesCapacityLeft = positionCapacity.EntriesCapacityLeft,
             CurrentActiveBlockReason = currentActiveBlock?.Reason ?? "-",
             CurrentActiveBlockSource = currentActiveBlock?.Source ?? "-",
             CurrentActiveBlockAt = currentActiveBlock?.CreatedAt,
@@ -2773,7 +2794,10 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
     private readonly record struct FuturesPositionCapacityView(
         string Status,
         decimal RemainingNotionalUsdt,
-        decimal NextOrderNotionalUsdt);
+        decimal NextOrderNotionalUsdt,
+        decimal CapitalUtilizationPercent,
+        decimal RemainingMarginUsdt,
+        int EntriesCapacityLeft);
 
     private async Task<FuturesInstrumentRules?> TryGetInstrumentRulesAsync(
         FuturesBotSettings settings,
@@ -2798,17 +2822,28 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         var maxNotional = decimal.Max(0m, settings.MaxNotionalUsdt);
         var currentNotional = decimal.Max(0m, position.PositionValueUsdt);
         var remainingNotional = maxNotional > 0m ? decimal.Max(0m, maxNotional - currentNotional) : 0m;
+        var maxMargin = decimal.Max(0m, settings.MaxMarginUsdt);
+        var usedMargin = decimal.Max(0m, position.MarginUsedUsdt);
+        var remainingMargin = maxMargin > 0m ? decimal.Max(0m, maxMargin - usedMargin) : 0m;
         var nextOrderNotional = EstimateNextOrderNotional(settings, position, instrument);
+        var nextOrderMargin = settings.Leverage > 0m ? nextOrderNotional / settings.Leverage : nextOrderNotional;
+        var entriesByNotional = nextOrderNotional > 0m ? decimal.Floor(remainingNotional / nextOrderNotional) : 0m;
+        var entriesByMargin = nextOrderMargin > 0m ? decimal.Floor(remainingMargin / nextOrderMargin) : 0m;
+        var entriesCapacityLeft = (int)decimal.Max(0m, decimal.Min(entriesByNotional, entriesByMargin));
+        var utilizationPercent = maxNotional > 0m ? currentNotional / maxNotional * 100m : 0m;
         var status = position.Size <= 0m
             ? "no-position"
-            : remainingNotional >= nextOrderNotional && nextOrderNotional > 0m
+            : entriesCapacityLeft > 0
                 ? "can-scale-in"
                 : "full";
 
         return new FuturesPositionCapacityView(
             status,
             decimal.Round(remainingNotional, 4, MidpointRounding.AwayFromZero),
-            decimal.Round(nextOrderNotional, 4, MidpointRounding.AwayFromZero));
+            decimal.Round(nextOrderNotional, 4, MidpointRounding.AwayFromZero),
+            decimal.Round(utilizationPercent, 4, MidpointRounding.AwayFromZero),
+            decimal.Round(remainingMargin, 4, MidpointRounding.AwayFromZero),
+            entriesCapacityLeft);
     }
 
     private static decimal EstimateNextOrderNotional(

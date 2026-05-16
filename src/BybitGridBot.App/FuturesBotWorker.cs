@@ -204,6 +204,18 @@ public sealed class FuturesBotWorker : BackgroundService
 
         foreach (var intent in decision.TradeIntents)
         {
+            var exposureNoTradeReason = GetStrategyExposureNoTradeReason(settings, position, intent);
+            if (exposureNoTradeReason is not null)
+            {
+                await RecordStrategyNoTradeDecisionAsync(settings.Symbol, exposureNoTradeReason, cancellationToken, intent.Action);
+                _logger.LogInformation(
+                    "Futures strategy skipped intent for {Symbol}. Action: {Action}. Reason: {Reason}",
+                    settings.Symbol,
+                    intent.Action,
+                    exposureNoTradeReason);
+                continue;
+            }
+
             var strategyBlockReason = await GetStrategyEntryBlockReasonAsync(settings, position, intent, candles, cancellationToken);
             if (strategyBlockReason is not null)
             {
@@ -225,18 +237,6 @@ public sealed class FuturesBotWorker : BackgroundService
                     settings.Symbol,
                     intent.Action,
                     aggressiveBlockReason);
-                continue;
-            }
-
-            var exposureNoTradeReason = GetStrategyExposureNoTradeReason(settings, position, intent);
-            if (exposureNoTradeReason is not null)
-            {
-                await RecordStrategyNoTradeDecisionAsync(settings.Symbol, exposureNoTradeReason, cancellationToken, intent.Action);
-                _logger.LogInformation(
-                    "Futures strategy skipped intent for {Symbol}. Action: {Action}. Reason: {Reason}",
-                    settings.Symbol,
-                    intent.Action,
-                    exposureNoTradeReason);
                 continue;
             }
 

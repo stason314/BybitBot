@@ -787,6 +787,12 @@ public sealed class FuturesStrategyQualityView
 
     public decimal NextOrderNotionalUsdt { get; init; }
 
+    public decimal CapitalUtilizationPercent { get; init; }
+
+    public decimal RemainingMarginUsdt { get; init; }
+
+    public int EntriesCapacityLeft { get; init; }
+
     public string CurrentActiveBlockReason { get; init; } = "-";
 
     public string CurrentActiveBlockSource { get; init; } = "-";
