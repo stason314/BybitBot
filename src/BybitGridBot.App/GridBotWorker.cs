@@ -2350,6 +2350,7 @@ public sealed class GridBotWorker : BackgroundService
             currentPrice,
             reason,
             maxSellQuantity,
+            profitProtection.ShouldTrailExit,
             cancellationToken);
 
         return true;
@@ -2418,6 +2419,7 @@ public sealed class GridBotWorker : BackgroundService
             currentPrice,
             reason,
             null,
+            false,
             cancellationToken);
 
     private async Task<IReadOnlyList<GridOrder>> ApplyReduceOnlyProtectionAsync(
@@ -2429,12 +2431,14 @@ public sealed class GridBotWorker : BackgroundService
         decimal currentPrice,
         string reason,
         decimal? maxSellQuantity,
+        bool forceExit,
         CancellationToken cancellationToken)
     {
         _logger.LogWarning(
-            "ReduceOnly protection active for {Symbol}. Reason: {Reason}. Buy orders will be cancelled, profitable sells will be preserved.",
+            "ReduceOnly protection active for {Symbol}. Reason: {Reason}. Buy orders will be cancelled. ForceExit={ForceExit}.",
             _gridOptions.Symbol,
-            reason);
+            reason,
+            forceExit);
 
         var cancelledBuyCount = 0;
         foreach (var order in activeOrders.Where(order => order.IsActive && order.Side == TradeSide.Buy).ToArray())
@@ -2443,17 +2447,27 @@ public sealed class GridBotWorker : BackgroundService
             cancelledBuyCount++;
         }
 
+        var cancelledSellCount = 0;
+        if (forceExit)
+        {
+            foreach (var order in activeOrders.Where(order => order.IsActive && order.Side == TradeSide.Sell).ToArray())
+            {
+                await CancelManagedOrderAsync(order, cancellationToken);
+                cancelledSellCount++;
+            }
+        }
+
         var remainingOrders = activeOrders.Where(order => order.IsActive).ToArray();
         remainingOrders = (await CancelUnprofitableSellOrdersAsync(profile, state, remainingOrders, cancellationToken)).ToArray();
 
         var wallet = _appOptions.TradingMode == TradingMode.Paper
             ? null
             : await _bybitRestClient.GetWalletBalanceAsync(cancellationToken, _quoteAsset, _baseAsset);
-        var createdSellCount = await EnsureReduceOnlySellOrdersAsync(profile, state, levels, instrument, remainingOrders, wallet, currentPrice, maxSellQuantity, cancellationToken);
-        if (cancelledBuyCount > 0 || createdSellCount > 0)
+        var createdSellCount = await EnsureReduceOnlySellOrdersAsync(profile, state, levels, instrument, remainingOrders, wallet, currentPrice, maxSellQuantity, forceExit, cancellationToken);
+        if (cancelledBuyCount > 0 || cancelledSellCount > 0 || createdSellCount > 0)
         {
             await _notifier.NotifyAsync(
-                $"ReduceOnly protection active for `{_gridOptions.Symbol}`.\nReason: `{reason}`\nBuy orders cancelled: `{cancelledBuyCount}`\nSell orders created: `{createdSellCount}`",
+                $"ReduceOnly protection active for `{_gridOptions.Symbol}`.\nReason: `{reason}`\nBuy orders cancelled: `{cancelledBuyCount}`\nSell orders cancelled: `{cancelledSellCount}`\nSell orders created: `{createdSellCount}`",
                 cancellationToken);
         }
 
@@ -2469,6 +2483,7 @@ public sealed class GridBotWorker : BackgroundService
         BybitWalletBalance? wallet,
         decimal currentPrice,
         decimal? maxSellQuantity,
+        bool forceExit,
         CancellationToken cancellationToken)
     {
         if (state.BaseAssetQuantity <= 0m)
@@ -2488,7 +2503,9 @@ public sealed class GridBotWorker : BackgroundService
         }
 
         var createdSellCount = 0;
-        var sellLevels = BuildReduceOnlySellLevels(levels, currentPrice, state.AverageEntryPrice).ToArray();
+        var sellLevels = forceExit
+            ? new[] { instrument.RoundPrice(currentPrice * (1m - SignalMarketLikeLimitBufferPercent / 100m)) }
+            : BuildReduceOnlySellLevels(levels, currentPrice, state.AverageEntryPrice).ToArray();
         foreach (var price in sellLevels)
         {
             if (availableBase <= 0m ||
@@ -2498,7 +2515,7 @@ public sealed class GridBotWorker : BackgroundService
                 continue;
             }
 
-            var targetQuantity = instrument.RoundQuantity(_gridOptions.OrderSizeUsdt / price);
+            var targetQuantity = forceExit ? availableBase : instrument.RoundQuantity(_gridOptions.OrderSizeUsdt / price);
             var quantity = instrument.RoundQuantity(decimal.Min(availableBase, targetQuantity));
             if (quantity <= 0m ||
                 quantity < instrument.MinOrderQty ||
@@ -2507,7 +2524,8 @@ public sealed class GridBotWorker : BackgroundService
                 continue;
             }
 
-            if (!await HasMinimumNetProfitAsync(TradeSide.Sell, state.AverageEntryPrice, price, quantity, 0m, cancellationToken))
+            if (!forceExit &&
+                !await HasMinimumNetProfitAsync(TradeSide.Sell, state.AverageEntryPrice, price, quantity, 0m, cancellationToken))
             {
                 continue;
             }
@@ -2517,7 +2535,7 @@ public sealed class GridBotWorker : BackgroundService
             var createdOrders = await ExecuteStrategyDecisionAsync(
                 new StrategyExecutionDecision
                 {
-                    OrderIntents = [new OrderIntent(TradeSide.Sell, price, quantity, ReduceOnlyExitMarker, ReduceOnlySource, expectedProfitPercent)]
+                    OrderIntents = [new OrderIntent(TradeSide.Sell, price, quantity, ReduceOnlyExitMarker, ReduceOnlySource, expectedProfitPercent, forceExit)]
                 },
                 cancellationToken);
             if (createdOrders.Count == 0)
