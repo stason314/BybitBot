@@ -696,7 +696,9 @@ public sealed class FuturesBotWorker : BackgroundService
             return $"FUTURES_MAX_ENTRY_ATR_PERCENT filter blocked entry. ATR={atrPercent:F4}%.";
         }
 
-        var feeOpportunityReason = GetEntryFeeOpportunityBlockReason(intent, candles);
+        var fills = await _repository.GetFuturesFillsAsync(settings.Symbol, 1000, cancellationToken);
+        var profitEfficiency = BuildProfitEfficiency(fills);
+        var feeOpportunityReason = GetEntryFeeOpportunityBlockReason(intent, candles, profitEfficiency);
         if (feeOpportunityReason is not null)
         {
             return feeOpportunityReason;
@@ -787,7 +789,8 @@ public sealed class FuturesBotWorker : BackgroundService
 
     private string? GetEntryFeeOpportunityBlockReason(
         FuturesTradeIntent intent,
-        IReadOnlyList<Candle> candles)
+        IReadOnlyList<Candle> candles,
+        FuturesProfitEfficiencySnapshot profitEfficiency)
     {
         if (intent.NotionalUsdt <= 0m || intent.Price <= 0m)
         {
@@ -797,11 +800,16 @@ public sealed class FuturesBotWorker : BackgroundService
         var estimatedMovePercent = CalculateEntryOpportunityPercent(candles);
         var estimatedGrossPnl = intent.NotionalUsdt * estimatedMovePercent / 100m;
         var roundTripFees = intent.NotionalUsdt * DefaultFuturesFeeRatePercent / 100m * 2m;
-        var threshold = ResolveMinNetProfitThreshold(intent.NotionalUsdt);
+        var threshold = ResolveMinNetProfitThreshold(intent.NotionalUsdt) * profitEfficiency.MinNetProfitMultiplier;
         var requiredGrossPnl = roundTripFees + threshold;
         if (estimatedGrossPnl >= requiredGrossPnl)
         {
             return null;
+        }
+
+        if (profitEfficiency.Status != "good")
+        {
+            return $"Fee efficiency guard active. Fees are {profitEfficiency.FeeToTradingPnlPercent:F2}% of trading PnL; entry skipped until expected opportunity covers fees plus adjusted min profit. ExpectedGross={estimatedGrossPnl:F6}, fees={roundTripFees:F6}, requiredNet={threshold:F6}.";
         }
 
         return $"Fee protection: entry skipped because expected ATR/range opportunity does not cover round-trip fees plus min profit. ExpectedGross={estimatedGrossPnl:F6}, fees={roundTripFees:F6}, requiredNet={threshold:F6}.";
@@ -844,7 +852,9 @@ public sealed class FuturesBotWorker : BackgroundService
 
         var fills = await _repository.GetFuturesFillsAsync(settings.Symbol, 1000, cancellationToken);
         var now = DateTimeOffset.UtcNow;
-        var maxOrdersPerHour = ResolveAggressiveMaxOrdersPerHour(settings);
+        var profitEfficiency = BuildProfitEfficiency(fills);
+        var configuredMaxOrdersPerHour = ResolveAggressiveMaxOrdersPerHour(settings);
+        var maxOrdersPerHour = ApplyProfitEfficiencyMaxOrdersCap(configuredMaxOrdersPerHour, profitEfficiency);
         if (maxOrdersPerHour > 0)
         {
             var cutoff = now.AddHours(-1);
@@ -853,6 +863,11 @@ public sealed class FuturesBotWorker : BackgroundService
                 fill.CreatedAt >= cutoff);
             if (entriesLastHour >= maxOrdersPerHour)
             {
+                if (profitEfficiency.Status != "good" && maxOrdersPerHour < configuredMaxOrdersPerHour)
+                {
+                    return $"Fee efficiency guard active. Fees are {profitEfficiency.FeeToTradingPnlPercent:F2}% of trading PnL; aggressive entries reduced to {maxOrdersPerHour}/h.";
+                }
+
                 return "FUTURES_AGGRESSIVE_MAX_ORDERS_PER_HOUR limit reached.";
             }
         }
@@ -1008,6 +1023,11 @@ public sealed class FuturesBotWorker : BackgroundService
             return "Fee protection: entry skipped because expected opportunity does not cover fees plus min profit.";
         }
 
+        if (reason.StartsWith("Fee efficiency guard active.", StringComparison.Ordinal))
+        {
+            return "Fee efficiency guard active.";
+        }
+
         return reason;
     }
 
@@ -1031,6 +1051,77 @@ public sealed class FuturesBotWorker : BackgroundService
 
         return count;
     }
+
+    private static FuturesProfitEfficiencySnapshot BuildProfitEfficiency(IReadOnlyCollection<FuturesFillRecord> fills)
+    {
+        var filled = fills
+            .Where(fill => fill.Quantity > 0m)
+            .Where(fill => fill.Action != FuturesTradeAction.Funding)
+            .ToArray();
+        var closingFills = filled
+            .Where(fill => fill.Action is FuturesTradeAction.CloseLong or FuturesTradeAction.CloseShort or FuturesTradeAction.ReduceOnlyClose)
+            .ToArray();
+        var realizedTradingPnl = closingFills.Sum(fill => fill.RealizedPnl + fill.Fee - fill.Funding);
+        var feesPaid = filled.Sum(fill => fill.Fee);
+        var feeToTradingPnlPercent = CalculateFeeToTradingPnlPercent(feesPaid, realizedTradingPnl);
+        var status = ResolveProfitEfficiencyStatus(feeToTradingPnlPercent, realizedTradingPnl, feesPaid);
+        var minNetProfitMultiplier = status switch
+        {
+            "bad" => 2m,
+            "warning" => 1.5m,
+            _ => 1m
+        };
+
+        return new FuturesProfitEfficiencySnapshot(feeToTradingPnlPercent, status, minNetProfitMultiplier);
+    }
+
+    private static int ApplyProfitEfficiencyMaxOrdersCap(
+        int configuredMaxOrdersPerHour,
+        FuturesProfitEfficiencySnapshot profitEfficiency)
+    {
+        if (configuredMaxOrdersPerHour <= 0 || profitEfficiency.Status == "good")
+        {
+            return configuredMaxOrdersPerHour;
+        }
+
+        var cap = profitEfficiency.Status == "bad" ? 2 : 3;
+        return Math.Min(configuredMaxOrdersPerHour, cap);
+    }
+
+    private static decimal CalculateFeeToTradingPnlPercent(decimal feesPaid, decimal realizedTradingPnl)
+    {
+        if (feesPaid <= 0m)
+        {
+            return 0m;
+        }
+
+        if (realizedTradingPnl <= 0m)
+        {
+            return 100m;
+        }
+
+        return decimal.Round(feesPaid / realizedTradingPnl * 100m, 4, MidpointRounding.AwayFromZero);
+    }
+
+    private static string ResolveProfitEfficiencyStatus(decimal feeToTradingPnlPercent, decimal realizedTradingPnl, decimal feesPaid)
+    {
+        if (feesPaid <= 0m)
+        {
+            return "good";
+        }
+
+        if (realizedTradingPnl <= 0m || feeToTradingPnlPercent > 25m)
+        {
+            return "bad";
+        }
+
+        return feeToTradingPnlPercent >= 20m ? "warning" : "good";
+    }
+
+    private readonly record struct FuturesProfitEfficiencySnapshot(
+        decimal FeeToTradingPnlPercent,
+        string Status,
+        decimal MinNetProfitMultiplier);
 
     private FuturesRiskOptions ResolveProfileRiskOptions(FuturesBotSettings settings) => new()
     {

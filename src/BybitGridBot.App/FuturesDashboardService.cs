@@ -146,7 +146,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             UserStreamStatus = BuildUserStreamStatus(),
             RuntimeControls = runtimeControls,
             AggressiveMode = BuildAggressiveModeStatus(selectedSettings, recentFills, riskDecisions),
-            StrategyQuality = BuildStrategyQuality(selectedSettings, positionSnapshot, selectedInstrumentRules, riskDecisions),
+            StrategyQuality = BuildStrategyQuality(selectedSettings, positionSnapshot, selectedInstrumentRules, riskDecisions, recentFills),
             AutoRecommendation = MapAutoRecommendation(
                 recommendation,
                 selectedSettings,
@@ -1216,7 +1216,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         <table>
           <thead>
             <tr>
-              <th>Symbol</th><th>Score</th><th>Strategy</th><th>Fit</th><th>Entry</th><th>Price</th><th>ATR</th><th>6h Volume</th><th>Support / Resistance</th><th>Reasons</th><th>Action</th>
+              <th>Symbol</th><th>Actionability</th><th>Market</th><th>Strategy</th><th>Fit</th><th>Entry</th><th>Price</th><th>ATR</th><th>6h Volume</th><th>Support / Resistance</th><th>Reasons</th><th>Action</th>
             </tr>
           </thead>
           <tbody id="futuresMarketScanRows"></tbody>
@@ -1449,13 +1449,15 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
     };
     const renderFuturesMarketScanRows = (items) => {
       byId('futuresMarketScanRows').innerHTML = !items || items.length === 0
-        ? '<tr><td colspan="11">No futures scan results yet.</td></tr>'
+        ? '<tr><td colspan="12">No futures scan results yet.</td></tr>'
         : items.map(item => {
-            const canApply = item.settings && item.score >= 15;
+            const actionabilityScore = Number(item.actionabilityScore ?? item.score ?? 0);
+            const canApply = item.settings && actionabilityScore >= 15;
             return `
               <tr>
                 <td><strong>${escapeHtml(item.symbol)}</strong><br><span class="subtle">${escapeHtml(item.category)}</span></td>
-                <td><strong>${formatNumber(item.score)}</strong><br><span class="subtle">${escapeHtml(item.label)}</span></td>
+                <td><strong>${formatNumber(item.actionabilityScore)}</strong><br><span class="subtle">${escapeHtml(item.actionabilityLabel || item.label)}</span></td>
+                <td><strong>${formatNumber(item.marketFitScore || item.score)}</strong><br><span class="subtle">${escapeHtml(item.label)}</span></td>
                 <td>${escapeHtml(item.recommendedStrategy)}<br><span class="subtle">${escapeHtml(item.recommendedDirection)}</span></td>
                 <td title="Grid L/S ${formatNumber(item.gridLongFitScore)} / ${formatNumber(item.gridShortFitScore)}; Trend L/S ${formatNumber(item.trendLongFitScore)} / ${formatNumber(item.trendShortFitScore)}; BO/BD ${formatNumber(item.breakoutFitScore)} / ${formatNumber(item.breakdownFitScore)}">
                   <strong>${formatNumber(item.strategyFitScore)}</strong><br><span class="subtle">${escapeHtml(item.strategyFitName || 'Fit')}</span>
@@ -1558,6 +1560,8 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         ['Gross Loss', formatPnl(stats.grossLoss)],
         ['Trading PnL', formatPnl(stats.realizedTradingPnl)],
         ['Net PnL', formatPnl(stats.netPnl)],
+        ['Fee / Trading PnL', `${formatNumber(stats.feeToTradingPnlPercent)}%`],
+        ['Profit Efficiency', stats.profitEfficiencyStatus || '-'],
         ['Fees', formatPnl(-Math.abs(Number(stats.feesPaid || 0)))],
         ['Entry Fees', formatPnl(-Math.abs(Number(stats.entryFeesPaid || 0)))],
         ['Exit Fees', formatPnl(-Math.abs(Number(stats.exitFeesPaid || 0)))],
@@ -1828,6 +1832,8 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         ['Position Capacity', quality.positionCapacityStatus || '-'],
         ['Remaining Notional', formatNumber(quality.remainingNotionalUsdt)],
         ['Next Order', formatNumber(quality.nextOrderNotionalUsdt)],
+        ['Fee / Trading PnL', `${formatNumber(quality.feeToTradingPnlPercent)}%`],
+        ['Profit Efficiency', quality.profitEfficiencyStatus || '-'],
         ['No Trade', formatNumber(quality.noTradeReasonCount)],
         ['Filter Blocks', formatNumber(quality.strategyFilterBlockCount)],
         ['Risk Blocks', formatNumber(quality.riskBlockCount)],
@@ -2306,6 +2312,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         var realizedTradingPnl = closingFills.Sum(fill => fill.RealizedPnl + fill.Fee - fill.Funding);
         var fundingPaid = fillLedger.TotalFunding;
         var netPnl = realizedTradingPnl - fillLedger.FeesPaid - fundingPaid;
+        var feeToTradingPnlPercent = CalculateFeeToTradingPnlPercent(fillLedger.FeesPaid, realizedTradingPnl);
 
         return new FuturesPnlStatsView
         {
@@ -2314,6 +2321,8 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             NetPnl = netPnl,
             RealizedTradingPnl = realizedTradingPnl,
             FeesPaid = fillLedger.FeesPaid,
+            FeeToTradingPnlPercent = feeToTradingPnlPercent,
+            ProfitEfficiencyStatus = ResolveProfitEfficiencyStatus(feeToTradingPnlPercent, realizedTradingPnl, fillLedger.FeesPaid),
             EntryFeesPaid = entryFeesPaid,
             ExitFeesPaid = exitFeesPaid,
             FundingPaid = fundingPaid,
@@ -2328,6 +2337,56 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             AverageLoss = losses.Length == 0 ? 0m : losses.Average()
         };
     }
+
+    private static FuturesProfitEfficiencyView BuildProfitEfficiency(IReadOnlyCollection<FuturesFillRecord> fills)
+    {
+        var filled = fills
+            .Where(fill => fill.Quantity > 0m)
+            .Where(fill => fill.Action != FuturesTradeAction.Funding)
+            .ToArray();
+        var closingFills = filled
+            .Where(fill => fill.Action is FuturesTradeAction.CloseLong or FuturesTradeAction.CloseShort or FuturesTradeAction.ReduceOnlyClose)
+            .ToArray();
+        var realizedTradingPnl = closingFills.Sum(fill => fill.RealizedPnl + fill.Fee - fill.Funding);
+        var feesPaid = filled.Sum(fill => fill.Fee);
+        var feeToTradingPnlPercent = CalculateFeeToTradingPnlPercent(feesPaid, realizedTradingPnl);
+
+        return new FuturesProfitEfficiencyView(
+            feeToTradingPnlPercent,
+            ResolveProfitEfficiencyStatus(feeToTradingPnlPercent, realizedTradingPnl, feesPaid));
+    }
+
+    private static decimal CalculateFeeToTradingPnlPercent(decimal feesPaid, decimal realizedTradingPnl)
+    {
+        if (feesPaid <= 0m)
+        {
+            return 0m;
+        }
+
+        if (realizedTradingPnl <= 0m)
+        {
+            return 100m;
+        }
+
+        return decimal.Round(feesPaid / realizedTradingPnl * 100m, 4, MidpointRounding.AwayFromZero);
+    }
+
+    private static string ResolveProfitEfficiencyStatus(decimal feeToTradingPnlPercent, decimal realizedTradingPnl, decimal feesPaid)
+    {
+        if (feesPaid <= 0m)
+        {
+            return "good";
+        }
+
+        if (realizedTradingPnl <= 0m || feeToTradingPnlPercent > 25m)
+        {
+            return "bad";
+        }
+
+        return feeToTradingPnlPercent >= 20m ? "warning" : "good";
+    }
+
+    private readonly record struct FuturesProfitEfficiencyView(decimal FeeToTradingPnlPercent, string Status);
 
     private FuturesSoakStatusView BuildTestnetSoakStatus(
         FuturesPositionView position,
@@ -2614,7 +2673,8 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         FuturesBotSettings settings,
         FuturesPositionSnapshot position,
         FuturesInstrumentRules? instrument,
-        IReadOnlyCollection<FuturesRiskDecisionRecord> riskDecisions)
+        IReadOnlyCollection<FuturesRiskDecisionRecord> riskDecisions,
+        IReadOnlyCollection<FuturesFillRecord> fills)
     {
         var noTradeDecisions = riskDecisions
             .Where(decision => IsNoTradeDecision(decision.Source))
@@ -2632,6 +2692,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             .OrderByDescending(decision => decision.CreatedAt)
             .FirstOrDefault();
         var positionCapacity = BuildPositionCapacity(settings, position, instrument);
+        var efficiency = BuildProfitEfficiency(fills);
 
         return new FuturesStrategyQualityView
         {
@@ -2651,9 +2712,12 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             CurrentActiveBlockSource = currentActiveBlock?.Source ?? "-",
             CurrentActiveBlockAt = currentActiveBlock?.CreatedAt,
             LastNoTradeReason = lastHistoricalNoTrade?.Reason ?? "-",
-            LastHistoricalNoTradeReason = lastHistoricalNoTrade?.Reason ?? "-"
+            LastHistoricalNoTradeReason = lastHistoricalNoTrade?.Reason ?? "-",
+            FeeToTradingPnlPercent = efficiency.FeeToTradingPnlPercent,
+            ProfitEfficiencyStatus = efficiency.Status
         };
     }
+
 
     private static bool IsCurrentActiveBlock(FuturesRiskDecisionRecord decision) =>
         !decision.IsAllowed &&

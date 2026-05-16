@@ -512,6 +512,12 @@ public sealed class FuturesMarketScanItem
 
     public decimal Score { get; init; }
 
+    public decimal MarketFitScore { get; init; }
+
+    public decimal ActionabilityScore { get; init; }
+
+    public required string ActionabilityLabel { get; init; }
+
     public required string Label { get; init; }
 
     public required string RecommendedStrategy { get; init; }
@@ -790,6 +796,10 @@ public sealed class FuturesStrategyQualityView
     public string LastNoTradeReason { get; init; } = "-";
 
     public string LastHistoricalNoTradeReason { get; init; } = "-";
+
+    public decimal FeeToTradingPnlPercent { get; init; }
+
+    public string ProfitEfficiencyStatus { get; init; } = "good";
 }
 
 public sealed class FuturesOrderView
@@ -863,6 +873,10 @@ public sealed class FuturesPnlStatsView
     public decimal RealizedTradingPnl { get; init; }
 
     public decimal FeesPaid { get; init; }
+
+    public decimal FeeToTradingPnlPercent { get; init; }
+
+    public string ProfitEfficiencyStatus { get; init; } = "good";
 
     public decimal EntryFeesPaid { get; init; }
 
