@@ -44,6 +44,19 @@ public sealed class FuturesAutoConfigRecommenderTests
     }
 
     [Fact]
+    public void Recommend_SelectsShortTrend_WhenDirectionAllowsShorts()
+    {
+        var recommendation = new FuturesAutoConfigRecommender().Recommend(
+            Settings(FuturesDirection.ShortOnly),
+            Candles(start: 50000m, step: -60m, count: 80),
+            hasOpenPosition: false);
+
+        Assert.Equal(FuturesStrategyType.TrendFollowShortOnly, recommendation.StrategyType);
+        Assert.Equal(FuturesDirection.ShortOnly, recommendation.Direction);
+        Assert.Contains("shortOnly", recommendation.StrategyConfigJson, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Recommend_DoesNotCompoundProfileLimits_AfterApply()
     {
         var recommender = new FuturesAutoConfigRecommender();
@@ -75,7 +88,7 @@ public sealed class FuturesAutoConfigRecommenderTests
         Assert.Equal(first.MaxMarginUsdt, second.MaxMarginUsdt);
     }
 
-    private static FuturesBotSettings Settings() => new()
+    private static FuturesBotSettings Settings(FuturesDirection direction = FuturesDirection.LongOnly) => new()
     {
         Symbol = "BTCUSDT",
         Category = "linear",
@@ -83,7 +96,7 @@ public sealed class FuturesAutoConfigRecommenderTests
         Leverage = 2m,
         MarginMode = FuturesMarginMode.Isolated,
         PositionMode = FuturesPositionMode.OneWay,
-        Direction = FuturesDirection.LongOnly,
+        Direction = direction,
         MaxNotionalUsdt = 100m,
         MaxMarginUsdt = 50m,
         StopLossPercent = 2m,
