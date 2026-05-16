@@ -2483,6 +2483,7 @@ public sealed class GridBotWorker : BackgroundService
         }
 
         var remainingOrders = activeOrders.Where(order => order.IsActive).ToArray();
+        remainingOrders = (await CleanupBadUnparentedSellOrdersAsync(profile, state, remainingOrders, cancellationToken)).ToArray();
         remainingOrders = (await CancelUnprofitableSellOrdersAsync(profile, state, remainingOrders, cancellationToken)).ToArray();
 
         var wallet = _appOptions.TradingMode == TradingMode.Paper
@@ -3521,7 +3522,8 @@ public sealed class GridBotWorker : BackgroundService
         IReadOnlyCollection<GridOrder> activeOrders,
         CancellationToken cancellationToken)
     {
-        var cleanedOrders = await CancelUnprofitableSellOrdersAsync(profile, state, activeOrders, cancellationToken);
+        var cleanedOrders = await CleanupBadUnparentedSellOrdersAsync(profile, state, activeOrders, cancellationToken);
+        cleanedOrders = await CancelUnprofitableSellOrdersAsync(profile, state, cleanedOrders, cancellationToken);
         cleanedOrders = await CancelCrossSideOrdersAtSameLevelAsync(cleanedOrders, cancellationToken);
         cleanedOrders = await CancelGridBuyOrdersBelowExpectedProfitAsync(levels, cleanedOrders, cancellationToken);
         cleanedOrders = await ReduceBuyExposureAfterDailyTakeProfitAsync(state, cleanedOrders, cancellationToken);
@@ -3571,7 +3573,8 @@ public sealed class GridBotWorker : BackgroundService
         IReadOnlyCollection<GridOrder> activeOrders,
         CancellationToken cancellationToken)
     {
-        var cleanedOrders = await CancelCrossSideOrdersAtSameLevelAsync(activeOrders, cancellationToken);
+        var cleanedOrders = await CleanupBadUnparentedSellOrdersAsync(ResolveCurrentProfile(), state, activeOrders, cancellationToken);
+        cleanedOrders = await CancelCrossSideOrdersAtSameLevelAsync(cleanedOrders, cancellationToken);
         cleanedOrders = await ReduceBuyExposureAfterDailyTakeProfitAsync(state, cleanedOrders, cancellationToken);
 
         return cleanedOrders.ToArray();
@@ -3582,10 +3585,47 @@ public sealed class GridBotWorker : BackgroundService
         IReadOnlyCollection<GridOrder> activeOrders,
         CancellationToken cancellationToken)
     {
-        var cleanedOrders = await CancelCrossSideOrdersAtSameLevelAsync(activeOrders, cancellationToken);
+        var cleanedOrders = await CleanupBadUnparentedSellOrdersAsync(ResolveCurrentProfile(), state, activeOrders, cancellationToken);
+        cleanedOrders = await CancelCrossSideOrdersAtSameLevelAsync(cleanedOrders, cancellationToken);
         cleanedOrders = await ReduceBuyExposureAfterDailyTakeProfitAsync(state, cleanedOrders, cancellationToken);
 
         return cleanedOrders.ToArray();
+    }
+
+    private async Task<IReadOnlyCollection<GridOrder>> CleanupBadUnparentedSellOrdersAsync(
+        GridBotSettings? profile,
+        BotState state,
+        IReadOnlyCollection<GridOrder> activeOrders,
+        CancellationToken cancellationToken)
+    {
+        foreach (var order in activeOrders
+                     .Where(order => order.IsActive &&
+                         order.Side == TradeSide.Sell &&
+                         string.IsNullOrWhiteSpace(order.ParentOrderLinkId))
+                     .ToArray())
+        {
+            if (IsSignalOrder(order) || IsTrendOrder(order))
+            {
+                continue;
+            }
+
+            var remainingQuantity = order.Quantity - order.FilledQuantity;
+            if (remainingQuantity <= 0m ||
+                await HasStrictUnparentedSellProfitAsync(state, order.Price, remainingQuantity, cancellationToken))
+            {
+                continue;
+            }
+
+            await CancelManagedOrderAsync(order, cancellationToken);
+            var reason = $"Cancelled unparented sell {order.OrderLinkId} at {order.Price}: strict profit check failed.";
+            await RecordNoTradeReasonAsync(profile, NoTradeReason.UnparentedSellCleanup, reason, cancellationToken);
+            _logger.LogInformation(
+                "Unparented sell order {OrderLinkId} at {Price} cancelled by live cleanup because strict profit check failed.",
+                order.OrderLinkId,
+                order.Price);
+        }
+
+        return activeOrders.Where(order => order.IsActive).ToArray();
     }
 
     private async Task<IReadOnlyCollection<GridOrder>> ReduceBuyExposureAfterDailyTakeProfitAsync(
