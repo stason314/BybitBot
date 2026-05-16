@@ -44,7 +44,7 @@ public sealed class FuturesAutoConfigRecommender
 
         var recommendedLeverage = RecommendLeverage(currentSettings.Leverage, atrPercent);
         var stopLossPercent = RecommendStopLoss(atrPercent);
-        var takeProfitPercent = decimal.Max(stopLossPercent * MinimumRiskRewardRatio, currentSettings.TakeProfitPercent);
+        var takeProfitPercent = stopLossPercent * MinimumRiskRewardRatio;
         var exposureMultiplier = RecommendExposureMultiplier(atrPercent);
         var modeEntryMultiplier = 1m;
         var maxNotional = decimal.Max(1m, currentSettings.MaxNotionalUsdt);

@@ -1251,6 +1251,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
           <div><label for="positionMode">Position Mode</label><select id="positionMode" name="positionMode"><option value="oneway">One-way</option></select></div>
           <div><label for="maxNotionalUsdt">Max Notional USDT</label><input id="maxNotionalUsdt" name="maxNotionalUsdt" type="number" step="0.00000001" required /></div>
           <div><label for="maxMarginUsdt">Max Margin USDT</label><input id="maxMarginUsdt" name="maxMarginUsdt" type="number" step="0.00000001" required /></div>
+          <div><label for="rrPreset">RR Preset</label><select id="rrPreset" name="rrPreset"><option value="2/6">Conservative 2/6</option><option value="3/9">Balanced 3/9</option><option value="10/30">Swing 10/30</option><option value="custom">Custom</option></select></div>
           <div><label for="stopLossPercent">Stop Loss %</label><input id="stopLossPercent" name="stopLossPercent" type="number" step="0.0001" required /></div>
           <div><label for="takeProfitPercent">Take Profit %</label><input id="takeProfitPercent" name="takeProfitPercent" type="number" step="0.0001" required /></div>
           <div><label for="liquidationBufferPercent">Liquidation Buffer %</label><input id="liquidationBufferPercent" name="liquidationBufferPercent" type="number" step="0.0001" required /></div>
@@ -1304,6 +1305,11 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
   <script>
     const byId = (id) => document.getElementById(id);
     const fields = ['symbol','category','enabled','strategyType','strategyConfigJson','leverage','marginMode','positionMode','direction','maxNotionalUsdt','maxMarginUsdt','stopLossPercent','takeProfitPercent','liquidationBufferPercent','reduceOnlyEnabled','aggressiveModeEnabled','aggressiveModeKind','aggressiveEntryMultiplier','aggressiveMaxOrdersPerHour','aggressiveMinSecondsBetweenEntries','aggressiveMaxConsecutiveLosses'];
+    const rrPresets = {
+      '2/6': { stopLossPercent: 2, takeProfitPercent: 6 },
+      '3/9': { stopLossPercent: 3, takeProfitPercent: 9 },
+      '10/30': { stopLossPercent: 10, takeProfitPercent: 30 }
+    };
     const defaults = {
       symbol: 'BTCUSDT',
       category: 'linear',
@@ -1371,6 +1377,25 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
       controlStatusKind = kind || null;
     };
     const clearControlStatus = () => setControlStatus('', '', null);
+    const resolveRrPreset = (stopLossPercent, takeProfitPercent) => {
+      const sl = Number(stopLossPercent || 0);
+      const tp = Number(takeProfitPercent || 0);
+      const match = Object.entries(rrPresets).find(([, preset]) =>
+        Math.abs(preset.stopLossPercent - sl) < 0.0001 &&
+        Math.abs(preset.takeProfitPercent - tp) < 0.0001);
+      return match ? match[0] : 'custom';
+    };
+    const updateStrategyRiskConfig = () => {
+      const raw = byId('strategyConfigJson').value || '{}';
+      try {
+        const config = JSON.parse(raw);
+        config.stopLossPercent = Number(byId('stopLossPercent').value || 0);
+        config.takeProfitPercent = Number(byId('takeProfitPercent').value || 0);
+        byId('strategyConfigJson').value = JSON.stringify(config);
+      } catch {
+        // Keep invalid JSON untouched so validation can report the real error on save.
+      }
+    };
     const updateForm = (settings) => {
       byId('symbol').value = settings.symbol;
       byId('category').value = settings.category;
@@ -1385,6 +1410,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
       byId('maxMarginUsdt').value = settings.maxMarginUsdt;
       byId('stopLossPercent').value = settings.stopLossPercent;
       byId('takeProfitPercent').value = settings.takeProfitPercent;
+      byId('rrPreset').value = resolveRrPreset(settings.stopLossPercent, settings.takeProfitPercent);
       byId('liquidationBufferPercent').value = settings.liquidationBufferPercent;
       byId('reduceOnlyEnabled').value = String(settings.reduceOnlyEnabled);
       byId('aggressiveModeEnabled').value = String(settings.aggressiveModeEnabled);
@@ -1890,7 +1916,24 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
       }
     };
 
-    fields.forEach(id => byId(id).addEventListener('input', () => { dirty = true; }));
+    fields.forEach(id => byId(id).addEventListener('input', () => {
+      dirty = true;
+      if (id === 'stopLossPercent' || id === 'takeProfitPercent') {
+        byId('rrPreset').value = resolveRrPreset(byId('stopLossPercent').value, byId('takeProfitPercent').value);
+        updateStrategyRiskConfig();
+      }
+    }));
+    byId('rrPreset').addEventListener('change', () => {
+      const preset = rrPresets[byId('rrPreset').value];
+      if (!preset) {
+        return;
+      }
+
+      byId('stopLossPercent').value = preset.stopLossPercent;
+      byId('takeProfitPercent').value = preset.takeProfitPercent;
+      updateStrategyRiskConfig();
+      dirty = true;
+    });
     const saveAggressiveSettings = async () => {
       if (!latest?.settings) return;
       const payload = {
