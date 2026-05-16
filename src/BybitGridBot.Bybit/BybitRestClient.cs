@@ -57,7 +57,33 @@ public sealed class BybitRestClient : IBybitRestClient
             ticker.Symbol,
             BybitModelMapper.ParseDecimal(ticker.LastPrice),
             BybitModelMapper.ParseDecimal(ticker.Bid1Price),
-            BybitModelMapper.ParseDecimal(ticker.Ask1Price));
+            BybitModelMapper.ParseDecimal(ticker.Ask1Price),
+            BybitModelMapper.ParseDecimal(ticker.Volume24h),
+            BybitModelMapper.ParseDecimal(ticker.Turnover24h));
+    }
+
+    public async Task<IReadOnlyList<BybitTicker>> GetTickersAsync(string category, CancellationToken cancellationToken)
+    {
+        var result = await SendAsync<BybitTickersResult>(
+            HttpMethod.Get,
+            "/v5/market/tickers",
+            false,
+            new Dictionary<string, string?>
+            {
+                ["category"] = category
+            },
+            null,
+            cancellationToken);
+
+        return result.List
+            .Select(static ticker => new BybitTicker(
+                ticker.Symbol,
+                BybitModelMapper.ParseDecimal(ticker.LastPrice),
+                BybitModelMapper.ParseDecimal(ticker.Bid1Price),
+                BybitModelMapper.ParseDecimal(ticker.Ask1Price),
+                BybitModelMapper.ParseDecimal(ticker.Volume24h),
+                BybitModelMapper.ParseDecimal(ticker.Turnover24h)))
+            .ToArray();
     }
 
     public async Task<BybitWalletBalance> GetWalletBalanceAsync(CancellationToken cancellationToken, params string[] coins)
@@ -338,6 +364,9 @@ public sealed class BybitRestClient : IBybitRestClient
         return new BybitInstrumentInfo
         {
             Symbol = item.Symbol,
+            Status = item.Status,
+            QuoteCoin = item.QuoteCoin,
+            ContractType = item.ContractType,
             TickSize = BybitModelMapper.ParseDecimal(item.PriceFilter.TickSize),
             QtyStep = BybitModelMapper.ParseDecimal(item.LotSizeFilter.QtyStep),
             BasePrecision = BybitModelMapper.ParseDecimal(item.LotSizeFilter.BasePrecision),
@@ -347,6 +376,49 @@ public sealed class BybitRestClient : IBybitRestClient
                 BybitModelMapper.ParseDecimal(item.LotSizeFilter.MinOrderAmt),
                 BybitModelMapper.ParseDecimal(item.LotSizeFilter.MinNotionalValue))
         };
+    }
+
+    public async Task<IReadOnlyList<BybitInstrumentInfo>> GetInstrumentsAsync(string category, CancellationToken cancellationToken)
+    {
+        var instruments = new List<BybitInstrumentInfo>();
+        string? cursor = null;
+
+        do
+        {
+            var result = await SendAsync<BybitInstrumentsResult>(
+                HttpMethod.Get,
+                "/v5/market/instruments-info",
+                false,
+                new Dictionary<string, string?>
+                {
+                    ["category"] = category,
+                    ["limit"] = "1000",
+                    ["cursor"] = cursor
+                },
+                null,
+                cancellationToken);
+
+            instruments.AddRange(result.List.Select(static item => new BybitInstrumentInfo
+            {
+                Symbol = item.Symbol,
+                Status = item.Status,
+                QuoteCoin = item.QuoteCoin,
+                ContractType = item.ContractType,
+                TickSize = BybitModelMapper.ParseDecimal(item.PriceFilter.TickSize),
+                QtyStep = BybitModelMapper.ParseDecimal(item.LotSizeFilter.QtyStep),
+                BasePrecision = BybitModelMapper.ParseDecimal(item.LotSizeFilter.BasePrecision),
+                QuotePrecision = BybitModelMapper.ParseDecimal(item.LotSizeFilter.QuotePrecision),
+                MinOrderQty = BybitModelMapper.ParseDecimal(item.LotSizeFilter.MinOrderQty),
+                MinOrderAmount = decimal.Max(
+                    BybitModelMapper.ParseDecimal(item.LotSizeFilter.MinOrderAmt),
+                    BybitModelMapper.ParseDecimal(item.LotSizeFilter.MinNotionalValue))
+            }));
+
+            cursor = string.IsNullOrWhiteSpace(result.NextPageCursor) ? null : result.NextPageCursor;
+        }
+        while (!string.IsNullOrWhiteSpace(cursor));
+
+        return instruments;
     }
 
     private async Task<T> SendAsync<T>(

@@ -7,6 +7,7 @@ namespace BybitGridBot.Bybit;
 public interface IBybitRestClient
 {
     Task<BybitTicker> GetTickerAsync(string category, string symbol, CancellationToken cancellationToken);
+    Task<IReadOnlyList<BybitTicker>> GetTickersAsync(string category, CancellationToken cancellationToken);
     Task<BybitWalletBalance> GetWalletBalanceAsync(CancellationToken cancellationToken, params string[] coins);
     Task<BybitFeeRate> GetFeeRateAsync(string category, string symbol, CancellationToken cancellationToken);
     Task<BybitOrderAck> CreateOrderAsync(BybitCreateOrderRequest request, CancellationToken cancellationToken);
@@ -16,6 +17,7 @@ public interface IBybitRestClient
     Task<IReadOnlyList<BybitExecutionSnapshot>> GetExecutionsAsync(string category, string symbol, string? orderLinkId, string? execType, CancellationToken cancellationToken);
     Task<IReadOnlyList<Candle>> GetKlinesAsync(string category, string symbol, string interval, int limit, CancellationToken cancellationToken);
     Task<BybitInstrumentInfo> GetInstrumentInfoAsync(string category, string symbol, CancellationToken cancellationToken);
+    Task<IReadOnlyList<BybitInstrumentInfo>> GetInstrumentsAsync(string category, CancellationToken cancellationToken);
     Task<BybitPositionSnapshot?> GetPositionAsync(string category, string symbol, CancellationToken cancellationToken);
     Task SetLeverageAsync(BybitSetLeverageRequest request, CancellationToken cancellationToken);
     Task SwitchIsolatedMarginAsync(BybitSwitchIsolatedMarginRequest request, CancellationToken cancellationToken);
@@ -166,7 +168,13 @@ public sealed class BybitSetTradingStopRequest
     public string TakeProfitStopLossMode { get; init; } = "Full";
 }
 
-public sealed record BybitTicker(string Symbol, decimal LastPrice, decimal Bid1Price, decimal Ask1Price);
+public sealed record BybitTicker(
+    string Symbol,
+    decimal LastPrice,
+    decimal Bid1Price,
+    decimal Ask1Price,
+    decimal Volume24h = 0m,
+    decimal Turnover24h = 0m);
 
 public sealed class BybitWalletBalance
 {
@@ -296,6 +304,12 @@ public sealed class BybitInstrumentInfo
 {
     public string Symbol { get; init; } = string.Empty;
 
+    public string Status { get; init; } = string.Empty;
+
+    public string QuoteCoin { get; init; } = string.Empty;
+
+    public string ContractType { get; init; } = string.Empty;
+
     public decimal TickSize { get; init; }
 
     public decimal QtyStep { get; init; }
@@ -358,6 +372,12 @@ internal sealed class BybitTickerItem
 
     [JsonPropertyName("ask1Price")]
     public string Ask1Price { get; init; } = "0";
+
+    [JsonPropertyName("volume24h")]
+    public string Volume24h { get; init; } = "0";
+
+    [JsonPropertyName("turnover24h")]
+    public string Turnover24h { get; init; } = "0";
 }
 
 internal sealed class BybitWalletBalanceResult
@@ -605,12 +625,24 @@ internal sealed class BybitInstrumentsResult
 {
     [JsonPropertyName("list")]
     public List<BybitInstrumentItem> List { get; init; } = [];
+
+    [JsonPropertyName("nextPageCursor")]
+    public string NextPageCursor { get; init; } = string.Empty;
 }
 
 internal sealed class BybitInstrumentItem
 {
     [JsonPropertyName("symbol")]
     public string Symbol { get; init; } = string.Empty;
+
+    [JsonPropertyName("status")]
+    public string Status { get; init; } = string.Empty;
+
+    [JsonPropertyName("quoteCoin")]
+    public string QuoteCoin { get; init; } = string.Empty;
+
+    [JsonPropertyName("contractType")]
+    public string ContractType { get; init; } = string.Empty;
 
     [JsonPropertyName("priceFilter")]
     public BybitPriceFilter PriceFilter { get; init; } = new();

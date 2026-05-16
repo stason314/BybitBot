@@ -1579,6 +1579,36 @@ public sealed class GridDashboardService : IGridDashboardService
       background: rgba(177,54,34,0.14);
       color: var(--danger);
     }
+    .scan-controls {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: end;
+      gap: 10px;
+    }
+    .scan-controls label {
+      margin-bottom: 4px;
+    }
+    .scan-controls select,
+    .scan-controls input {
+      min-width: 120px;
+      padding: 10px 12px;
+      border-radius: 12px;
+      font-size: 13px;
+    }
+    .score-label {
+      display: inline-flex;
+      align-items: center;
+      padding: 6px 9px;
+      border-radius: 999px;
+      background: rgba(29,35,31,0.08);
+      font-weight: 800;
+      font-size: 12px;
+      white-space: nowrap;
+    }
+    .score-label.hot { background: rgba(23,102,78,0.14); color: var(--accent-2); }
+    .score-label.good { background: rgba(198,103,47,0.14); color: var(--accent); }
+    .score-label.avoid,
+    .score-label.no_trade { background: rgba(177,54,34,0.14); color: var(--danger); }
     .pnl.positive { color: var(--accent-2); font-weight: 700; }
     .pnl.negative { color: var(--danger); font-weight: 700; }
     .pill {
@@ -1735,6 +1765,40 @@ public sealed class GridDashboardService : IGridDashboardService
             </tr>
           </thead>
           <tbody id="configSummaryRows"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel section" style="margin-bottom:20px;">
+      <div class="section-head">
+        <div>
+          <h2>Market Scanner</h2>
+          <div class="subtle">Ranks tradable USDT instruments from recent 5m candles and prepares a config from the recommendation.</div>
+        </div>
+        <div class="scan-controls">
+          <div>
+            <label for="marketScanCategory">Category</label>
+            <select id="marketScanCategory">
+              <option value="spot">spot</option>
+              <option value="linear">linear futures</option>
+            </select>
+          </div>
+          <div>
+            <label for="marketScanLimit">Max pairs</label>
+            <input id="marketScanLimit" type="number" min="10" max="500" step="10" value="120" />
+          </div>
+          <button type="button" class="secondary-button compact-button" id="runMarketScan">Scan Market</button>
+        </div>
+      </div>
+      <div class="status" id="marketScanStatus">Scanner has not run yet.</div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Symbol</th><th>Score</th><th>Strategy</th><th>Entry</th><th>Price</th><th>Spread</th><th>ATR</th><th>6h Volume</th><th>Support / Resistance</th><th>Reasons</th><th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="marketScanRows"></tbody>
         </table>
       </div>
     </section>
@@ -1909,6 +1973,7 @@ public sealed class GridDashboardService : IGridDashboardService
     let latestFullDashboardData = null;
     let settingsFormDirty = false;
     let dashboardRequestSeq = 0;
+    let latestMarketScanData = null;
 
     const isSettingsFormDirty = () => settingsFormDirty;
     const setSettingsFormDirty = (isDirty) => {
@@ -2136,6 +2201,98 @@ public sealed class GridDashboardService : IGridDashboardService
       const snapshot = readSettingsFormSnapshot();
       delete snapshot.isDirty;
       return snapshot;
+    };
+    const renderMarketScanRows = (items) => {
+      byId('marketScanRows').innerHTML = !items || items.length === 0
+        ? `<tr><td colspan="11">No scan results yet.</td></tr>`
+        : items.map(item => {
+            const labelClass = String(item.label || '').toLowerCase();
+            const canCreate = String(item.category || '').toLowerCase() === 'spot' && item.score >= 15;
+            return `
+              <tr>
+                <td>
+                  <div class="config-symbol">
+                    <strong>${escapeHtml(item.symbol)}</strong>
+                    <span>${escapeHtml(item.category)}</span>
+                  </div>
+                </td>
+                <td>
+                  <strong>${formatNumber(item.score)}</strong>
+                  <span class="score-label ${escapeHtml(labelClass)}">${escapeHtml(item.label)}</span>
+                </td>
+                <td>${escapeHtml(item.recommendedStrategy)}</td>
+                <td>${formatNumber(item.recommendedOrderSizeUsdt)} USDT</td>
+                <td>${formatNumber(item.lastPrice)}</td>
+                <td>${formatNumber(item.spreadPercent)}%</td>
+                <td>${formatNumber(item.atrPercent)}%</td>
+                <td>${formatNumber(item.volume6hUsdt)}</td>
+                <td>${formatNumber(item.support)} / ${formatNumber(item.resistance)}</td>
+                <td>${escapeHtml((item.reasons || []).join('; '))}</td>
+                <td>
+                  <button type="button" class="secondary-button compact-button" data-action="create-scan-profile" data-symbol="${escapeHtml(item.symbol)}" ${canCreate ? '' : 'disabled'}>${canCreate ? 'Create Config' : 'View Only'}</button>
+                </td>
+              </tr>`;
+          }).join('');
+    };
+    const runMarketScan = async () => {
+      const status = byId('marketScanStatus');
+      const category = byId('marketScanCategory').value;
+      const limit = Number(byId('marketScanLimit').value || 120);
+      status.className = 'status';
+      status.textContent = `Scanning ${category} market...`;
+      setDashboardLoading(true, `Scanning ${category} market...`);
+      await waitForPaint();
+      try {
+        const response = await fetch(`/api/market-scan?category=${encodeURIComponent(category)}&limit=${encodeURIComponent(limit)}`, { cache: 'no-store' });
+        const result = await response.json();
+        if (!response.ok) {
+          throw new Error(result?.errors?.join(' | ') || result?.message || 'Market scan failed.');
+        }
+
+        latestMarketScanData = result;
+        renderMarketScanRows(result.items || []);
+        status.className = 'status ok';
+        status.textContent = `Scanned ${result.scannedCount}/${result.candidateCount} ${result.category} instruments. Failed: ${result.failedCount}.`;
+      } finally {
+        setDashboardLoading(false);
+      }
+    };
+    const createProfileFromMarketScan = async (symbol) => {
+      const item = latestMarketScanData?.items?.find(row => String(row.symbol || '').toUpperCase() === String(symbol || '').toUpperCase());
+      const status = byId('marketScanStatus');
+      if (!item?.settings) {
+        status.className = 'status error';
+        status.textContent = `No scan settings found for ${symbol}.`;
+        return;
+      }
+
+      if (String(item.category || '').toLowerCase() !== 'spot') {
+        status.className = 'status error';
+        status.textContent = 'Linear futures scan rows are view-only on the spot dashboard.';
+        return;
+      }
+
+      status.className = 'status';
+      status.textContent = `Creating config for ${item.symbol}...`;
+      const response = await fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(item.settings)
+      });
+      const result = await response.json();
+      status.className = `status ${response.ok ? 'ok' : 'error'}`;
+      status.textContent = response.ok ? result.message : (result.errors?.join(' | ') || result.message || 'Failed to create config.');
+      if (response.ok) {
+        selectedSymbol = (result.symbol || item.symbol).toUpperCase();
+        isCreatingNewProfile = false;
+        updateSelectedSymbolUrl();
+        setSettingsFormDirty(false);
+        await loadDashboard({ forceSettingsRefresh: true, fast: true, loadingText: `Opening ${selectedSymbol}...` });
+        loadDashboard({ forceSettingsRefresh: true, background: true, loadingText: `Loading ${selectedSymbol} analytics...` }).catch((error) => {
+          byId('formStatus').className = 'status error';
+          byId('formStatus').textContent = error.message;
+        });
+      }
     };
     const parseStrategyConfigSnapshot = (strategyConfigJson) => {
       try {
@@ -2651,6 +2808,24 @@ public sealed class GridDashboardService : IGridDashboardService
       resetSpotStats().catch((error) => {
         byId('formStatus').className = 'status error';
         byId('formStatus').textContent = error.message;
+      });
+    });
+    byId('runMarketScan').addEventListener('click', () => {
+      runMarketScan().catch((error) => {
+        byId('marketScanStatus').className = 'status error';
+        byId('marketScanStatus').textContent = error.message;
+        setDashboardLoading(false);
+      });
+    });
+    byId('marketScanRows').addEventListener('click', (event) => {
+      const button = event.target.closest('[data-action="create-scan-profile"]');
+      if (!button) {
+        return;
+      }
+
+      createProfileFromMarketScan(button.dataset.symbol).catch((error) => {
+        byId('marketScanStatus').className = 'status error';
+        byId('marketScanStatus').textContent = error.message;
       });
     });
     byId('refreshAutoRecommendation').addEventListener('click', async () => {
