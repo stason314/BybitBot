@@ -12,7 +12,7 @@ internal static class FuturesStrategyIntentFactory
     {
         var price = instrument.RoundPrice(currentPrice);
         var notional = ResolveEntryNotional(settings);
-        var quantity = instrument.RoundQuantity(notional / price);
+        var quantity = ResolveEntryQuantity(notional, price, instrument);
         var stopLossPrice = instrument.RoundPrice(price * (1m - settings.StopLossPercent / 100m));
         var takeProfitPrice = instrument.RoundPrice(price * (1m + settings.TakeProfitPercent / 100m));
         return new FuturesTradeIntent
@@ -57,7 +57,7 @@ internal static class FuturesStrategyIntentFactory
     {
         var price = instrument.RoundPrice(currentPrice);
         var notional = ResolveEntryNotional(settings);
-        var quantity = instrument.RoundQuantity(notional / price);
+        var quantity = ResolveEntryQuantity(notional, price, instrument);
         var stopLossPrice = instrument.RoundPrice(price * (1m + settings.StopLossPercent / 100m));
         var takeProfitPrice = instrument.RoundPrice(price * (1m - settings.TakeProfitPercent / 100m));
         return new FuturesTradeIntent
@@ -132,5 +132,31 @@ internal static class FuturesStrategyIntentFactory
         }
 
         return fallback;
+    }
+
+    private static decimal ResolveEntryQuantity(
+        decimal requestedNotional,
+        decimal price,
+        FuturesInstrumentRules instrument)
+    {
+        if (price <= 0m)
+        {
+            return 0m;
+        }
+
+        var requestedQuantity = requestedNotional / price;
+        var minimumQuantity = instrument.MinOrderQty;
+        if (instrument.MinOrderAmount > 0m)
+        {
+            minimumQuantity = decimal.Max(minimumQuantity, instrument.MinOrderAmount / price);
+        }
+
+        return RoundQuantityUp(decimal.Max(requestedQuantity, minimumQuantity), instrument);
+    }
+
+    private static decimal RoundQuantityUp(decimal quantity, FuturesInstrumentRules instrument)
+    {
+        var step = instrument.QtyStep > 0m ? instrument.QtyStep : instrument.BasePrecision;
+        return step > 0m ? Math.Ceiling(quantity / step) * step : quantity;
     }
 }

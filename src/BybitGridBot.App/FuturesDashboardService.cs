@@ -1860,16 +1860,16 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
     {
         var cutoff = DateTimeOffset.UtcNow.AddHours(-1);
         var entriesLastHour = fills.Count(fill =>
-            fill.Action == FuturesTradeAction.OpenLong &&
+            fill.Action is FuturesTradeAction.OpenLong or FuturesTradeAction.OpenShort &&
             fill.CreatedAt >= cutoff);
         var consecutiveLosses = CountConsecutiveLosingExits(fills);
         var lastBlock = riskDecisions
             .Where(decision => !decision.IsAllowed &&
-                !string.Equals(decision.Source, "AggressiveNoTrade", StringComparison.OrdinalIgnoreCase))
+                !IsNoTradeDecision(decision.Source))
             .OrderByDescending(decision => decision.CreatedAt)
             .FirstOrDefault();
         var lastNoTrade = riskDecisions
-            .Where(decision => string.Equals(decision.Source, "AggressiveNoTrade", StringComparison.OrdinalIgnoreCase))
+            .Where(decision => IsNoTradeDecision(decision.Source))
             .OrderByDescending(decision => decision.CreatedAt)
             .FirstOrDefault();
         return new FuturesAggressiveModeView
@@ -1895,7 +1895,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         var count = 0;
         foreach (var fill in fills.OrderByDescending(fill => fill.CreatedAt))
         {
-            if (fill.Action is not (FuturesTradeAction.CloseLong or FuturesTradeAction.ReduceOnlyClose))
+            if (fill.Action is not (FuturesTradeAction.CloseLong or FuturesTradeAction.CloseShort or FuturesTradeAction.ReduceOnlyClose))
             {
                 continue;
             }
@@ -1910,6 +1910,10 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
 
         return count;
     }
+
+    private static bool IsNoTradeDecision(string source) =>
+        string.Equals(source, "AggressiveNoTrade", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(source, "StrategyNoTrade", StringComparison.OrdinalIgnoreCase);
 
     private FuturesUserStreamStatusView BuildUserStreamStatus()
     {
@@ -2123,7 +2127,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         {
             var cutoff = now.AddHours(-1);
             var entriesLastHour = fills.Count(fill =>
-                fill.Action == FuturesTradeAction.OpenLong &&
+                fill.Action is FuturesTradeAction.OpenLong or FuturesTradeAction.OpenShort &&
                 fill.CreatedAt >= cutoff);
             if (entriesLastHour >= maxOrdersPerHour)
             {
@@ -2135,7 +2139,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         if (minSecondsBetweenEntries > 0)
         {
             var lastEntry = fills
-                .Where(fill => fill.Action == FuturesTradeAction.OpenLong)
+                .Where(fill => fill.Action is FuturesTradeAction.OpenLong or FuturesTradeAction.OpenShort)
                 .OrderByDescending(fill => fill.CreatedAt)
                 .FirstOrDefault();
             if (lastEntry is not null &&

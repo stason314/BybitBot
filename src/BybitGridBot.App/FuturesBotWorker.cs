@@ -179,9 +179,9 @@ public sealed class FuturesBotWorker : BackgroundService
             CurrentPrice = currentPrice,
             Instrument = instrumentRules
         });
-        if (decision.TradeIntents.Count == 0 && settings.AggressiveModeEnabled)
+        if (decision.TradeIntents.Count == 0)
         {
-            await RecordAggressiveNoTradeDecisionAsync(settings.Symbol, decision.Reason ?? "No futures aggressive entry signal.", cancellationToken);
+            await RecordStrategyNoTradeDecisionAsync(settings.Symbol, decision.Reason ?? "No futures entry signal.", cancellationToken);
         }
 
         foreach (var intent in decision.TradeIntents)
@@ -352,7 +352,7 @@ public sealed class FuturesBotWorker : BackgroundService
         {
             var cutoff = now.AddHours(-1);
             var entriesLastHour = fills.Count(fill =>
-                fill.Action == FuturesTradeAction.OpenLong &&
+                fill.Action is FuturesTradeAction.OpenLong or FuturesTradeAction.OpenShort &&
                 fill.CreatedAt >= cutoff);
             if (entriesLastHour >= maxOrdersPerHour)
             {
@@ -364,7 +364,7 @@ public sealed class FuturesBotWorker : BackgroundService
         if (minSecondsBetweenEntries > 0)
         {
             var lastEntry = fills
-                .Where(fill => fill.Action == FuturesTradeAction.OpenLong)
+                .Where(fill => fill.Action is FuturesTradeAction.OpenLong or FuturesTradeAction.OpenShort)
                 .OrderByDescending(fill => fill.CreatedAt)
                 .FirstOrDefault();
             if (lastEntry is not null &&
@@ -394,7 +394,7 @@ public sealed class FuturesBotWorker : BackgroundService
         var cutoff = DateTimeOffset.UtcNow.AddMinutes(-_strategyQualityOptions.StopLossCooldownMinutes);
         var recentFills = await _repository.GetFuturesFillsAsync(symbol, 50, cancellationToken);
         var recentLossExit = recentFills
-            .Where(fill => fill.Action is FuturesTradeAction.CloseLong or FuturesTradeAction.ReduceOnlyClose)
+            .Where(fill => fill.Action is FuturesTradeAction.CloseLong or FuturesTradeAction.CloseShort or FuturesTradeAction.ReduceOnlyClose)
             .Where(fill => fill.RealizedPnl < 0m)
             .OrderByDescending(fill => fill.CreatedAt)
             .FirstOrDefault();
@@ -461,14 +461,14 @@ public sealed class FuturesBotWorker : BackgroundService
             CreatedAt = DateTimeOffset.UtcNow
         }, cancellationToken);
 
-    private Task RecordAggressiveNoTradeDecisionAsync(
+    private Task RecordStrategyNoTradeDecisionAsync(
         string symbol,
         string reason,
         CancellationToken cancellationToken) =>
         _repository.AddFuturesRiskDecisionAsync(new FuturesRiskDecisionRecord
         {
             Symbol = symbol,
-            Source = "AggressiveNoTrade",
+            Source = "StrategyNoTrade",
             Action = FuturesTradeAction.OpenLong,
             IsAllowed = false,
             Reason = reason,
@@ -482,7 +482,7 @@ public sealed class FuturesBotWorker : BackgroundService
         var count = 0;
         foreach (var fill in fills.OrderByDescending(fill => fill.CreatedAt))
         {
-            if (fill.Action is not (FuturesTradeAction.CloseLong or FuturesTradeAction.ReduceOnlyClose))
+            if (fill.Action is not (FuturesTradeAction.CloseLong or FuturesTradeAction.CloseShort or FuturesTradeAction.ReduceOnlyClose))
             {
                 continue;
             }

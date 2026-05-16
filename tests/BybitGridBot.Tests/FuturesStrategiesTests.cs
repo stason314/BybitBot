@@ -88,6 +88,20 @@ public sealed class FuturesStrategiesTests
     }
 
     [Fact]
+    public void FuturesTrendFollowLongOnly_UsesInstrumentMinimumQuantity()
+    {
+        var decision = new FuturesTrendFollowLongOnly().Decide(Context(
+            currentPrice: 51000m,
+            strategyConfigJson: """{"entryNotionalUsdt":1}""",
+            qtyStep: 0.001m,
+            minOrderQty: 0.001m,
+            minOrderAmount: 5m));
+
+        var intent = Assert.Single(decision.TradeIntents);
+        Assert.Equal(0.001m, intent.Quantity);
+    }
+
+    [Fact]
     public void FuturesTrendFollowShortOnly_OpensShortOnNegativeMove()
     {
         var decision = new FuturesTrendFollowShortOnly().Decide(Context(
@@ -131,6 +145,11 @@ public sealed class FuturesStrategiesTests
         decimal entryPrice = 0m,
         string? positionSide = null,
         FuturesDirection direction = FuturesDirection.LongOnly,
+        string strategyConfigJson = "{}",
+        decimal tickSize = 0.1m,
+        decimal qtyStep = 0.001m,
+        decimal minOrderQty = 0.001m,
+        decimal minOrderAmount = 5m,
         bool aggressiveModeEnabled = false,
         FuturesAggressiveModeKind aggressiveModeKind = FuturesAggressiveModeKind.Normal) => new()
     {
@@ -139,6 +158,7 @@ public sealed class FuturesStrategiesTests
             Symbol = "BTCUSDT",
             Category = "linear",
             StrategyType = FuturesStrategyType.TrendFollow,
+            StrategyConfigJson = strategyConfigJson,
             Leverage = 2m,
             MarginMode = FuturesMarginMode.Isolated,
             PositionMode = FuturesPositionMode.OneWay,
@@ -164,10 +184,10 @@ public sealed class FuturesStrategiesTests
         },
         Instrument = new FuturesInstrumentRules
         {
-            TickSize = 0.1m,
-            QtyStep = 0.001m,
-            MinOrderQty = 0.001m,
-            MinOrderAmount = 5m
+            TickSize = tickSize,
+            QtyStep = qtyStep,
+            MinOrderQty = minOrderQty,
+            MinOrderAmount = minOrderAmount
         }
     };
 
