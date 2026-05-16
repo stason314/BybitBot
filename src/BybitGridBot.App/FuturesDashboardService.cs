@@ -119,6 +119,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         var recentFills = await _repository.GetFuturesFillsAsync(selectedSettings.Symbol, FuturesFillLedger.QueryLimit, cancellationToken);
         var fillLedger = FuturesFillLedger.Build(recentFills, DateOnly.FromDateTime(DateTime.UtcNow));
         var runtimeControls = await BuildRuntimeControlsAsync(profiles, state, cancellationToken);
+        var selectedInstrumentRules = await TryGetInstrumentRulesAsync(selectedSettings, cancellationToken);
 
         return new FuturesDashboardResponse
         {
@@ -141,7 +142,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             UserStreamStatus = BuildUserStreamStatus(),
             RuntimeControls = runtimeControls,
             AggressiveMode = BuildAggressiveModeStatus(selectedSettings, recentFills, riskDecisions),
-            StrategyQuality = BuildStrategyQuality(selectedSettings, riskDecisions),
+            StrategyQuality = BuildStrategyQuality(selectedSettings, position, selectedInstrumentRules, riskDecisions),
             AutoRecommendation = MapAutoRecommendation(
                 recommendation,
                 selectedSettings,
@@ -1756,6 +1757,9 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         ['ATR Max %', formatNumber(quality.maxEntryAtrPercent)],
         ['BTC Risk-Off', quality.btcRiskOffEnabled ? `on (${formatNumber(quality.btcRiskOffMovePercent)}%)` : 'off'],
         ['Stop Cooldown', `${formatNumber(quality.stopLossCooldownMinutes)}m`],
+        ['Position Capacity', quality.positionCapacityStatus || '-'],
+        ['Remaining Notional', formatNumber(quality.remainingNotionalUsdt)],
+        ['Next Order', formatNumber(quality.nextOrderNotionalUsdt)],
         ['No Trade', formatNumber(quality.noTradeReasonCount)],
         ['Filter Blocks', formatNumber(quality.strategyFilterBlockCount)],
         ['Risk Blocks', formatNumber(quality.riskBlockCount)],
@@ -2465,6 +2469,8 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
 
     private FuturesStrategyQualityView BuildStrategyQuality(
         FuturesBotSettings settings,
+        FuturesPositionSnapshot position,
+        FuturesInstrumentRules? instrument,
         IReadOnlyCollection<FuturesRiskDecisionRecord> riskDecisions)
     {
         var noTradeDecisions = riskDecisions
@@ -2482,6 +2488,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         var lastHistoricalNoTrade = noTradeDecisions
             .OrderByDescending(decision => decision.CreatedAt)
             .FirstOrDefault();
+        var positionCapacity = BuildPositionCapacity(settings, position, instrument);
 
         return new FuturesStrategyQualityView
         {
@@ -2494,6 +2501,9 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             NoTradeReasonCount = noTradeDecisions.Length,
             StrategyFilterBlockCount = filterBlocks,
             RiskBlockCount = riskBlocks,
+            PositionCapacityStatus = positionCapacity.Status,
+            RemainingNotionalUsdt = positionCapacity.RemainingNotionalUsdt,
+            NextOrderNotionalUsdt = positionCapacity.NextOrderNotionalUsdt,
             CurrentActiveBlockReason = currentActiveBlock?.Reason ?? "-",
             CurrentActiveBlockSource = currentActiveBlock?.Source ?? "-",
             CurrentActiveBlockAt = currentActiveBlock?.CreatedAt,
@@ -2509,6 +2519,112 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             string.Equals(decision.Source, "Risk", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(decision.Source, "AggressiveNoTrade", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(decision.Source, "AutoRecommendationSkipped", StringComparison.OrdinalIgnoreCase));
+
+    private readonly record struct FuturesPositionCapacityView(
+        string Status,
+        decimal RemainingNotionalUsdt,
+        decimal NextOrderNotionalUsdt);
+
+    private async Task<FuturesInstrumentRules?> TryGetInstrumentRulesAsync(
+        FuturesBotSettings settings,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var instrument = await _bybitRestClient.GetInstrumentInfoAsync(settings.Category, settings.Symbol, cancellationToken);
+            return MapInstrumentRules(instrument);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static FuturesPositionCapacityView BuildPositionCapacity(
+        FuturesBotSettings settings,
+        FuturesPositionSnapshot position,
+        FuturesInstrumentRules? instrument)
+    {
+        var maxNotional = decimal.Max(0m, settings.MaxNotionalUsdt);
+        var currentNotional = decimal.Max(0m, position.PositionValueUsdt);
+        var remainingNotional = maxNotional > 0m ? decimal.Max(0m, maxNotional - currentNotional) : 0m;
+        var nextOrderNotional = EstimateNextOrderNotional(settings, position, instrument);
+        var status = position.Size <= 0m
+            ? "no-position"
+            : remainingNotional >= nextOrderNotional && nextOrderNotional > 0m
+                ? "can-scale-in"
+                : "full";
+
+        return new FuturesPositionCapacityView(
+            status,
+            decimal.Round(remainingNotional, 4, MidpointRounding.AwayFromZero),
+            decimal.Round(nextOrderNotional, 4, MidpointRounding.AwayFromZero));
+    }
+
+    private static decimal EstimateNextOrderNotional(
+        FuturesBotSettings settings,
+        FuturesPositionSnapshot position,
+        FuturesInstrumentRules? instrument)
+    {
+        var configuredNotional = ResolveConfiguredEntryNotional(settings);
+        var price = position.MarkPrice > 0m
+            ? position.MarkPrice
+            : position.EntryPrice > 0m
+                ? position.EntryPrice
+                : 0m;
+        if (instrument is null || price <= 0m)
+        {
+            return configuredNotional;
+        }
+
+        var requestedQuantity = configuredNotional / price;
+        var minQuantity = instrument.MinOrderQty;
+        if (instrument.MinOrderAmount > 0m)
+        {
+            minQuantity = decimal.Max(minQuantity, instrument.MinOrderAmount / price);
+        }
+
+        var quantity = decimal.Max(requestedQuantity, minQuantity);
+        var step = instrument.QtyStep > 0m ? instrument.QtyStep : instrument.BasePrecision;
+        if (step > 0m)
+        {
+            quantity = Math.Ceiling(quantity / step) * step;
+        }
+
+        return price * quantity;
+    }
+
+    private static decimal ResolveConfiguredEntryNotional(FuturesBotSettings settings)
+    {
+        var fallbackMultiplier = settings.AggressiveModeEnabled
+            ? 0.25m * decimal.Max(0.01m, settings.AggressiveEntryMultiplier)
+            : 0.25m;
+        var fallback = settings.MaxNotionalUsdt * fallbackMultiplier;
+        var configured = fallback;
+        if (!string.IsNullOrWhiteSpace(settings.StrategyConfigJson))
+        {
+            try
+            {
+                using var document = JsonDocument.Parse(settings.StrategyConfigJson);
+                if (document.RootElement.TryGetProperty("entryNotionalUsdt", out var property) &&
+                    property.ValueKind == JsonValueKind.Number &&
+                    property.TryGetDecimal(out var value) &&
+                    value > 0m)
+                {
+                    configured = value;
+                }
+            }
+            catch (JsonException)
+            {
+                configured = fallback;
+            }
+        }
+
+        var multiplier = settings.AggressiveModeEnabled
+            ? decimal.Max(0.01m, settings.AggressiveEntryMultiplier)
+            : 1m;
+        return decimal.Min(settings.MaxNotionalUsdt, configured * multiplier);
+    }
 
     private async Task<FuturesRuntimeControlsView> BuildRuntimeControlsAsync(
         IReadOnlyCollection<FuturesBotSettings> profiles,

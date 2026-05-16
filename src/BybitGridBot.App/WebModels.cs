@@ -775,6 +775,12 @@ public sealed class FuturesStrategyQualityView
 
     public int RiskBlockCount { get; init; }
 
+    public string PositionCapacityStatus { get; init; } = "no-position";
+
+    public decimal RemainingNotionalUsdt { get; init; }
+
+    public decimal NextOrderNotionalUsdt { get; init; }
+
     public string CurrentActiveBlockReason { get; init; } = "-";
 
     public string CurrentActiveBlockSource { get; init; } = "-";

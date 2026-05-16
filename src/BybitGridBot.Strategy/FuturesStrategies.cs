@@ -363,6 +363,12 @@ internal static class FuturesLongOnlySignals
             return FuturesShortOnlySignals.CloseShort(context, "position-side-recovery");
         }
 
+        var capacityReason = GetPositionFullReason(context);
+        if (capacityReason is not null)
+        {
+            return FuturesStrategyDecision.Empty(capacityReason);
+        }
+
         if (FuturesLongOnlySignals.TryAnalyze(context, out var signal) &&
             IsLongScaleInAfterRejection(context, signal))
         {
@@ -401,6 +407,79 @@ internal static class FuturesLongOnlySignals
         return context.Position.Size > 0m &&
             context.CurrentPrice < signal.Resistance - range * 0.35m &&
             rejectionFromResistance / context.CurrentPrice * 100m >= 0.35m;
+    }
+
+    public static string? GetPositionFullReason(FuturesStrategyContext context)
+    {
+        if (context.Position.Size <= 0m || context.Settings.MaxNotionalUsdt <= 0m)
+        {
+            return null;
+        }
+
+        var currentNotional = decimal.Max(0m, context.Position.PositionValueUsdt);
+        var nextOrderNotional = EstimateNextOrderNotional(context);
+        return currentNotional + nextOrderNotional > context.Settings.MaxNotionalUsdt
+            ? $"Position is full; waiting for net-positive exit or breakout continuation. Current notional={currentNotional:F4}, next order={nextOrderNotional:F4}, max={context.Settings.MaxNotionalUsdt:F4}."
+            : null;
+    }
+
+    private static decimal EstimateNextOrderNotional(FuturesStrategyContext context)
+    {
+        var price = context.CurrentPrice > 0m ? context.CurrentPrice : context.Position.MarkPrice;
+        if (price <= 0m)
+        {
+            return 0m;
+        }
+
+        var requestedNotional = ResolveEntryNotional(context.Settings);
+        var requestedQuantity = requestedNotional / price;
+        var minimumQuantity = context.Instrument.MinOrderQty;
+        if (context.Instrument.MinOrderAmount > 0m)
+        {
+            minimumQuantity = decimal.Max(minimumQuantity, context.Instrument.MinOrderAmount / price);
+        }
+
+        var quantity = RoundQuantityUp(decimal.Max(requestedQuantity, minimumQuantity), context.Instrument);
+        return price * quantity;
+    }
+
+    private static decimal ResolveEntryNotional(FuturesBotSettings settings)
+    {
+        var fallbackMultiplier = settings.AggressiveModeEnabled
+            ? 0.25m * decimal.Max(0.01m, settings.AggressiveEntryMultiplier)
+            : 0.25m;
+        var fallback = settings.MaxNotionalUsdt * fallbackMultiplier;
+        if (string.IsNullOrWhiteSpace(settings.StrategyConfigJson))
+        {
+            return fallback;
+        }
+
+        try
+        {
+            using var document = System.Text.Json.JsonDocument.Parse(settings.StrategyConfigJson);
+            if (document.RootElement.TryGetProperty("entryNotionalUsdt", out var property) &&
+                property.ValueKind == System.Text.Json.JsonValueKind.Number &&
+                property.TryGetDecimal(out var configured) &&
+                configured > 0m)
+            {
+                var multiplier = settings.AggressiveModeEnabled
+                    ? decimal.Max(0.01m, settings.AggressiveEntryMultiplier)
+                    : 1m;
+                return decimal.Min(settings.MaxNotionalUsdt, configured * multiplier);
+            }
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return fallback;
+        }
+
+        return fallback;
+    }
+
+    private static decimal RoundQuantityUp(decimal quantity, FuturesInstrumentRules instrument)
+    {
+        var step = instrument.QtyStep > 0m ? instrument.QtyStep : instrument.BasePrecision;
+        return step > 0m ? Math.Ceiling(quantity / step) * step : quantity;
     }
 
     private static FuturesPositionSnapshot ScalePositionQuantity(FuturesPositionSnapshot position, decimal multiplier)
@@ -525,6 +604,12 @@ internal static class FuturesShortOnlySignals
         if (IsLong(context.Position.Side))
         {
             return FuturesLongOnlySignals.CloseLong(context, "position-side-recovery");
+        }
+
+        var capacityReason = FuturesLongOnlySignals.GetPositionFullReason(context);
+        if (capacityReason is not null)
+        {
+            return FuturesStrategyDecision.Empty(capacityReason);
         }
 
         if (TryAnalyze(context, out var signal) &&

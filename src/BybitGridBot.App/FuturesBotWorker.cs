@@ -675,7 +675,7 @@ public sealed class FuturesBotWorker : BackgroundService
             return null;
         }
 
-        return $"Position is at max notional; waiting for partial close or exit. Current notional={currentNotional:F4}, next order={intent.NotionalUsdt:F4}, max={maxNotional:F4}.";
+        return $"Position is full; waiting for net-positive exit or breakout continuation. Current notional={currentNotional:F4}, next order={intent.NotionalUsdt:F4}, max={maxNotional:F4}.";
     }
 
     private static string? GetFeeProtectedExitNoTradeReason(
@@ -872,6 +872,7 @@ public sealed class FuturesBotWorker : BackgroundService
         var reasonKey = NormalizeStrategyNoTradeReason(reason);
         var duplicate = recent.Any(decision =>
             string.Equals(decision.Source, "StrategyNoTrade", StringComparison.OrdinalIgnoreCase) &&
+            decision.Action == action &&
             string.Equals(NormalizeStrategyNoTradeReason(decision.Reason), reasonKey, StringComparison.Ordinal) &&
             DateTimeOffset.UtcNow - decision.CreatedAt < TimeSpan.FromMinutes(5));
         if (duplicate)
@@ -893,8 +894,9 @@ public sealed class FuturesBotWorker : BackgroundService
     }
 
     private static string NormalizeStrategyNoTradeReason(string reason) =>
+        reason.StartsWith("Position is full;", StringComparison.Ordinal) ||
         reason.StartsWith("Position is at max notional;", StringComparison.Ordinal)
-            ? "Position is at max notional; waiting for partial close or exit."
+            ? "Position is full; waiting for net-positive exit or breakout continuation."
             : reason.StartsWith("Fee protection blocked ", StringComparison.Ordinal)
                 ? "Fee protection blocked close because estimated net PnL after round-trip fees is not positive."
             : reason;
