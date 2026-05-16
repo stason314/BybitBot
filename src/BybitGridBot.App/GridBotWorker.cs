@@ -3206,6 +3206,29 @@ public sealed class GridBotWorker : BackgroundService
 
         var instrument = await _bybitRestClient.GetInstrumentInfoAsync(_gridOptions.Category, _gridOptions.Symbol, cancellationToken);
         var entryPrice = filledOrder.AverageFillPrice > 0m ? filledOrder.AverageFillPrice : filledOrder.Price;
+        var activeOrders = await _repository.GetActiveOrdersAsync(_gridOptions.Symbol, cancellationToken);
+        var wallet = _appOptions.TradingMode == TradingMode.Paper
+            ? null
+            : await _bybitRestClient.GetWalletBalanceAsync(cancellationToken, _quoteAsset, _baseAsset);
+        var availableBase = GetAvailableBaseBalance(state, activeOrders, wallet);
+        if (availableBase <= 0m)
+        {
+            return;
+        }
+
+        if (config.TakeProfitLadderEnabled)
+        {
+            await EnsureDcaTakeProfitLadderAsync(
+                instrument,
+                config,
+                filledOrder,
+                entryPrice,
+                activeOrders,
+                availableBase,
+                cancellationToken);
+            return;
+        }
+
         var takeProfitPrice = instrument.RoundPrice(_dcaStrategy.CalculateTakeProfitPrice(entryPrice, config));
         if (takeProfitPrice <= entryPrice)
         {
@@ -3213,17 +3236,93 @@ public sealed class GridBotWorker : BackgroundService
             return;
         }
 
-        var activeOrders = await _repository.GetActiveOrdersAsync(_gridOptions.Symbol, cancellationToken);
-        var wallet = _appOptions.TradingMode == TradingMode.Paper
-            ? null
-            : await _bybitRestClient.GetWalletBalanceAsync(cancellationToken, _quoteAsset, _baseAsset);
-        var availableBase = GetAvailableBaseBalance(state, activeOrders, wallet);
         var quantity = instrument.RoundQuantity(decimal.Min(filledOrder.FilledQuantity, availableBase));
         if (quantity <= 0m || quantity < instrument.MinOrderQty)
         {
             return;
         }
 
+        await EnsureSingleDcaTakeProfitOrderAsync(
+            filledOrder,
+            entryPrice,
+            takeProfitPrice,
+            quantity,
+            activeOrders,
+            cancellationToken);
+    }
+
+    private async Task EnsureDcaTakeProfitLadderAsync(
+        BybitInstrumentInfo instrument,
+        DcaStrategyConfig config,
+        GridOrder filledOrder,
+        decimal entryPrice,
+        IReadOnlyCollection<GridOrder> activeOrders,
+        decimal availableBase,
+        CancellationToken cancellationToken)
+    {
+        var remainingQuantity = decimal.Min(filledOrder.FilledQuantity, availableBase);
+        var ladder = BuildTakeProfitLadder(config);
+        var plannedPrices = new HashSet<decimal>();
+
+        foreach (var level in ladder)
+        {
+            if (remainingQuantity <= 0m)
+            {
+                return;
+            }
+
+            var takeProfitPrice = instrument.RoundPrice(entryPrice * (1m + level.ProfitPercent / 100m));
+            if (takeProfitPrice <= entryPrice)
+            {
+                continue;
+            }
+
+            var targetQuantity = level.IsFinal
+                ? remainingQuantity
+                : filledOrder.FilledQuantity * level.QuantityPercent / 100m;
+            var quantity = instrument.RoundQuantity(decimal.Min(targetQuantity, remainingQuantity));
+            if (quantity <= 0m || quantity < instrument.MinOrderQty)
+            {
+                continue;
+            }
+
+            if (HasActiveOrderAtLevel(activeOrders, takeProfitPrice) ||
+                !plannedPrices.Add(takeProfitPrice) ||
+                await _repository.GetActiveOrderAtLevelAsync(_gridOptions.Symbol, TradeSide.Sell, takeProfitPrice, cancellationToken) is not null)
+            {
+                continue;
+            }
+
+            var expectedProfitPercent = ExpectedProfitFilter.CalculateLongRoundTripPercent(entryPrice, takeProfitPrice);
+            await ExecuteStrategyDecisionAsync(
+                new StrategyExecutionDecision
+                {
+                    OrderIntents =
+                    [
+                        new OrderIntent(
+                            TradeSide.Sell,
+                            takeProfitPrice,
+                            quantity,
+                            filledOrder.OrderLinkId,
+                            filledOrder.StrategySource,
+                            expectedProfitPercent,
+                            SkipExpectedProfitFilter: true)
+                    ]
+                },
+                cancellationToken);
+
+            remainingQuantity -= quantity;
+        }
+    }
+
+    private async Task EnsureSingleDcaTakeProfitOrderAsync(
+        GridOrder filledOrder,
+        decimal entryPrice,
+        decimal takeProfitPrice,
+        decimal quantity,
+        IReadOnlyCollection<GridOrder> activeOrders,
+        CancellationToken cancellationToken)
+    {
         if (!await HasMinimumNetProfitAsync(TradeSide.Sell, entryPrice, takeProfitPrice, quantity, filledOrder.FeePaid, cancellationToken))
         {
             _logger.LogInformation(
@@ -3238,12 +3337,6 @@ public sealed class GridBotWorker : BackgroundService
             return;
         }
 
-        if (availableBase < quantity)
-        {
-            _logger.LogInformation("DCA take-profit sell at {Price} skipped because base asset inventory is insufficient.", takeProfitPrice);
-            return;
-        }
-
         var expectedProfitPercent = ExpectedProfitFilter.CalculateLongRoundTripPercent(entryPrice, takeProfitPrice);
         await ExecuteStrategyDecisionAsync(
             new StrategyExecutionDecision
@@ -3252,6 +3345,31 @@ public sealed class GridBotWorker : BackgroundService
             },
             cancellationToken);
     }
+
+    private static IReadOnlyList<TakeProfitLadderLevel> BuildTakeProfitLadder(DcaStrategyConfig config)
+    {
+        var levels = new List<TakeProfitLadderLevel>(3);
+        AddTakeProfitLadderLevel(levels, config.TakeProfitLadderFirstPercent, config.TakeProfitLadderFirstQuantityPercent, false);
+        AddTakeProfitLadderLevel(levels, config.TakeProfitLadderSecondPercent, config.TakeProfitLadderSecondQuantityPercent, false);
+        AddTakeProfitLadderLevel(levels, config.TakeProfitLadderFinalPercent, config.TakeProfitLadderFinalQuantityPercent, true);
+        return levels;
+    }
+
+    private static void AddTakeProfitLadderLevel(
+        List<TakeProfitLadderLevel> levels,
+        decimal profitPercent,
+        decimal quantityPercent,
+        bool isFinal)
+    {
+        if (profitPercent <= 0m || quantityPercent <= 0m)
+        {
+            return;
+        }
+
+        levels.Add(new TakeProfitLadderLevel(profitPercent, decimal.Min(100m, quantityPercent), isFinal));
+    }
+
+    private sealed record TakeProfitLadderLevel(decimal ProfitPercent, decimal QuantityPercent, bool IsFinal);
 
     private async Task EnsureProtectiveSellLifecycleAsync(
         GridBotSettings? profile,
