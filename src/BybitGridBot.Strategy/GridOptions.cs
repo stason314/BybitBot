@@ -376,6 +376,17 @@ public sealed class GridOptions
     [Range(typeof(decimal), "0", "100")]
     public decimal PartialTakeProfitPercent { get; init; } = 50m;
 
+    [ConfigurationKeyName("FAST_PROTECTIVE_EXIT_ENABLED")]
+    public bool FastProtectiveExitEnabled { get; init; } = true;
+
+    [ConfigurationKeyName("FAST_PROTECTIVE_EXIT_TRIGGER_PERCENT")]
+    [Range(typeof(decimal), "0", "1000")]
+    public decimal FastProtectiveExitTriggerPercent { get; init; } = 0.8m;
+
+    [ConfigurationKeyName("FAST_PROTECTIVE_EXIT_FLOOR_PERCENT")]
+    [Range(typeof(decimal), "-100", "1000")]
+    public decimal FastProtectiveExitFloorPercent { get; init; } = 0.2m;
+
     [ConfigurationKeyName("ENABLE_NO_TRADE_REASON_TRACKING")]
     public bool EnableNoTradeReasonTracking { get; init; } = true;
 

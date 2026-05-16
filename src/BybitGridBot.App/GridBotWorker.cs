@@ -2308,9 +2308,14 @@ public sealed class GridBotWorker : BackgroundService
             marketPhase);
         state.ProfitProtectionPeakPrice = profitProtection.PeakPrice;
         state.ProfitProtectionTrailingStopPrice = profitProtection.TrailingStopPrice;
+        var shouldFastExit = ShouldFastProtectiveExit(profitProtection);
         if (reason is null && profitProtection.ShouldBlockNewBuys)
         {
             reason = $"profit-protection: {profitProtection.Reason}";
+        }
+        else if (reason is null && shouldFastExit)
+        {
+            reason = $"fast-protective-exit: peak={profitProtection.PeakProfitPercent:0.####}%, current={profitProtection.CurrentProfitPercent:0.####}%";
         }
 
         if (reason is null)
@@ -2350,11 +2355,16 @@ public sealed class GridBotWorker : BackgroundService
             currentPrice,
             reason,
             maxSellQuantity,
-            profitProtection.ShouldTrailExit,
+            profitProtection.ShouldTrailExit || shouldFastExit,
             cancellationToken);
 
         return true;
     }
+
+    private bool ShouldFastProtectiveExit(ProfitProtectionDecision profitProtection) =>
+        _gridOptions.FastProtectiveExitEnabled &&
+        profitProtection.PeakProfitPercent >= _gridOptions.FastProtectiveExitTriggerPercent &&
+        profitProtection.CurrentProfitPercent <= _gridOptions.FastProtectiveExitFloorPercent;
 
     private bool ShouldApplyTrailingProtection(
         IReadOnlyList<Candle> candles,
