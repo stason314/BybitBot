@@ -170,6 +170,7 @@ public sealed class GridDashboardService : IGridDashboardService
             recommendedSettings,
             _riskOptions,
             _strategy);
+        var pairScores = await BuildPairScoresAsync(profiles, generatedAt, cancellationToken);
 
         return new DashboardResponse
         {
@@ -181,7 +182,8 @@ public sealed class GridDashboardService : IGridDashboardService
                     IsSelected = string.Equals(profile.Symbol, runtimeSettings.Symbol, StringComparison.OrdinalIgnoreCase)
                 })
                 .ToArray(),
-            ConfigSummaries = await BuildConfigSummariesAsync(profiles, runtimeSettings.Symbol, cancellationToken),
+            ConfigSummaries = await BuildConfigSummariesAsync(profiles, runtimeSettings.Symbol, pairScores, cancellationToken),
+            PairScores = pairScores,
             Settings = new DashboardSettings
             {
                 Symbol = gridOptions.Symbol,
@@ -242,14 +244,17 @@ public sealed class GridDashboardService : IGridDashboardService
     private async Task<IReadOnlyList<DashboardConfigSummaryItem>> BuildConfigSummariesAsync(
         IReadOnlyList<GridBotSettings> profiles,
         string selectedSymbol,
+        IReadOnlyList<DashboardPairScoreItem> pairScores,
         CancellationToken cancellationToken)
     {
         var summaries = new List<DashboardConfigSummaryItem>(profiles.Count);
+        var scoreBySymbol = pairScores.ToDictionary(score => score.Symbol, StringComparer.OrdinalIgnoreCase);
 
         foreach (var profile in profiles)
         {
             var state = await _repository.GetBotStateAsync(profile.Symbol, cancellationToken);
             var isPaused = state?.IsPaused == true || profile.StrategyType is TradingStrategyType.Pause or TradingStrategyType.NoTrade;
+            scoreBySymbol.TryGetValue(profile.Symbol, out var pairScore);
             summaries.Add(new DashboardConfigSummaryItem
             {
                 Symbol = profile.Symbol,
@@ -259,17 +264,260 @@ public sealed class GridDashboardService : IGridDashboardService
                 Status = isPaused ? "paused" : "in_progress",
                 DailyRealizedPnl = state?.DailyRealizedPnl ?? 0m,
                 TotalRealizedPnl = state?.TotalRealizedPnl ?? 0m,
+                PairScore = pairScore?.Score ?? 0m,
+                PairScoreLabel = pairScore?.Label ?? "Unknown",
+                SuggestedOrderSizeMultiplier = pairScore?.SuggestedOrderSizeMultiplier ?? 1m,
+                PairScoreReasons = pairScore?.Reasons ?? [],
                 IsSelected = string.Equals(profile.Symbol, selectedSymbol, StringComparison.OrdinalIgnoreCase),
                 UpdatedAt = state?.UpdatedAt ?? profile.UpdatedAt
             });
         }
 
         return summaries
-            .OrderByDescending(summary => summary.TotalRealizedPnl)
+            .OrderByDescending(summary => summary.PairScore)
+            .ThenByDescending(summary => summary.TotalRealizedPnl)
             .ThenByDescending(summary => summary.DailyRealizedPnl)
             .ThenBy(summary => summary.Symbol, StringComparer.OrdinalIgnoreCase)
             .ToArray();
     }
+
+    private async Task<IReadOnlyList<DashboardPairScoreItem>> BuildPairScoresAsync(
+        IReadOnlyList<GridBotSettings> profiles,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        var scores = new List<DashboardPairScoreItem>(profiles.Count);
+
+        foreach (var profile in profiles)
+        {
+            var state = await _repository.GetBotStateAsync(profile.Symbol, cancellationToken);
+            var orders = await _repository.GetOrdersAsync(profile.Symbol, cancellationToken);
+            var lastNoTradeReason = (await _repository.GetNoTradeReasonsAsync(profile.Symbol, 1, cancellationToken)).FirstOrDefault();
+            var market = await GetPairScoreMarketMetricsAsync(profile, cancellationToken);
+            scores.Add(BuildPairScore(profile, state, orders, lastNoTradeReason, market, now));
+        }
+
+        return scores
+            .OrderByDescending(score => score.Score)
+            .ThenByDescending(score => score.RecentWinRate)
+            .ThenByDescending(score => score.VolatilityPercent)
+            .ThenBy(score => score.Symbol, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    private async Task<PairScoreMarketMetrics> GetPairScoreMarketMetricsAsync(
+        GridBotSettings profile,
+        CancellationToken cancellationToken)
+    {
+        decimal spreadPercent = 0m;
+        decimal lastPrice = 0m;
+        try
+        {
+            var ticker = await _bybitRestClient.GetTickerAsync(profile.Category, profile.Symbol, cancellationToken);
+            lastPrice = ticker.LastPrice;
+            var middle = (ticker.Bid1Price + ticker.Ask1Price) / 2m;
+            spreadPercent = middle > 0m
+                ? decimal.Max(0m, (ticker.Ask1Price - ticker.Bid1Price) / middle * 100m)
+                : 0m;
+        }
+        catch
+        {
+            spreadPercent = 0m;
+        }
+
+        try
+        {
+            var candles = await _bybitRestClient.GetKlinesAsync(
+                profile.Category,
+                profile.Symbol,
+                AnalysisDefaults.AutoRecommendationCandleInterval,
+                60,
+                cancellationToken);
+            var ordered = candles.OrderBy(candle => candle.OpenTime).ToArray();
+            if (ordered.Length == 0)
+            {
+                return new PairScoreMarketMetrics(lastPrice, spreadPercent, 0m, 0m);
+            }
+
+            var close = ordered[^1].Close;
+            var volatilityPercent = close > 0m
+                ? (ordered.Max(candle => candle.High) - ordered.Min(candle => candle.Low)) / close * 100m
+                : 0m;
+            var recentVolume = ordered.TakeLast(10).Average(candle => candle.Volume);
+            var baselineVolume = ordered.Take(Math.Max(1, ordered.Length - 10)).DefaultIfEmpty(ordered[0]).Average(candle => candle.Volume);
+            var volumeRatio = baselineVolume > 0m ? recentVolume / baselineVolume : 0m;
+
+            return new PairScoreMarketMetrics(close, spreadPercent, volatilityPercent, volumeRatio);
+        }
+        catch
+        {
+            return new PairScoreMarketMetrics(lastPrice, spreadPercent, 0m, 0m);
+        }
+    }
+
+    private static DashboardPairScoreItem BuildPairScore(
+        GridBotSettings profile,
+        BotState? state,
+        IReadOnlyCollection<GridOrder> orders,
+        NoTradeReasonRecord? lastNoTradeReason,
+        PairScoreMarketMetrics market,
+        DateTimeOffset now)
+    {
+        var score = 50m;
+        var reasons = new List<string>();
+
+        if (market.VolatilityPercent >= 0.8m && market.VolatilityPercent <= 8m)
+        {
+            score += 15m;
+            reasons.Add($"volatility ok {market.VolatilityPercent:0.##}%");
+        }
+        else if (market.VolatilityPercent is > 0m and < 0.8m)
+        {
+            score -= 15m;
+            reasons.Add($"volatility low {market.VolatilityPercent:0.##}%");
+        }
+        else if (market.VolatilityPercent > 8m)
+        {
+            score -= 10m;
+            reasons.Add($"volatility high {market.VolatilityPercent:0.##}%");
+        }
+
+        if (market.SpreadPercent > 0m && market.SpreadPercent <= 0.2m)
+        {
+            score += 15m;
+            reasons.Add($"spread tight {market.SpreadPercent:0.###}%");
+        }
+        else if (market.SpreadPercent > 0.5m)
+        {
+            score -= 20m;
+            reasons.Add($"spread wide {market.SpreadPercent:0.###}%");
+        }
+
+        if (market.VolumeRatio >= 0.7m)
+        {
+            score += 10m;
+            reasons.Add($"volume enough {market.VolumeRatio:0.##}x");
+        }
+        else if (market.VolumeRatio is > 0m and < 0.35m)
+        {
+            score -= 10m;
+            reasons.Add($"volume weak {market.VolumeRatio:0.##}x");
+        }
+
+        var recentClosed = orders
+            .Where(order => order.Side == TradeSide.Sell &&
+                order.Status == OrderStatus.Filled &&
+                (order.FilledAt ?? order.UpdatedAt) >= now.AddHours(-48))
+            .ToArray();
+        var recentWinRate = recentClosed.Length == 0
+            ? 0m
+            : recentClosed.Count(order => order.RealizedPnl > order.FeePaid) / (decimal)recentClosed.Length * 100m;
+        if (recentClosed.Length >= 2 && recentWinRate >= 50m)
+        {
+            score += 12m;
+            reasons.Add($"recent win rate {recentWinRate:0.#}%");
+        }
+        else if (recentClosed.Length >= 2)
+        {
+            score -= 12m;
+            reasons.Add($"recent win rate {recentWinRate:0.#}%");
+        }
+
+        var recentLossSell = recentClosed
+            .Where(order => (order.FilledAt ?? order.UpdatedAt) >= now.AddHours(-6))
+            .Any(order => order.RealizedPnl <= order.FeePaid);
+        if (recentLossSell)
+        {
+            score -= 18m;
+            reasons.Add("recent loss sell penalty");
+        }
+
+        var dailyPnl = state?.DailyRealizedPnl ?? 0m;
+        var totalPnl = state?.TotalRealizedPnl ?? 0m;
+        if (dailyPnl > 0m || totalPnl > 0m)
+        {
+            score += 8m;
+            reasons.Add("positive realized PnL");
+        }
+        else if (dailyPnl < 0m)
+        {
+            score -= 10m;
+            reasons.Add("negative daily PnL");
+        }
+
+        var currentDrawdownPercent = CalculatePairCurrentDrawdownPercent(state, market.LastPrice);
+        if (currentDrawdownPercent >= 3m)
+        {
+            score -= 15m;
+            reasons.Add($"position drawdown {currentDrawdownPercent:0.##}%");
+        }
+        else if (currentDrawdownPercent >= 1m)
+        {
+            score -= 6m;
+            reasons.Add($"position drawdown {currentDrawdownPercent:0.##}%");
+        }
+
+        if (lastNoTradeReason is not null)
+        {
+            var reasonPenalty = GetNoTradeReasonScorePenalty(lastNoTradeReason.ReasonCode);
+            if (reasonPenalty > 0m)
+            {
+                score -= reasonPenalty;
+                reasons.Add($"no-trade {lastNoTradeReason.ReasonCode}");
+            }
+        }
+
+        score = decimal.Max(0m, decimal.Min(100m, decimal.Round(score, 2, MidpointRounding.AwayFromZero)));
+        return new DashboardPairScoreItem
+        {
+            Symbol = profile.Symbol,
+            Category = profile.Category,
+            Score = score,
+            Label = score >= 75m ? "Hot" : score >= 60m ? "Good" : score >= 40m ? "Neutral" : "Avoid",
+            SuggestedOrderSizeMultiplier = score >= 75m ? 1.4m : score >= 60m ? 1.15m : score < 35m ? 0.5m : 1m,
+            SpreadPercent = decimal.Round(market.SpreadPercent, 4, MidpointRounding.AwayFromZero),
+            VolatilityPercent = decimal.Round(market.VolatilityPercent, 4, MidpointRounding.AwayFromZero),
+            VolumeRatio = decimal.Round(market.VolumeRatio, 4, MidpointRounding.AwayFromZero),
+            RecentWinRate = decimal.Round(recentWinRate, 2, MidpointRounding.AwayFromZero),
+            CurrentDrawdownPercent = decimal.Round(currentDrawdownPercent, 4, MidpointRounding.AwayFromZero),
+            LastNoTradeReason = lastNoTradeReason?.ReasonCode.ToString(),
+            Reasons = reasons.Count == 0 ? ["market data limited"] : reasons
+        };
+    }
+
+    private static decimal CalculatePairCurrentDrawdownPercent(BotState? state, decimal currentPrice)
+    {
+        if (state is null || state.BaseAssetQuantity <= 0m || state.AverageEntryPrice <= 0m || currentPrice <= 0m)
+        {
+            return 0m;
+        }
+
+        return currentPrice >= state.AverageEntryPrice
+            ? 0m
+            : (state.AverageEntryPrice - currentPrice) / state.AverageEntryPrice * 100m;
+    }
+
+    private static decimal GetNoTradeReasonScorePenalty(NoTradeReason reason) => reason switch
+    {
+        NoTradeReason.DumpDetected => 30m,
+        NoTradeReason.BtcRiskOff => 30m,
+        NoTradeReason.DailyLossLimitReached => 30m,
+        NoTradeReason.AggressiveStopLoss => 25m,
+        NoTradeReason.AggressiveCooldown => 20m,
+        NoTradeReason.HighVolatility => 20m,
+        NoTradeReason.MaxPositionReached => 15m,
+        NoTradeReason.PriceOutsideRange => 12m,
+        NoTradeReason.ExpectedProfitTooLow => 10m,
+        NoTradeReason.ScoreTooLow => 8m,
+        NoTradeReason.UnknownMarketPhase => 6m,
+        _ => 0m
+    };
+
+    private sealed record PairScoreMarketMetrics(
+        decimal LastPrice,
+        decimal SpreadPercent,
+        decimal VolatilityPercent,
+        decimal VolumeRatio);
 
     private async Task<IReadOnlyList<Candle>> GetAnalysisCandlesAsync(GridOptions gridOptions, CancellationToken cancellationToken)
     {
@@ -1352,7 +1600,7 @@ public sealed class GridDashboardService : IGridDashboardService
         <table class="config-table">
           <thead>
             <tr>
-              <th>Symbol</th><th>Strategy</th><th>Type</th><th>Status</th><th>Daily Profit</th><th>Total Profit ↓</th><th>Updated</th>
+              <th>Symbol</th><th>Strategy</th><th>Type</th><th>Status</th><th>Score</th><th>Capital</th><th>Daily Profit</th><th>Total Profit ↓</th><th>Updated</th>
             </tr>
           </thead>
           <tbody id="configSummaryRows"></tbody>
@@ -1463,7 +1711,7 @@ public sealed class GridDashboardService : IGridDashboardService
         <div class="table-wrap">
           <table>
             <thead>
-              <tr><th>Source</th><th>Side</th><th>Price</th><th>Qty</th><th>Filled</th><th>Status</th><th>Link</th></tr>
+              <tr><th>Source</th><th>Group</th><th>Side</th><th>Price</th><th>Qty</th><th>Filled</th><th>Status</th><th>Link</th></tr>
             </thead>
             <tbody id="activeOrders"></tbody>
           </table>
@@ -1485,7 +1733,7 @@ public sealed class GridDashboardService : IGridDashboardService
         <table>
           <thead>
             <tr>
-              <th>Time</th><th>Source</th><th>Side</th><th>Price</th><th>Qty</th><th>Filled</th><th>Status</th><th>Realized PnL</th><th>Fee</th><th>Order</th>
+              <th>Time</th><th>Source</th><th>Group</th><th>Side</th><th>Price</th><th>Qty</th><th>Filled</th><th>Status</th><th>Realized PnL</th><th>Fee</th><th>Order</th>
             </tr>
           </thead>
           <tbody id="historyRows"></tbody>
@@ -1587,7 +1835,7 @@ public sealed class GridDashboardService : IGridDashboardService
     const renderConfigSummaries = (configs) => {
       renderConfigTotals(configs);
       byId('configSummaryRows').innerHTML = configs.length === 0
-        ? `<tr><td colspan="7">No configs yet.</td></tr>`
+        ? `<tr><td colspan="9">No configs yet.</td></tr>`
         : configs.map(config => `
             <tr class="${config.isSelected && !isCreatingNewProfile ? 'selected' : ''}" data-symbol="${escapeHtml(config.symbol)}">
               <td>
@@ -1599,6 +1847,11 @@ public sealed class GridDashboardService : IGridDashboardService
               <td>${escapeHtml(config.strategyName)}</td>
               <td>${escapeHtml(config.strategyMode)}</td>
               <td><span class="status-pill ${config.status === 'paused' ? 'paused' : ''}">${formatStatus(config.status)}</span></td>
+              <td title="${escapeHtml((config.pairScoreReasons || []).join('; '))}">
+                <strong>${formatNumber(config.pairScore)}</strong>
+                <span class="subtle">${escapeHtml(config.pairScoreLabel || 'Unknown')}</span>
+              </td>
+              <td>${formatNumber(config.suggestedOrderSizeMultiplier || 1)}x</td>
               <td>${formatPnl(config.dailyRealizedPnl)}</td>
               <td>${formatPnl(config.totalRealizedPnl)}</td>
               <td>${formatDate(config.updatedAt)}</td>
@@ -1826,7 +2079,8 @@ public sealed class GridDashboardService : IGridDashboardService
           'risk-limits',
           'active-orders',
           'recent-order-history',
-          'performance-source-sanity'
+          'performance-source-sanity',
+          'pair-scoring'
         ],
         formSettings,
         parsedFormStrategyConfig: parseStrategyConfigSnapshot(formSettings.strategyConfigJson),
@@ -1835,6 +2089,7 @@ public sealed class GridDashboardService : IGridDashboardService
         runtime: latestDashboardData.runtime,
         state: latestDashboardData.state,
         configSummaries: latestDashboardData.configSummaries,
+        pairScores: latestDashboardData.pairScores,
         marketRegime: latestDashboardData.marketRegime,
         signalAnalysis: latestDashboardData.signalAnalysis,
         btdDiagnostics: latestDashboardData.btdDiagnostics,
@@ -2140,10 +2395,11 @@ public sealed class GridDashboardService : IGridDashboardService
 
       byId('gridLevels').innerHTML = data.gridLevels.map(level => `<div class="grid-chip">${formatNumber(level)}</div>`).join('');
       byId('activeOrders').innerHTML = data.activeOrders.length === 0
-        ? `<tr><td colspan="7">No active orders.</td></tr>`
+        ? `<tr><td colspan="8">No active orders.</td></tr>`
         : data.activeOrders.map(order => `
             <tr>
               <td>${order.source}</td>
+              <td>${order.orderGroup ? `<span class="token" title="${escapeHtml(order.orderGroup)}">${escapeHtml(order.ladderRole || 'Grouped')}</span>` : '-'}</td>
               <td>${order.side}</td>
               <td>${formatNumber(order.price)}</td>
               <td>${formatNumber(order.quantity)}</td>
@@ -2153,11 +2409,12 @@ public sealed class GridDashboardService : IGridDashboardService
             </tr>`).join('');
 
       byId('historyRows').innerHTML = data.orders.length === 0
-        ? `<tr><td colspan="10">No orders yet.</td></tr>`
+        ? `<tr><td colspan="11">No orders yet.</td></tr>`
         : data.orders.map(order => `
             <tr>
               <td>${formatDate(order.filledAt || order.updatedAt || order.createdAt)}</td>
               <td>${order.source}</td>
+              <td>${order.orderGroup ? `<span class="token" title="${escapeHtml(order.orderGroup)}">${escapeHtml(order.ladderRole || 'Grouped')}</span>` : '-'}</td>
               <td>${order.side}</td>
               <td>${formatNumber(order.price)}</td>
               <td>${formatNumber(order.quantity)}</td>
@@ -2501,6 +2758,8 @@ public sealed class GridDashboardService : IGridDashboardService
             OrderLinkId = order.OrderLinkId,
             BybitOrderId = order.BybitOrderId,
             ParentOrderLinkId = order.ParentOrderLinkId,
+            OrderGroup = ResolveOrderGroup(order),
+            LadderRole = ResolveLadderRole(order),
             Symbol = order.Symbol,
             Side = order.Side.ToString(),
             Source = sourceLabels.TryGetValue(order.OrderLinkId, out var sourceLabel)
@@ -2517,6 +2776,16 @@ public sealed class GridDashboardService : IGridDashboardService
             FilledAt = order.FilledAt
         };
     }
+
+    private static string? ResolveOrderGroup(GridOrder order) =>
+        order.Side == TradeSide.Sell && !string.IsNullOrWhiteSpace(order.ParentOrderLinkId)
+            ? order.ParentOrderLinkId
+            : null;
+
+    private static string? ResolveLadderRole(GridOrder order) =>
+        order.Side == TradeSide.Sell && !string.IsNullOrWhiteSpace(order.ParentOrderLinkId)
+            ? "TP ladder"
+            : null;
 
     private static DashboardNoTradeReason MapNoTradeReason(NoTradeReasonRecord reason, DateTimeOffset now)
     {

@@ -63,6 +63,25 @@ public sealed class GridOptions
     [Range(typeof(decimal), "0.00000001", "1000")]
     public decimal DailyTakeProfitOrderMultiplier { get; init; } = 0.5m;
 
+    [ConfigurationKeyName("PAIR_SCORE_CAPITAL_ALLOCATION_ENABLED")]
+    public bool PairScoreCapitalAllocationEnabled { get; init; } = true;
+
+    [ConfigurationKeyName("PAIR_SCORE_HOT_MULTIPLIER")]
+    [Range(typeof(decimal), "0.00000001", "1000")]
+    public decimal PairScoreHotMultiplier { get; init; } = 1.4m;
+
+    [ConfigurationKeyName("PAIR_SCORE_GOOD_MULTIPLIER")]
+    [Range(typeof(decimal), "0.00000001", "1000")]
+    public decimal PairScoreGoodMultiplier { get; init; } = 1.15m;
+
+    [ConfigurationKeyName("PAIR_SCORE_NEUTRAL_MULTIPLIER")]
+    [Range(typeof(decimal), "0.00000001", "1000")]
+    public decimal PairScoreNeutralMultiplier { get; init; } = 1m;
+
+    [ConfigurationKeyName("PAIR_SCORE_AVOID_MULTIPLIER")]
+    [Range(typeof(decimal), "0.00000001", "1000")]
+    public decimal PairScoreAvoidMultiplier { get; init; } = 0.5m;
+
     [ConfigurationKeyName("STOP_LOWER_PRICE")]
     public decimal StopLowerPrice { get; init; } = 0.09m;
 
@@ -356,6 +375,17 @@ public sealed class GridOptions
     [ConfigurationKeyName("PARTIAL_TAKE_PROFIT_PERCENT")]
     [Range(typeof(decimal), "0", "100")]
     public decimal PartialTakeProfitPercent { get; init; } = 50m;
+
+    [ConfigurationKeyName("FAST_PROTECTIVE_EXIT_ENABLED")]
+    public bool FastProtectiveExitEnabled { get; init; } = true;
+
+    [ConfigurationKeyName("FAST_PROTECTIVE_EXIT_TRIGGER_PERCENT")]
+    [Range(typeof(decimal), "0", "1000")]
+    public decimal FastProtectiveExitTriggerPercent { get; init; } = 0.8m;
+
+    [ConfigurationKeyName("FAST_PROTECTIVE_EXIT_FLOOR_PERCENT")]
+    [Range(typeof(decimal), "-100", "1000")]
+    public decimal FastProtectiveExitFloorPercent { get; init; } = 0.2m;
 
     [ConfigurationKeyName("ENABLE_NO_TRADE_REASON_TRACKING")]
     public bool EnableNoTradeReasonTracking { get; init; } = true;

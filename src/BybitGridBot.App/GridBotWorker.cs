@@ -2308,9 +2308,14 @@ public sealed class GridBotWorker : BackgroundService
             marketPhase);
         state.ProfitProtectionPeakPrice = profitProtection.PeakPrice;
         state.ProfitProtectionTrailingStopPrice = profitProtection.TrailingStopPrice;
+        var shouldFastExit = ShouldFastProtectiveExit(profitProtection);
         if (reason is null && profitProtection.ShouldBlockNewBuys)
         {
             reason = $"profit-protection: {profitProtection.Reason}";
+        }
+        else if (reason is null && shouldFastExit)
+        {
+            reason = $"fast-protective-exit: peak={profitProtection.PeakProfitPercent:0.####}%, current={profitProtection.CurrentProfitPercent:0.####}%";
         }
 
         if (reason is null)
@@ -2350,11 +2355,16 @@ public sealed class GridBotWorker : BackgroundService
             currentPrice,
             reason,
             maxSellQuantity,
-            profitProtection.ShouldTrailExit,
+            profitProtection.ShouldTrailExit || shouldFastExit,
             cancellationToken);
 
         return true;
     }
+
+    private bool ShouldFastProtectiveExit(ProfitProtectionDecision profitProtection) =>
+        _gridOptions.FastProtectiveExitEnabled &&
+        profitProtection.PeakProfitPercent >= _gridOptions.FastProtectiveExitTriggerPercent &&
+        profitProtection.CurrentProfitPercent <= _gridOptions.FastProtectiveExitFloorPercent;
 
     private bool ShouldApplyTrailingProtection(
         IReadOnlyList<Candle> candles,
@@ -2591,6 +2601,7 @@ public sealed class GridBotWorker : BackgroundService
     {
         var buyLevels = _strategy.GetBuyLevels(levels, currentPrice).OrderByDescending(level => level.Price).ToArray();
         var sellLevels = _strategy.GetSellLevels(levels, currentPrice).OrderBy(level => level.Price).ToArray();
+        var buyOrderSizeMultiplier = await GetPairScoreOrderSizeMultiplierAsync(state, cancellationToken);
 
         foreach (var level in buyLevels)
         {
@@ -2609,7 +2620,7 @@ public sealed class GridBotWorker : BackgroundService
 
             var buyExpectedProfitPercent = ExpectedProfitFilter.CalculateLongRoundTripPercent(level.Price, targetSellLevel.Price);
 
-            var orderSizeUsdt = GetOrderSizeUsdt(TradeSide.Buy, level.Price, state);
+            var orderSizeUsdt = ApplyPairScoreOrderSizeMultiplier(GetOrderSizeUsdt(TradeSide.Buy, level.Price, state), buyOrderSizeMultiplier);
             var quantity = instrument.RoundQuantity(orderSizeUsdt / level.Price);
             if (quantity <= 0m || quantity < instrument.MinOrderQty)
             {
@@ -2772,7 +2783,9 @@ public sealed class GridBotWorker : BackgroundService
         string strategyName,
         CancellationToken cancellationToken)
     {
-        var orderSizeUsdt = GetDcaOrderSizeUsdt(config, state);
+        var orderSizeUsdt = ApplyPairScoreOrderSizeMultiplier(
+            GetDcaOrderSizeUsdt(config, state),
+            await GetPairScoreOrderSizeMultiplierAsync(state, cancellationToken));
         var limitPrice = instrument.RoundPrice(_dcaStrategy.CalculateLimitBuyPrice(currentPrice, config));
         if (limitPrice <= 0m)
         {
@@ -2864,7 +2877,9 @@ public sealed class GridBotWorker : BackgroundService
             return;
         }
 
-        var orderSizeUsdt = GetSignalOrderSizeUsdt(config, state);
+        var orderSizeUsdt = ApplyPairScoreOrderSizeMultiplier(
+            GetSignalOrderSizeUsdt(config, state),
+            await GetPairScoreOrderSizeMultiplierAsync(state, cancellationToken));
         var limitPrice = instrument.RoundPrice(CalculateSignalBuyPrice(currentPrice, config));
         if (limitPrice <= 0m)
         {
@@ -2996,7 +3011,9 @@ public sealed class GridBotWorker : BackgroundService
             return;
         }
 
-        var orderSizeUsdt = GetTrendOrderSizeUsdt(config, state);
+        var orderSizeUsdt = ApplyPairScoreOrderSizeMultiplier(
+            GetTrendOrderSizeUsdt(config, state),
+            await GetPairScoreOrderSizeMultiplierAsync(state, cancellationToken));
         var limitPrice = instrument.RoundPrice(CalculateTrendBuyPrice(currentPrice, config));
         if (limitPrice <= 0m || HasActiveOrderAtLevel(activeOrders, limitPrice))
         {
@@ -3206,6 +3223,31 @@ public sealed class GridBotWorker : BackgroundService
 
         var instrument = await _bybitRestClient.GetInstrumentInfoAsync(_gridOptions.Category, _gridOptions.Symbol, cancellationToken);
         var entryPrice = filledOrder.AverageFillPrice > 0m ? filledOrder.AverageFillPrice : filledOrder.Price;
+        var activeOrders = await _repository.GetActiveOrdersAsync(_gridOptions.Symbol, cancellationToken);
+        var wallet = _appOptions.TradingMode == TradingMode.Paper
+            ? null
+            : await _bybitRestClient.GetWalletBalanceAsync(cancellationToken, _quoteAsset, _baseAsset);
+        var availableBase = GetAvailableBaseBalance(state, activeOrders, wallet);
+        if (availableBase <= 0m)
+        {
+            return;
+        }
+
+        if (config.TakeProfitLadderEnabled)
+        {
+            var allOrders = await _repository.GetOrdersAsync(_gridOptions.Symbol, cancellationToken);
+            await EnsureDcaTakeProfitLadderAsync(
+                instrument,
+                config,
+                filledOrder,
+                entryPrice,
+                activeOrders,
+                allOrders,
+                availableBase,
+                cancellationToken);
+            return;
+        }
+
         var takeProfitPrice = instrument.RoundPrice(_dcaStrategy.CalculateTakeProfitPrice(entryPrice, config));
         if (takeProfitPrice <= entryPrice)
         {
@@ -3213,17 +3255,107 @@ public sealed class GridBotWorker : BackgroundService
             return;
         }
 
-        var activeOrders = await _repository.GetActiveOrdersAsync(_gridOptions.Symbol, cancellationToken);
-        var wallet = _appOptions.TradingMode == TradingMode.Paper
-            ? null
-            : await _bybitRestClient.GetWalletBalanceAsync(cancellationToken, _quoteAsset, _baseAsset);
-        var availableBase = GetAvailableBaseBalance(state, activeOrders, wallet);
         var quantity = instrument.RoundQuantity(decimal.Min(filledOrder.FilledQuantity, availableBase));
         if (quantity <= 0m || quantity < instrument.MinOrderQty)
         {
             return;
         }
 
+        await EnsureSingleDcaTakeProfitOrderAsync(
+            filledOrder,
+            entryPrice,
+            takeProfitPrice,
+            quantity,
+            activeOrders,
+            cancellationToken);
+    }
+
+    private async Task EnsureDcaTakeProfitLadderAsync(
+        BybitInstrumentInfo instrument,
+        DcaStrategyConfig config,
+        GridOrder filledOrder,
+        decimal entryPrice,
+        IReadOnlyCollection<GridOrder> activeOrders,
+        IReadOnlyCollection<GridOrder> allOrders,
+        decimal availableBase,
+        CancellationToken cancellationToken)
+    {
+        var remainingAvailableBase = decimal.Min(filledOrder.FilledQuantity, availableBase);
+        var ladder = BuildTakeProfitLadder(config);
+        var plannedPrices = new HashSet<decimal>();
+        var childSells = allOrders
+            .Where(order => order.Side == TradeSide.Sell &&
+                string.Equals(order.ParentOrderLinkId, filledOrder.OrderLinkId, StringComparison.Ordinal) &&
+                order.Status is not OrderStatus.Cancelled and not OrderStatus.Rejected)
+            .ToArray();
+        var plannedQuantity = 0m;
+
+        foreach (var level in ladder)
+        {
+            if (remainingAvailableBase <= 0m)
+            {
+                return;
+            }
+
+            var takeProfitPrice = instrument.RoundPrice(entryPrice * (1m + level.ProfitPercent / 100m));
+            if (takeProfitPrice <= entryPrice)
+            {
+                continue;
+            }
+
+            var desiredLevelQuantity = level.IsFinal
+                ? filledOrder.FilledQuantity - plannedQuantity
+                : filledOrder.FilledQuantity * level.QuantityPercent / 100m;
+            desiredLevelQuantity = instrument.RoundQuantity(decimal.Max(0m, desiredLevelQuantity));
+            plannedQuantity += desiredLevelQuantity;
+
+            var protectedAtLevel = childSells
+                .Where(order => order.Price == takeProfitPrice)
+                .Sum(order => order.FilledQuantity + (order.IsActive ? Math.Max(0m, order.Quantity - order.FilledQuantity) : 0m));
+            var missingQuantity = instrument.RoundQuantity(decimal.Max(0m, desiredLevelQuantity - protectedAtLevel));
+            var quantity = instrument.RoundQuantity(decimal.Min(missingQuantity, remainingAvailableBase));
+            if (quantity <= 0m || quantity < instrument.MinOrderQty)
+            {
+                continue;
+            }
+
+            if (HasActiveOrderAtLevel(activeOrders, takeProfitPrice) ||
+                !plannedPrices.Add(takeProfitPrice) ||
+                await _repository.GetActiveOrderAtLevelAsync(_gridOptions.Symbol, TradeSide.Sell, takeProfitPrice, cancellationToken) is not null)
+            {
+                continue;
+            }
+
+            var expectedProfitPercent = ExpectedProfitFilter.CalculateLongRoundTripPercent(entryPrice, takeProfitPrice);
+            await ExecuteStrategyDecisionAsync(
+                new StrategyExecutionDecision
+                {
+                    OrderIntents =
+                    [
+                        new OrderIntent(
+                            TradeSide.Sell,
+                            takeProfitPrice,
+                            quantity,
+                            filledOrder.OrderLinkId,
+                            filledOrder.StrategySource,
+                            expectedProfitPercent,
+                            SkipExpectedProfitFilter: true)
+                    ]
+                },
+                cancellationToken);
+
+            remainingAvailableBase -= quantity;
+        }
+    }
+
+    private async Task EnsureSingleDcaTakeProfitOrderAsync(
+        GridOrder filledOrder,
+        decimal entryPrice,
+        decimal takeProfitPrice,
+        decimal quantity,
+        IReadOnlyCollection<GridOrder> activeOrders,
+        CancellationToken cancellationToken)
+    {
         if (!await HasMinimumNetProfitAsync(TradeSide.Sell, entryPrice, takeProfitPrice, quantity, filledOrder.FeePaid, cancellationToken))
         {
             _logger.LogInformation(
@@ -3238,12 +3370,6 @@ public sealed class GridBotWorker : BackgroundService
             return;
         }
 
-        if (availableBase < quantity)
-        {
-            _logger.LogInformation("DCA take-profit sell at {Price} skipped because base asset inventory is insufficient.", takeProfitPrice);
-            return;
-        }
-
         var expectedProfitPercent = ExpectedProfitFilter.CalculateLongRoundTripPercent(entryPrice, takeProfitPrice);
         await ExecuteStrategyDecisionAsync(
             new StrategyExecutionDecision
@@ -3252,6 +3378,31 @@ public sealed class GridBotWorker : BackgroundService
             },
             cancellationToken);
     }
+
+    private static IReadOnlyList<TakeProfitLadderLevel> BuildTakeProfitLadder(DcaStrategyConfig config)
+    {
+        var levels = new List<TakeProfitLadderLevel>(3);
+        AddTakeProfitLadderLevel(levels, config.TakeProfitLadderFirstPercent, config.TakeProfitLadderFirstQuantityPercent, false);
+        AddTakeProfitLadderLevel(levels, config.TakeProfitLadderSecondPercent, config.TakeProfitLadderSecondQuantityPercent, false);
+        AddTakeProfitLadderLevel(levels, config.TakeProfitLadderFinalPercent, config.TakeProfitLadderFinalQuantityPercent, true);
+        return levels;
+    }
+
+    private static void AddTakeProfitLadderLevel(
+        List<TakeProfitLadderLevel> levels,
+        decimal profitPercent,
+        decimal quantityPercent,
+        bool isFinal)
+    {
+        if (profitPercent <= 0m || quantityPercent <= 0m)
+        {
+            return;
+        }
+
+        levels.Add(new TakeProfitLadderLevel(profitPercent, decimal.Min(100m, quantityPercent), isFinal));
+    }
+
+    private sealed record TakeProfitLadderLevel(decimal ProfitPercent, decimal QuantityPercent, bool IsFinal);
 
     private async Task EnsureProtectiveSellLifecycleAsync(
         GridBotSettings? profile,
@@ -3282,13 +3433,15 @@ public sealed class GridBotWorker : BackgroundService
 
             if (ShouldUseDcaFollowUp(profile, buy))
             {
-                await EnsureDcaTakeProfitOrderAsync(state, ParseDcaStrategyConfig(profile!), remainingBuy, cancellationToken);
+                var config = ParseDcaStrategyConfig(profile!);
+                await EnsureDcaTakeProfitOrderAsync(state, config, config.TakeProfitLadderEnabled ? buy : remainingBuy, cancellationToken);
                 continue;
             }
 
             if (ShouldUseBtdFollowUp(profile, buy))
             {
-                await EnsureDcaTakeProfitOrderAsync(state, ParseBtdStrategyConfig(profile!), remainingBuy, cancellationToken);
+                var config = ParseBtdStrategyConfig(profile!);
+                await EnsureDcaTakeProfitOrderAsync(state, config, config.TakeProfitLadderEnabled ? buy : remainingBuy, cancellationToken);
                 continue;
             }
 
@@ -3731,6 +3884,11 @@ public sealed class GridBotWorker : BackgroundService
                 pnlDelta);
         }
 
+        await RecordNoTradeReasonAsync(
+            profile,
+            NoTradeReason.ScoreTooLow,
+            $"Pair score penalty active after loss sell {order.OrderLinkId}. Realized PnL delta: {pnlDelta}.",
+            cancellationToken);
         await DisableAggressiveModeAfterStopLossAsync(profile, state, order, pnlDelta, source, now, cancellationToken);
     }
 
@@ -4095,6 +4253,107 @@ public sealed class GridBotWorker : BackgroundService
 
         return Math.Max(orderSize, 0m);
     }
+
+    private async Task<decimal> GetPairScoreOrderSizeMultiplierAsync(BotState state, CancellationToken cancellationToken)
+    {
+        if (!_gridOptions.PairScoreCapitalAllocationEnabled)
+        {
+            return 1m;
+        }
+
+        var orders = await _repository.GetOrdersAsync(_gridOptions.Symbol, cancellationToken);
+        var lastNoTradeReason = (await _repository.GetNoTradeReasonsAsync(_gridOptions.Symbol, 1, cancellationToken)).FirstOrDefault();
+        var score = CalculateCapitalPairScore(state, orders, lastNoTradeReason);
+        var multiplier = score >= 75m
+            ? _gridOptions.PairScoreHotMultiplier
+            : score >= 60m
+                ? _gridOptions.PairScoreGoodMultiplier
+                : score >= 40m
+                    ? _gridOptions.PairScoreNeutralMultiplier
+                    : _gridOptions.PairScoreAvoidMultiplier;
+
+        if (multiplier != 1m)
+        {
+            _logger.LogInformation(
+                "Pair score capital allocation for {Symbol}: score={Score}, buy order multiplier={Multiplier}.",
+                _gridOptions.Symbol,
+                score,
+                multiplier);
+        }
+
+        return multiplier;
+    }
+
+    private static decimal ApplyPairScoreOrderSizeMultiplier(decimal orderSizeUsdt, decimal multiplier) =>
+        decimal.Max(0m, orderSizeUsdt * decimal.Max(0m, multiplier));
+
+    private static decimal CalculateCapitalPairScore(
+        BotState state,
+        IReadOnlyCollection<GridOrder> orders,
+        NoTradeReasonRecord? lastNoTradeReason)
+    {
+        var score = 50m;
+
+        if (state.DailyRealizedPnl > 0m || state.TotalRealizedPnl > 0m)
+        {
+            score += 12m;
+        }
+        else if (state.DailyRealizedPnl < 0m)
+        {
+            score -= 12m;
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        var recentClosed = orders
+            .Where(order => order.Side == TradeSide.Sell &&
+                order.Status == OrderStatus.Filled &&
+                (order.FilledAt ?? order.UpdatedAt) >= now.AddHours(-48))
+            .ToArray();
+        if (recentClosed.Length >= 2)
+        {
+            var winRate = recentClosed.Count(order => order.RealizedPnl > order.FeePaid) / (decimal)recentClosed.Length * 100m;
+            score += winRate >= 50m ? 12m : -12m;
+        }
+
+        var recentLossSell = recentClosed
+            .Where(order => (order.FilledAt ?? order.UpdatedAt) >= now.AddHours(-6))
+            .Any(order => order.RealizedPnl <= order.FeePaid);
+        if (recentLossSell)
+        {
+            score -= 18m;
+        }
+
+        if (state.BaseAssetQuantity > 0m && state.AverageEntryPrice > 0m && state.LastObservedPrice is > 0m)
+        {
+            var drawdownPercent = state.LastObservedPrice.Value >= state.AverageEntryPrice
+                ? 0m
+                : (state.AverageEntryPrice - state.LastObservedPrice.Value) / state.AverageEntryPrice * 100m;
+            score -= drawdownPercent >= 3m ? 15m : drawdownPercent >= 1m ? 6m : 0m;
+        }
+
+        if (lastNoTradeReason is not null)
+        {
+            score -= GetPairScoreNoTradePenalty(lastNoTradeReason.ReasonCode);
+        }
+
+        return decimal.Max(0m, decimal.Min(100m, decimal.Round(score, 2, MidpointRounding.AwayFromZero)));
+    }
+
+    private static decimal GetPairScoreNoTradePenalty(NoTradeReason reason) => reason switch
+    {
+        NoTradeReason.DumpDetected => 30m,
+        NoTradeReason.BtcRiskOff => 30m,
+        NoTradeReason.DailyLossLimitReached => 30m,
+        NoTradeReason.AggressiveStopLoss => 25m,
+        NoTradeReason.AggressiveCooldown => 20m,
+        NoTradeReason.HighVolatility => 20m,
+        NoTradeReason.MaxPositionReached => 15m,
+        NoTradeReason.PriceOutsideRange => 12m,
+        NoTradeReason.ExpectedProfitTooLow => 10m,
+        NoTradeReason.ScoreTooLow => 8m,
+        NoTradeReason.UnknownMarketPhase => 6m,
+        _ => 0m
+    };
 
     private decimal GetDcaOrderSizeUsdt(DcaStrategyConfig config, BotState state)
     {

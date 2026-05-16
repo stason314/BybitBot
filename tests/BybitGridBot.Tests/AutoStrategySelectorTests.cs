@@ -137,6 +137,13 @@ public sealed class AutoStrategySelectorTests
 
         Assert.Equal(TradingStrategyType.Hybrid, recommendation.StrategyType);
         Assert.Equal(15m, config.RootElement.GetProperty("orderSizeUsdt").GetDecimal());
+        Assert.True(config.RootElement.GetProperty("takeProfitLadderEnabled").GetBoolean());
+        Assert.Equal(0.6m, config.RootElement.GetProperty("takeProfitLadderFirstPercent").GetDecimal());
+        Assert.Equal(50m, config.RootElement.GetProperty("takeProfitLadderFirstQuantityPercent").GetDecimal());
+        Assert.Equal(1m, config.RootElement.GetProperty("takeProfitLadderSecondPercent").GetDecimal());
+        Assert.Equal(30m, config.RootElement.GetProperty("takeProfitLadderSecondQuantityPercent").GetDecimal());
+        Assert.Equal(1.5m, config.RootElement.GetProperty("takeProfitLadderFinalPercent").GetDecimal());
+        Assert.Equal(20m, config.RootElement.GetProperty("takeProfitLadderFinalQuantityPercent").GetDecimal());
         Assert.Equal(15m, config.RootElement.GetProperty("trendOrderSizeUsdt").GetDecimal());
         Assert.Equal(60, config.RootElement.GetProperty("breakoutLookbackCandles").GetInt32());
         Assert.Equal(15m, config.RootElement.GetProperty("signalOrderSizeUsdt").GetDecimal());
@@ -383,6 +390,48 @@ public sealed class AutoStrategySelectorTests
     }
 
     [Fact]
+    public void Recommend_UsesCombo_WhenBtdPhaseIsBullishOverextended()
+    {
+        var selector = new AutoStrategySelector();
+        var options = new GridOptions
+        {
+            LowerPrice = 0.19m,
+            UpperPrice = 0.21m,
+            Step = 0.001m,
+            OrderSizeUsdt = 20m,
+            MinOrderSizeUsdt = 15m,
+            StopLowerPrice = 0.18m,
+            StopUpperPrice = 0.22m
+        };
+        var candles = BuildOverextendedBullishCandles();
+
+        var recommendation = selector.Recommend(
+            options,
+            new MarketRegimeAnalysis
+            {
+                Regime = MarketRegimeType.Trend,
+                MovePercent = 1.4m,
+                Recommendation = "Overextended trend",
+                Support = candles.Min(candle => candle.Low),
+                Resistance = candles.Max(candle => candle.High)
+            },
+            new MarketPhaseResult
+            {
+                Phase = MarketPhase.PullbackInUptrend,
+                Confidence = 0.8m,
+                Score = 80m,
+                Reason = "Pullback phase, but signal is already stretched.",
+                SuggestedStrategy = StrategyType.Btd,
+                DetectedAt = DateTimeOffset.UtcNow
+            },
+            candles);
+
+        Assert.Equal(TradingStrategyType.Combo, recommendation.StrategyType);
+        Assert.Contains("BTD is avoided", recommendation.Reason);
+        Assert.Contains("maxActiveBuyOrders", recommendation.StrategyConfigJson);
+    }
+
+    [Fact]
     public void Recommend_ReturnsCombo_ForVolatileRangeWithoutDanger()
     {
         var selector = new AutoStrategySelector();
@@ -600,6 +649,25 @@ public sealed class AutoStrategySelectorTests
                     close,
                     1000m,
                     close * 1000m);
+            })
+            .ToArray();
+    }
+
+    private static IReadOnlyList<Candle> BuildOverextendedBullishCandles()
+    {
+        var now = DateTimeOffset.UtcNow;
+        return Enumerable.Range(0, 45)
+            .Select(index =>
+            {
+                var close = 100m + index * 0.18m;
+                return new Candle(
+                    now.AddMinutes(index - 45),
+                    close,
+                    close + 0.08m,
+                    close - 0.04m,
+                    close,
+                    index >= 38 ? 1800m : 1000m,
+                    close * (index >= 38 ? 1800m : 1000m));
             })
             .ToArray();
     }

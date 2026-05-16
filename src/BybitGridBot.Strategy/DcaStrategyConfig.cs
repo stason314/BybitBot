@@ -10,6 +10,20 @@ public class DcaStrategyConfig
 
     public decimal TakeProfitPercent { get; init; } = 1m;
 
+    public bool TakeProfitLadderEnabled { get; init; } = true;
+
+    public decimal TakeProfitLadderFirstPercent { get; init; } = 0.6m;
+
+    public decimal TakeProfitLadderFirstQuantityPercent { get; init; } = 50m;
+
+    public decimal TakeProfitLadderSecondPercent { get; init; } = 1m;
+
+    public decimal TakeProfitLadderSecondQuantityPercent { get; init; } = 30m;
+
+    public decimal TakeProfitLadderFinalPercent { get; init; } = 1.5m;
+
+    public decimal TakeProfitLadderFinalQuantityPercent { get; init; } = 20m;
+
     public decimal LimitOffsetPercent { get; init; } = 0.05m;
 
     public decimal DipPercent { get; init; } = 0m;
