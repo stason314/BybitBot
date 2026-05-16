@@ -1193,9 +1193,14 @@ public sealed class GridBotWorker : BackgroundService
             return;
         }
 
-        if (!_btdStrategy.IsDipTriggered(config, currentPrice, candles) && !aggressiveModeActive)
+        if (!_btdStrategy.IsDipTriggered(config, currentPrice, candles))
         {
             _logger.LogInformation("BTD entry skipped because dip trigger has not fired.");
+            await RecordNoTradeReasonAsync(
+                profile,
+                NoTradeReason.UnknownMarketPhase,
+                $"BTD skipped: dip trigger has not fired. Required dip={config.DipPercent:0.####}% over {config.DipLookbackCandles} candles.",
+                cancellationToken);
             return;
         }
 
@@ -1555,7 +1560,7 @@ public sealed class GridBotWorker : BackgroundService
         }
 
         var aggressiveModeActive = IsAggressiveModeActive(_gridOptions, state, DateTimeOffset.UtcNow);
-        if (!IsGridSidewaysMarket(marketRegime, marketPhase, aggressiveModeActive))
+        if (!IsGridSidewaysMarket(marketRegime, marketPhase))
         {
             _logger.LogInformation(
                 "Grid orders skipped for {Symbol}: grid is allowed only in sideways markets. Regime={Regime}, Move={MovePercent:F4}%, Phase={Phase}, Reason={Reason}",
@@ -5069,11 +5074,10 @@ public sealed class GridBotWorker : BackgroundService
             or MarketPhase.Exhaustion;
     }
 
-    private static bool IsGridSidewaysMarket(MarketRegimeAnalysis marketRegime, MarketPhaseResult marketPhase, bool aggressiveModeActive)
+    private static bool IsGridSidewaysMarket(MarketRegimeAnalysis marketRegime, MarketPhaseResult marketPhase)
     {
         return marketRegime.Regime == MarketRegimeType.Range &&
-            (marketPhase.Phase == MarketPhase.RangeBound ||
-             (aggressiveModeActive && marketPhase.Phase == MarketPhase.Unknown));
+            marketPhase.Phase == MarketPhase.RangeBound;
     }
 
     private async Task RecordNoTradeReasonForViolationsAsync(
