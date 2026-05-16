@@ -46,14 +46,22 @@ public sealed class BtdStrategy : ITradingStrategy
         IReadOnlyCollection<Candle> btcCandles,
         bool aggressiveModeActive = false)
     {
-        if (phase.Phase is MarketPhase.Dump or MarketPhase.HighVolatility or MarketPhase.BreakoutDown)
+        var btcRiskOff = options.BtdBlockOnBtcRiskOff &&
+            IsBtcRiskOff(btcCandles, options.BtcLookbackCandles, options.BtcMaxMovePercent);
+        if (btcRiskOff)
         {
             return false;
         }
 
-        if (options.BtdBlockOnBtcRiskOff && IsBtcRiskOff(btcCandles, options.BtcLookbackCandles, options.BtcMaxMovePercent))
+        if (phase.Phase is MarketPhase.HighVolatility or MarketPhase.BreakoutDown)
         {
             return false;
+        }
+
+        var ordered = candles.OrderBy(candle => candle.OpenTime).ToArray();
+        if (phase.Phase == MarketPhase.Dump)
+        {
+            return aggressiveModeActive && ReversalBtdDetector.TryDetect(ordered, out _);
         }
 
         if (!aggressiveModeActive && options.BtdRequireUptrend && phase.Phase != MarketPhase.PullbackInUptrend)
@@ -61,7 +69,6 @@ public sealed class BtdStrategy : ITradingStrategy
             return false;
         }
 
-        var ordered = candles.OrderBy(candle => candle.OpenTime).ToArray();
         if (aggressiveModeActive)
         {
             return currentPrice > 0m && ordered.Length > 0;

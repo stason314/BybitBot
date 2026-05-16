@@ -49,6 +49,22 @@ public sealed class AutoStrategySelector
             LastPrice = lastPrice
         };
 
+        if (ReversalBtdDetector.TryDetect(ordered, signal, out var reversalSetup))
+        {
+            var reversalOrderSize = RecommendStarterOrderSize(currentOptions, orderSize * 0.45m);
+            return Build(
+                TradingStrategyType.Btd,
+                $"Reversal BTD after dump: drawdown {reversalSetup.DrawdownPercent:0.####}%, {reversalSetup.CandlesSinceLow} candles without a new low, buy volume {reversalSetup.BuyVolumeRatio:0.####}x, RSI {reversalSetup.Rsi:0.####}. Start with a small buy and attach TP ladder immediately.",
+                lower,
+                upper,
+                step,
+                reversalOrderSize,
+                stopLower,
+                stopUpper,
+                BuildReversalBtdConfig(reversalOrderSize, currentOptions.MinOrderSizeUsdt, lastPrice, stopLower, stopUpper, reversalSetup),
+                metrics);
+        }
+
         if (ShouldRecommendVolatileRange(regime, signal, atrPercent))
         {
             var comboOrderSize = RecommendActiveOrderSize(currentOptions, orderSize);
@@ -231,12 +247,20 @@ public sealed class AutoStrategySelector
         var signal = _signalAnalyzer.Analyze(candles);
         var bullishOverextended = IsBullishOverextended(signal);
         var strategyType = StrategyForPhase(phase, currentOptions.SpotOnly);
+        var reversalBtd = IsReversalBtdRecommendation(baseline);
         var aggressiveUnknownFallback = aggressiveModeActive &&
             phase.Phase == MarketPhase.Unknown &&
             baseline.StrategyType is not TradingStrategyType.NoTrade and not TradingStrategyType.Pause;
         if (aggressiveUnknownFallback)
         {
-            strategyType = ResolveAggressiveUnknownFallbackStrategy(baseline);
+            strategyType = ResolveAggressiveUnknownFallbackStrategy(baseline, reversalBtd);
+        }
+
+        if (aggressiveModeActive &&
+            reversalBtd &&
+            phase.Phase == MarketPhase.Dump)
+        {
+            strategyType = TradingStrategyType.Btd;
         }
 
         if (phase.Phase != MarketPhase.Dump &&
@@ -256,18 +280,21 @@ public sealed class AutoStrategySelector
         var orderSize = strategyType switch
         {
             TradingStrategyType.NoTrade or TradingStrategyType.Pause => currentOptions.MinOrderSizeUsdt,
+            TradingStrategyType.Btd when reversalBtd => baseline.OrderSizeUsdt,
             TradingStrategyType.Btd or TradingStrategyType.TrendFollow or TradingStrategyType.TrendFollowing or TradingStrategyType.Breakout =>
                 RecommendActiveOrderSize(currentOptions, baseline.OrderSizeUsdt * 0.75m),
             _ => baseline.OrderSizeUsdt
         };
-        var strategyConfigJson = BuildStrategyConfig(
-            strategyType,
-            orderSize,
-            currentOptions.MinOrderSizeUsdt,
-            baseline.LowerPrice,
-            baseline.StopLowerPrice,
-            baseline.StopUpperPrice,
-            baseline.Metrics);
+        var strategyConfigJson = reversalBtd && strategyType == TradingStrategyType.Btd
+            ? baseline.StrategyConfigJson
+            : BuildStrategyConfig(
+                strategyType,
+                orderSize,
+                currentOptions.MinOrderSizeUsdt,
+                baseline.LowerPrice,
+                baseline.StopLowerPrice,
+                baseline.StopUpperPrice,
+                baseline.Metrics);
 
         return Build(
             strategyType,
@@ -367,8 +394,13 @@ public sealed class AutoStrategySelector
         };
     }
 
-    private static TradingStrategyType ResolveAggressiveUnknownFallbackStrategy(AutoConfigRecommendation baseline)
+    private static TradingStrategyType ResolveAggressiveUnknownFallbackStrategy(AutoConfigRecommendation baseline, bool reversalBtd)
     {
+        if (reversalBtd)
+        {
+            return TradingStrategyType.Btd;
+        }
+
         return baseline.StrategyType == TradingStrategyType.Grid
             ? TradingStrategyType.Grid
             : TradingStrategyType.Combo;
@@ -381,6 +413,11 @@ public sealed class AutoStrategySelector
         bool bullishOverextended,
         AutoConfigRecommendation baseline)
     {
+        if (IsReversalBtdRecommendation(baseline) && strategyType == TradingStrategyType.Btd)
+        {
+            return $"{baseline.Reason} Phase={phase.Phase}, confidence={phase.Confidence:0.####}. Hard risk filters still apply.";
+        }
+
         if (aggressiveUnknownFallback)
         {
             return $"Aggressive auto fallback: phase is Unknown, using {strategyType} from market regime instead of NoTrade. Baseline was {baseline.StrategyType}. Baseline reason: {baseline.Reason}. Phase confidence: {phase.Confidence:0.####}. {phase.Reason}";
@@ -473,6 +510,10 @@ public sealed class AutoStrategySelector
             signal.VolumeRatio < 1.8m &&
             drawdownPercent >= 0.5m;
     }
+
+    private static bool IsReversalBtdRecommendation(AutoConfigRecommendation recommendation) =>
+        recommendation.StrategyType == TradingStrategyType.Btd &&
+        recommendation.Reason.StartsWith("Reversal BTD after dump:", StringComparison.Ordinal);
 
     private static string BuildComboConfig(decimal orderSize, decimal minOrderSize, decimal dcaBelowPrice)
     {
@@ -689,6 +730,44 @@ public sealed class AutoStrategySelector
         return JsonSerializer.Serialize(config, JsonOptions);
     }
 
+    private static string BuildReversalBtdConfig(
+        decimal orderSize,
+        decimal minOrderSize,
+        decimal lastPrice,
+        decimal stopLower,
+        decimal stopUpper,
+        ReversalBtdSetup setup)
+    {
+        var config = new
+        {
+            reversalMode = true,
+            reversalDrawdownPercent = setup.DrawdownPercent,
+            reversalCandlesSinceLow = setup.CandlesSinceLow,
+            reversalBuyVolumeRatio = setup.BuyVolumeRatio,
+            orderSizeUsdt = decimal.Round(decimal.Max(minOrderSize, orderSize), 2, MidpointRounding.AwayFromZero),
+            dipPercent = 0.4m,
+            dipLookbackCandles = 30,
+            candleInterval = "1",
+            maxBuys = 2,
+            minMinutesBetweenBuys = 10,
+            takeProfitPercent = 1m,
+            takeProfitLadderEnabled = true,
+            takeProfitLadderFirstPercent = 0.6m,
+            takeProfitLadderFirstQuantityPercent = 50m,
+            takeProfitLadderSecondPercent = 1m,
+            takeProfitLadderSecondQuantityPercent = 30m,
+            takeProfitLadderFinalPercent = 1.5m,
+            takeProfitLadderFinalQuantityPercent = 20m,
+            limitOffsetPercent = 0.1m,
+            maxPositionUsdt = 200m,
+            referencePrice = decimal.Round(lastPrice, 8, MidpointRounding.AwayFromZero),
+            stopLowerPrice = stopLower,
+            stopUpperPrice = stopUpper
+        };
+
+        return JsonSerializer.Serialize(config, JsonOptions);
+    }
+
     private static decimal RecommendOrderSize(GridOptions options, MarketRegimeAnalysis regime)
     {
         var multiplier = regime.Regime switch
@@ -706,6 +785,15 @@ public sealed class AutoStrategySelector
     private static decimal RecommendActiveOrderSize(GridOptions options, decimal baseOrderSize)
     {
         return decimal.Max(decimal.Max(options.MinOrderSizeUsdt, baseOrderSize), 20m);
+    }
+
+    private static decimal RecommendStarterOrderSize(GridOptions options, decimal baseOrderSize)
+    {
+        var minimum = options.MinOrderSizeUsdt > 0m ? options.MinOrderSizeUsdt : 5m;
+        var capped = options.OrderSizeUsdt > 0m
+            ? decimal.Min(options.OrderSizeUsdt, baseOrderSize)
+            : baseOrderSize;
+        return decimal.Max(minimum, capped);
     }
 
     private static decimal ChooseStopPadding(
