@@ -19,8 +19,34 @@ public sealed class FuturesIntegrationSafetyTests
         var request = service.CreateBybitRequest(Settings(), Intent(FuturesTradeAction.CloseLong, stopLossPrice: null));
 
         Assert.Equal("Sell", request.Side);
-        Assert.True(request.ReduceOnly);
+        Assert.True(request.ReduceOnly.GetValueOrDefault());
         Assert.Equal(0, request.PositionIdx);
+    }
+
+    [Fact]
+    public void FuturesOpenShortRequest_IsPaperOnlyAndSellSide()
+    {
+        var service = CreateExecutionService(TradingMode.Paper);
+
+        var request = service.CreateBybitRequest(
+            Settings(direction: FuturesDirection.ShortOnly),
+            Intent(FuturesTradeAction.OpenShort, stopLossPrice: 110m));
+
+        Assert.Equal("Sell", request.Side);
+        Assert.False(request.ReduceOnly.GetValueOrDefault());
+    }
+
+    [Fact]
+    public void FuturesOpenShortRequest_IsBlockedOutsidePaper()
+    {
+        var service = CreateExecutionService(TradingMode.Testnet);
+
+        var exception = Assert.Throws<InvalidOperationException>(() =>
+            service.CreateBybitRequest(
+                Settings(direction: FuturesDirection.ShortOnly),
+                Intent(FuturesTradeAction.OpenShort, stopLossPrice: 110m)));
+
+        Assert.Contains("paper mode", exception.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -230,7 +256,8 @@ public sealed class FuturesIntegrationSafetyTests
     private static FuturesBotSettings Settings(
         string category = "linear",
         FuturesPositionMode positionMode = FuturesPositionMode.OneWay,
-        decimal leverage = 2m) => new()
+        decimal leverage = 2m,
+        FuturesDirection direction = FuturesDirection.LongOnly) => new()
     {
         Symbol = "BTCUSDT",
         Category = category,
@@ -238,7 +265,7 @@ public sealed class FuturesIntegrationSafetyTests
         Leverage = leverage,
         MarginMode = FuturesMarginMode.Isolated,
         PositionMode = positionMode,
-        Direction = FuturesDirection.LongOnly,
+        Direction = direction,
         MaxNotionalUsdt = 100m,
         MaxMarginUsdt = 50m,
         StopLossPercent = 1m,

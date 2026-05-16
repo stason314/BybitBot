@@ -17,6 +17,7 @@ public interface IFuturesDashboardService
     Task<UpdateSettingsResponse> SetProfileEnabledAsync(string symbol, bool enabled, CancellationToken cancellationToken);
     Task<UpdateSettingsResponse> ClosePositionAsync(string symbol, CancellationToken cancellationToken);
     Task<UpdateSettingsResponse> OpenPaperTestPositionAsync(string symbol, CancellationToken cancellationToken);
+    Task<UpdateSettingsResponse> OpenPaperTestShortPositionAsync(string symbol, CancellationToken cancellationToken);
     Task<UpdateSettingsResponse> CancelActiveOrdersAsync(string symbol, CancellationToken cancellationToken);
     Task<UpdateSettingsResponse> ResetPaperStatsAsync(string symbol, CancellationToken cancellationToken);
     string RenderDashboardPage();
@@ -221,7 +222,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         var errors = ValidateRequest(symbol, category, request);
         if (strategyType is null)
         {
-            errors.Add("Strategy type must be trendfollow, breakout, gridlongonly, reduceonly, or pause.");
+            errors.Add("Strategy type must be trendfollow, breakout, gridlongonly, trendfollowshortonly, breakdownshort, gridshortonly, reduceonly, or pause.");
         }
 
         if (marginMode is null)
@@ -236,7 +237,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
 
         if (direction is null)
         {
-            errors.Add("Direction must be long-only for the MVP.");
+            errors.Add("Direction must be long-only, short-only, or long+short.");
         }
 
         if (aggressiveModeKind is null)
@@ -380,7 +381,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
                 Success = false,
                 Symbol = normalizedSymbol,
                 Message = "No open futures position.",
-                Errors = ["No open long position to close."]
+                Errors = ["No open futures position to close."]
             };
         }
 
@@ -393,6 +394,9 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
 
         var price = instrument.RoundPrice(referencePrice);
         var quantity = instrument.RoundQuantity(position.Size);
+        var closeAction = IsShort(position.Side)
+            ? FuturesTradeAction.CloseShort
+            : FuturesTradeAction.CloseLong;
         var result = await _executionService.ExecuteAsync(new FuturesExecutionRequest
         {
             Settings = settings,
@@ -400,12 +404,12 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             {
                 Symbol = settings.Symbol,
                 Category = settings.Category,
-                Action = FuturesTradeAction.CloseLong,
+                Action = closeAction,
                 Price = price,
                 Quantity = quantity,
                 Leverage = settings.Leverage,
                 PositionIdx = 0,
-                OrderLinkId = FuturesOrderLinkIds.Create(FuturesTradeAction.CloseLong),
+                OrderLinkId = FuturesOrderLinkIds.Create(closeAction),
                 Reason = "dashboard-reduce-only-close"
             },
             Position = position,
@@ -428,9 +432,19 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         };
     }
 
-    public async Task<UpdateSettingsResponse> OpenPaperTestPositionAsync(string symbol, CancellationToken cancellationToken)
+    public Task<UpdateSettingsResponse> OpenPaperTestPositionAsync(string symbol, CancellationToken cancellationToken) =>
+        OpenPaperTestPositionAsync(symbol, FuturesTradeAction.OpenLong, cancellationToken);
+
+    public Task<UpdateSettingsResponse> OpenPaperTestShortPositionAsync(string symbol, CancellationToken cancellationToken) =>
+        OpenPaperTestPositionAsync(symbol, FuturesTradeAction.OpenShort, cancellationToken);
+
+    private async Task<UpdateSettingsResponse> OpenPaperTestPositionAsync(
+        string symbol,
+        FuturesTradeAction action,
+        CancellationToken cancellationToken)
     {
         var normalizedSymbol = NormalizeSymbol(symbol);
+        var isShort = action == FuturesTradeAction.OpenShort;
         if (_appOptions.TradingMode != TradingMode.Paper)
         {
             return new UpdateSettingsResponse
@@ -438,7 +452,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
                 Success = false,
                 Symbol = normalizedSymbol,
                 Message = "Paper test entry is disabled outside paper mode.",
-                Errors = ["Paper Test Entry is available only when TRADING_MODE=Paper."]
+                Errors = ["Paper test entries are available only when TRADING_MODE=Paper."]
             };
         }
 
@@ -462,6 +476,28 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
                 Symbol = normalizedSymbol,
                 Message = "Futures profile is disabled.",
                 Errors = ["Enable the futures profile before opening a paper test entry."]
+            };
+        }
+
+        if (isShort && settings.Direction == FuturesDirection.LongOnly)
+        {
+            return new UpdateSettingsResponse
+            {
+                Success = false,
+                Symbol = normalizedSymbol,
+                Message = "Paper short entry skipped.",
+                Errors = ["Set futures Direction to short-only or long+short before opening a paper short entry."]
+            };
+        }
+
+        if (!isShort && settings.Direction == FuturesDirection.ShortOnly)
+        {
+            return new UpdateSettingsResponse
+            {
+                Success = false,
+                Symbol = normalizedSymbol,
+                Message = "Paper long entry skipped.",
+                Errors = ["Set futures Direction to long-only or long+short before opening a paper long entry."]
             };
         }
 
@@ -524,16 +560,22 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         {
             Symbol = settings.Symbol,
             Category = settings.Category,
-            Action = FuturesTradeAction.OpenLong,
+            Action = action,
             Price = price,
             Quantity = quantity,
             Leverage = settings.Leverage,
-            StopLossPrice = instrument.RoundPrice(price * (1m - settings.StopLossPercent / 100m)),
-            TakeProfitPrice = instrument.RoundPrice(price * (1m + settings.TakeProfitPercent / 100m)),
-            LiquidationPrice = EstimateLongLiquidationPrice(price, settings.Leverage),
+            StopLossPrice = isShort
+                ? instrument.RoundPrice(price * (1m + settings.StopLossPercent / 100m))
+                : instrument.RoundPrice(price * (1m - settings.StopLossPercent / 100m)),
+            TakeProfitPrice = isShort
+                ? instrument.RoundPrice(price * (1m - settings.TakeProfitPercent / 100m))
+                : instrument.RoundPrice(price * (1m + settings.TakeProfitPercent / 100m)),
+            LiquidationPrice = isShort
+                ? EstimateShortLiquidationPrice(price, settings.Leverage)
+                : EstimateLongLiquidationPrice(price, settings.Leverage),
             PositionIdx = 0,
-            OrderLinkId = FuturesOrderLinkIds.Create(FuturesTradeAction.OpenLong),
-            Reason = "dashboard-paper-test-entry"
+            OrderLinkId = FuturesOrderLinkIds.Create(action),
+            Reason = isShort ? "dashboard-paper-test-short-entry" : "dashboard-paper-test-entry"
         };
 
         var state = await EnsurePaperStateAsync(settings, price, cancellationToken);
@@ -579,7 +621,9 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         await _repository.AddFuturesRiskDecisionAsync(new FuturesRiskDecisionRecord
         {
             Symbol = settings.Symbol,
-            Source = position.Size > 0m ? "AggressiveScaleIn" : "PaperTestEntry",
+            Source = position.Size > 0m
+                ? (isShort ? "AggressiveShortScaleIn" : "AggressiveScaleIn")
+                : (isShort ? "PaperTestShortEntry" : "PaperTestEntry"),
             OrderLinkId = intent.OrderLinkId,
             Action = intent.Action,
             IsAllowed = riskDecision.IsAllowed,
@@ -618,7 +662,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             Symbol = normalizedSymbol,
             Message = position.Size > 0m
                 ? $"Paper aggressive scale-in opened. Notional: {intent.NotionalUsdt:F4} USDT, qty: {intent.Quantity:F8}."
-                : $"Paper test long opened. Notional: {intent.NotionalUsdt:F4} USDT, qty: {intent.Quantity:F8}."
+                : $"Paper test {(isShort ? "short" : "long")} opened. Notional: {intent.NotionalUsdt:F4} USDT, qty: {intent.Quantity:F8}."
         };
     }
 
@@ -882,6 +926,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         <div class="actions">
           <button type="button" id="toggleProfile">Toggle</button>
           <button type="button" class="primary" id="paperTestEntry">Paper Test Entry</button>
+          <button type="button" class="primary" id="paperTestShortEntry">Paper Short Entry</button>
           <button type="button" class="danger" id="closePosition">Close Position</button>
           <button type="button" class="danger" id="cancelFuturesOrders">Cancel Orders</button>
         </div>
@@ -954,8 +999,8 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
           <div><label for="symbol">Symbol</label><input id="symbol" name="symbol" required /></div>
           <div><label for="category">Category</label><input id="category" name="category" value="linear" required /></div>
           <div><label for="enabled">Profile</label><select id="enabled" name="enabled"><option value="true">Enabled</option><option value="false">Disabled</option></select></div>
-          <div><label for="strategyType">Strategy</label><select id="strategyType" name="strategyType"><option value="pause">Pause</option><option value="trendfollow">Trend Follow</option><option value="breakout">Breakout</option><option value="gridlongonly">Grid Long Only</option><option value="reduceonly">Reduce Only</option></select></div>
-          <div><label for="direction">Direction</label><select id="direction" name="direction"><option value="long-only">Long only</option></select></div>
+          <div><label for="strategyType">Strategy</label><select id="strategyType" name="strategyType"><option value="pause">Pause</option><option value="trendfollow">Trend Follow</option><option value="breakout">Breakout</option><option value="gridlongonly">Grid Long Only</option><option value="trendfollowshortonly">Trend Follow Short</option><option value="breakdownshort">Breakdown Short</option><option value="gridshortonly">Grid Short Only</option><option value="reduceonly">Reduce Only</option></select></div>
+          <div><label for="direction">Direction</label><select id="direction" name="direction"><option value="long-only">Long only</option><option value="short-only">Short only</option><option value="long+short">Long + short</option></select></div>
           <div><label for="leverage">Leverage</label><input id="leverage" name="leverage" type="number" step="0.01" min="1" required /></div>
           <div><label for="marginMode">Margin Mode</label><select id="marginMode" name="marginMode"><option value="isolated">Isolated</option></select></div>
           <div><label for="positionMode">Position Mode</label><select id="positionMode" name="positionMode"><option value="oneway">One-way</option></select></div>
@@ -1203,11 +1248,16 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
     const renderRuntime = (data) => {
       const preflight = data.lastPreflightResult;
       const paperTestEntry = byId('paperTestEntry');
+      const paperTestShortEntry = byId('paperTestShortEntry');
       const paperTestEnabled = data.tradingMode === 'Paper' && data.settings.enabled;
       paperTestEntry.disabled = !paperTestEnabled;
       paperTestEntry.title = data.tradingMode === 'Paper'
         ? (data.settings.enabled ? 'Open a minimal paper long through futures execution.' : 'Enable the futures profile first.')
         : 'Paper Test Entry is available only when TRADING_MODE=Paper.';
+      paperTestShortEntry.disabled = !paperTestEnabled;
+      paperTestShortEntry.title = data.tradingMode === 'Paper'
+        ? (data.settings.enabled ? 'Open a minimal paper short through futures execution.' : 'Enable the futures profile first.')
+        : 'Paper Short Entry is available only when TRADING_MODE=Paper.';
       const resetPaperStats = byId('resetPaperStats');
       resetPaperStats.disabled = data.tradingMode !== 'Paper';
       resetPaperStats.title = data.tradingMode === 'Paper'
@@ -1571,6 +1621,15 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
       if (latest?.tradingMode !== 'Paper') return;
       if (!symbol) return;
       const response = await fetch(`/api/futures/position/${encodeURIComponent(symbol)}/paper-test-entry`, { method: 'POST' });
+      const result = await response.json();
+      setControlStatus(response.ok ? 'ok' : 'error', response.ok ? result.message : (result.errors?.join(' | ') || result.message), symbol);
+      await load(true);
+    });
+    byId('paperTestShortEntry').addEventListener('click', async () => {
+      const symbol = selectedSymbol || latest?.settings?.symbol;
+      if (latest?.tradingMode !== 'Paper') return;
+      if (!symbol) return;
+      const response = await fetch(`/api/futures/position/${encodeURIComponent(symbol)}/paper-test-short-entry`, { method: 'POST' });
       const result = await response.json();
       setControlStatus(response.ok ? 'ok' : 'error', response.ok ? result.message : (result.errors?.join(' | ') || result.message), symbol);
       await load(true);
@@ -2194,6 +2253,13 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
     private static decimal EstimateLongLiquidationPrice(decimal entryPrice, decimal leverage) =>
         leverage > 0m ? decimal.Max(0m, entryPrice * (1m - (1m / leverage))) : 0m;
 
+    private static decimal EstimateShortLiquidationPrice(decimal entryPrice, decimal leverage) =>
+        leverage > 0m ? entryPrice * (1m + (1m / leverage)) : 0m;
+
+    private static bool IsShort(string side) =>
+        string.Equals(side, "Sell", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(side, "Short", StringComparison.OrdinalIgnoreCase);
+
     private async Task<IReadOnlyList<Candle>> GetAnalysisCandlesAsync(
         FuturesBotSettings settings,
         CancellationToken cancellationToken)
@@ -2308,11 +2374,6 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             errors.Add("MVP supports only one-way position mode. Hedge mode is a later phase.");
         }
 
-        if (NormalizeToken(request.Direction) != "longonly")
-        {
-            errors.Add("MVP supports only long-only futures trading. Shorts are a later phase.");
-        }
-
         if (request.Leverage < 1m)
         {
             errors.Add("Leverage must be at least 1.");
@@ -2372,6 +2433,9 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             "trendfollow" or "trend" or "trendfollowing" => FuturesStrategyType.TrendFollow,
             "breakout" => FuturesStrategyType.Breakout,
             "gridlongonly" or "gridlong" or "grid" => FuturesStrategyType.GridLongOnly,
+            "trendfollowshortonly" or "trendshort" or "shorttrend" => FuturesStrategyType.TrendFollowShortOnly,
+            "breakdownshort" or "breakdown" or "shortbreakdown" => FuturesStrategyType.BreakdownShort,
+            "gridshortonly" or "gridshort" => FuturesStrategyType.GridShortOnly,
             "reduceonly" or "reduce" => FuturesStrategyType.ReduceOnly,
             "pause" => FuturesStrategyType.Pause,
             _ => null
@@ -2436,6 +2500,9 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         {
             FuturesStrategyType.TrendFollow => "trendfollow",
             FuturesStrategyType.GridLongOnly => "gridlongonly",
+            FuturesStrategyType.TrendFollowShortOnly => "trendfollowshortonly",
+            FuturesStrategyType.BreakdownShort => "breakdownshort",
+            FuturesStrategyType.GridShortOnly => "gridshortonly",
             FuturesStrategyType.ReduceOnly => "reduceonly",
             FuturesDirection.LongOnly => "long-only",
             FuturesDirection.ShortOnly => "short-only",

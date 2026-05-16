@@ -214,7 +214,7 @@ public sealed class FuturesReconciliationService
         BybitOrderId = order.BybitOrderId,
         Symbol = order.Symbol,
         Category = order.Category,
-        Action = ResolveAction(order.Side, order.ReduceOnly),
+        Action = ResolveAction(order.Side, order.ReduceOnly, order.PositionSide),
         Side = order.Side,
         Price = order.Price,
         Quantity = order.Quantity,
@@ -240,7 +240,7 @@ public sealed class FuturesReconciliationService
         BybitOrderId = order.BybitOrderId,
         Symbol = order.Symbol,
         Category = order.Category,
-        Action = ResolveAction(order.Side, order.ReduceOnly),
+        Action = ResolveAction(order.Side, order.ReduceOnly, order.PositionSide),
         Side = order.Side,
         Price = order.Price,
         Quantity = order.Quantity,
@@ -260,8 +260,26 @@ public sealed class FuturesReconciliationService
         FilledAt = order.FilledAt
     };
 
-    private static FuturesTradeAction ResolveAction(TradeSide side, bool reduceOnly) =>
-        side == TradeSide.Buy && !reduceOnly ? FuturesTradeAction.OpenLong : FuturesTradeAction.CloseLong;
+    private static FuturesTradeAction ResolveAction(TradeSide side, bool reduceOnly, string? positionSide = null)
+    {
+        if (IsShort(positionSide))
+        {
+            return reduceOnly ? FuturesTradeAction.CloseShort : FuturesTradeAction.OpenShort;
+        }
+
+        if (IsLong(positionSide))
+        {
+            return reduceOnly ? FuturesTradeAction.CloseLong : FuturesTradeAction.OpenLong;
+        }
+
+        return (side, reduceOnly) switch
+        {
+            (TradeSide.Buy, false) => FuturesTradeAction.OpenLong,
+            (TradeSide.Sell, false) => FuturesTradeAction.OpenShort,
+            (TradeSide.Buy, true) => FuturesTradeAction.CloseShort,
+            _ => FuturesTradeAction.CloseLong
+        };
+    }
 
     private static FuturesFillRecord MapFill(BybitExecutionSnapshot execution, bool reduceOnly)
     {
@@ -357,6 +375,14 @@ public sealed class FuturesReconciliationService
 
     private static TradeSide ParseSide(string side) =>
         Enum.TryParse<TradeSide>(side, true, out var parsed) ? parsed : TradeSide.Buy;
+
+    private static bool IsLong(string? side) =>
+        string.Equals(side, "Buy", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(side, "Long", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsShort(string? side) =>
+        string.Equals(side, "Sell", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(side, "Short", StringComparison.OrdinalIgnoreCase);
 
     private static OrderStatus MapStatus(string orderStatus) =>
         orderStatus switch

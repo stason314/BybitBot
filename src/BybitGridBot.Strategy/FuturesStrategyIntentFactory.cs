@@ -50,8 +50,56 @@ internal static class FuturesStrategyIntentFactory
         Reason = reason
     };
 
+    public static FuturesTradeIntent OpenShort(
+        FuturesBotSettings settings,
+        decimal currentPrice,
+        FuturesInstrumentRules instrument)
+    {
+        var price = instrument.RoundPrice(currentPrice);
+        var notional = ResolveEntryNotional(settings);
+        var quantity = instrument.RoundQuantity(notional / price);
+        var stopLossPrice = instrument.RoundPrice(price * (1m + settings.StopLossPercent / 100m));
+        var takeProfitPrice = instrument.RoundPrice(price * (1m - settings.TakeProfitPercent / 100m));
+        return new FuturesTradeIntent
+        {
+            Symbol = settings.Symbol,
+            Category = settings.Category,
+            Action = FuturesTradeAction.OpenShort,
+            Price = price,
+            Quantity = quantity,
+            Leverage = settings.Leverage,
+            StopLossPrice = stopLossPrice,
+            TakeProfitPrice = takeProfitPrice,
+            LiquidationPrice = EstimateShortLiquidationPrice(price, settings.Leverage),
+            PositionIdx = 0,
+            OrderLinkId = FuturesOrderLinkIds.Create(FuturesTradeAction.OpenShort),
+            Reason = "futures-short-entry"
+        };
+    }
+
+    public static FuturesTradeIntent CloseShort(
+        FuturesBotSettings settings,
+        FuturesPositionSnapshot position,
+        decimal currentPrice,
+        FuturesInstrumentRules instrument,
+        string reason) => new()
+    {
+        Symbol = settings.Symbol,
+        Category = settings.Category,
+        Action = FuturesTradeAction.CloseShort,
+        Price = instrument.RoundPrice(currentPrice),
+        Quantity = instrument.RoundQuantity(position.Size),
+        Leverage = settings.Leverage,
+        PositionIdx = 0,
+        OrderLinkId = FuturesOrderLinkIds.Create(FuturesTradeAction.CloseShort),
+        Reason = reason
+    };
+
     private static decimal EstimateLongLiquidationPrice(decimal entryPrice, decimal leverage) =>
         leverage > 0m ? decimal.Max(0m, entryPrice * (1m - (1m / leverage))) : 0m;
+
+    private static decimal EstimateShortLiquidationPrice(decimal entryPrice, decimal leverage) =>
+        leverage > 0m ? entryPrice * (1m + (1m / leverage)) : 0m;
 
     private static decimal ResolveEntryNotional(FuturesBotSettings settings)
     {

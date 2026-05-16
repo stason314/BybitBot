@@ -26,6 +26,26 @@ public sealed class FuturesOrderRequestFactoryTests
     }
 
     [Fact]
+    public void Create_MapsOpenShortWithoutReduceOnly()
+    {
+        var request = FuturesOrderRequestFactory.Create(Intent(FuturesTradeAction.OpenShort));
+
+        Assert.Equal("Sell", request.Side);
+        Assert.False(request.ReduceOnly.GetValueOrDefault());
+        Assert.Equal(0, request.PositionIdx);
+    }
+
+    [Fact]
+    public void Create_MapsCloseShortWithReduceOnly()
+    {
+        var request = FuturesOrderRequestFactory.Create(Intent(FuturesTradeAction.CloseShort));
+
+        Assert.Equal("Buy", request.Side);
+        Assert.True(request.ReduceOnly.GetValueOrDefault());
+        Assert.Equal(0, request.PositionIdx);
+    }
+
+    [Fact]
     public void Create_MapsStopLossAndTakeProfit()
     {
         var request = FuturesOrderRequestFactory.Create(Intent(

@@ -16,8 +16,25 @@ public sealed class FuturesReduceOnly : IFuturesStrategy
 
     public FuturesStrategyDecision Decide(FuturesStrategyContext context)
     {
-        return context.Position.Size > 0m
+        if (context.Position.Size <= 0m)
+        {
+            return FuturesStrategyDecision.Empty("No futures position to reduce.");
+        }
+
+        return FuturesShortOnlySignals.IsShort(context.Position.Side)
             ? new FuturesStrategyDecision
+            {
+                TradeIntents =
+                [
+                    FuturesStrategyIntentFactory.CloseShort(
+                        context.Settings,
+                        context.Position,
+                        context.CurrentPrice,
+                        context.Instrument,
+                        "reduce-only")
+                ]
+            }
+            : new FuturesStrategyDecision
             {
                 TradeIntents =
                 [
@@ -28,8 +45,7 @@ public sealed class FuturesReduceOnly : IFuturesStrategy
                         context.Instrument,
                         "reduce-only")
                 ]
-            }
-            : FuturesStrategyDecision.Empty("No futures position to reduce.");
+            };
     }
 }
 
@@ -130,6 +146,103 @@ public sealed class FuturesGridLongOnly : IFuturesStrategy
     }
 }
 
+public sealed class FuturesTrendFollowShortOnly : IFuturesStrategy
+{
+    public FuturesStrategyType StrategyType => FuturesStrategyType.TrendFollowShortOnly;
+
+    public FuturesStrategyDecision Decide(FuturesStrategyContext context)
+    {
+        if (!FuturesShortOnlySignals.TryAnalyze(context, out var signal))
+        {
+            return FuturesStrategyDecision.Empty("Futures short trend-follow market data unavailable.");
+        }
+
+        if (FuturesShortOnlySignals.ShouldCloseOpenShort(context, signal))
+        {
+            return FuturesShortOnlySignals.CloseShort(context, "exit-signal");
+        }
+
+        if (FuturesShortOnlySignals.ShouldOpenAggressiveTestShort(context, signal))
+        {
+            return FuturesShortOnlySignals.OpenShort(context);
+        }
+
+        if (context.Position.Size > 0m && !context.Settings.AggressiveModeEnabled)
+        {
+            return FuturesStrategyDecision.Empty("Existing futures short remains open.");
+        }
+
+        return signal.MovePercent <= -0.8m
+            ? FuturesShortOnlySignals.OpenShort(context)
+            : FuturesStrategyDecision.Empty("No futures trend-follow short entry signal.");
+    }
+}
+
+public sealed class FuturesBreakdownShortOnly : IFuturesStrategy
+{
+    public FuturesStrategyType StrategyType => FuturesStrategyType.BreakdownShort;
+
+    public FuturesStrategyDecision Decide(FuturesStrategyContext context)
+    {
+        if (!FuturesShortOnlySignals.TryAnalyze(context, out var signal))
+        {
+            return FuturesStrategyDecision.Empty("Futures breakdown market data unavailable.");
+        }
+
+        if (FuturesShortOnlySignals.ShouldCloseOpenShort(context, signal))
+        {
+            return FuturesShortOnlySignals.CloseShort(context, "exit-signal");
+        }
+
+        if (FuturesShortOnlySignals.ShouldOpenAggressiveTestShort(context, signal))
+        {
+            return FuturesShortOnlySignals.OpenShort(context);
+        }
+
+        if (context.Position.Size > 0m && !context.Settings.AggressiveModeEnabled)
+        {
+            return FuturesStrategyDecision.Empty("Existing futures short remains open.");
+        }
+
+        return context.CurrentPrice <= signal.Support
+            ? FuturesShortOnlySignals.OpenShort(context)
+            : FuturesStrategyDecision.Empty("No futures breakdown short entry signal.");
+    }
+}
+
+public sealed class FuturesGridShortOnly : IFuturesStrategy
+{
+    public FuturesStrategyType StrategyType => FuturesStrategyType.GridShortOnly;
+
+    public FuturesStrategyDecision Decide(FuturesStrategyContext context)
+    {
+        if (!FuturesShortOnlySignals.TryAnalyze(context, out var signal))
+        {
+            return FuturesStrategyDecision.Empty("Futures short grid market data unavailable.");
+        }
+
+        if (FuturesShortOnlySignals.ShouldCloseOpenShort(context, signal))
+        {
+            return FuturesShortOnlySignals.CloseShort(context, "exit-signal");
+        }
+
+        if (FuturesShortOnlySignals.ShouldOpenAggressiveTestShort(context, signal))
+        {
+            return FuturesShortOnlySignals.OpenShort(context);
+        }
+
+        if (context.Position.Size > 0m && !context.Settings.AggressiveModeEnabled)
+        {
+            return FuturesStrategyDecision.Empty("Existing futures short remains open.");
+        }
+
+        var entryBand = signal.Resistance - (signal.Range * 0.35m);
+        return context.CurrentPrice >= entryBand
+            ? FuturesShortOnlySignals.OpenShort(context)
+            : FuturesStrategyDecision.Empty("No futures grid short entry signal.");
+    }
+}
+
 internal static class FuturesLongOnlySignals
 {
     public static bool TryAnalyze(FuturesStrategyContext context, out FuturesLongOnlySignal signal)
@@ -200,3 +313,56 @@ internal readonly record struct FuturesLongOnlySignal(
     decimal Support,
     decimal Resistance,
     decimal Range);
+
+internal static class FuturesShortOnlySignals
+{
+    public static bool TryAnalyze(FuturesStrategyContext context, out FuturesLongOnlySignal signal) =>
+        FuturesLongOnlySignals.TryAnalyze(context, out signal);
+
+    public static bool ShouldCloseOpenShort(FuturesStrategyContext context, FuturesLongOnlySignal signal)
+    {
+        if (context.Position.Size <= 0m || !IsShort(context.Position.Side))
+        {
+            return false;
+        }
+
+        var stopPrice = context.Position.EntryPrice * (1m + context.Settings.StopLossPercent / 100m);
+        var takeProfitPrice = context.Position.EntryPrice * (1m - context.Settings.TakeProfitPercent / 100m);
+        return context.CurrentPrice >= stopPrice ||
+            context.CurrentPrice <= takeProfitPrice ||
+            signal.MovePercent > 1m;
+    }
+
+    public static bool ShouldOpenAggressiveTestShort(FuturesStrategyContext context, FuturesLongOnlySignal signal) =>
+        context.Settings.AggressiveModeEnabled &&
+        context.Settings.AggressiveModeKind == FuturesAggressiveModeKind.Test &&
+        signal.MovePercent < 1.2m;
+
+    public static FuturesStrategyDecision OpenShort(FuturesStrategyContext context)
+    {
+        var entryIntent = FuturesStrategyIntentFactory.OpenShort(
+            context.Settings,
+            context.CurrentPrice,
+            context.Instrument);
+        return entryIntent.Quantity > 0m
+            ? new FuturesStrategyDecision { TradeIntents = [entryIntent] }
+            : FuturesStrategyDecision.Empty("Futures short entry quantity is below instrument precision.");
+    }
+
+    public static FuturesStrategyDecision CloseShort(FuturesStrategyContext context, string reason) => new()
+    {
+        TradeIntents =
+        [
+            FuturesStrategyIntentFactory.CloseShort(
+                context.Settings,
+                context.Position,
+                context.CurrentPrice,
+                context.Instrument,
+                reason)
+        ]
+    };
+
+    public static bool IsShort(string side) =>
+        string.Equals(side, "Sell", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(side, "Short", StringComparison.OrdinalIgnoreCase);
+}

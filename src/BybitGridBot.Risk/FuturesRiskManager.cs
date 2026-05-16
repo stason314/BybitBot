@@ -58,6 +58,11 @@ public sealed class FuturesRiskManager
 
         if (context.Intent.IsPositionIncreasing)
         {
+            if (context.Position.Size > 0m && IsOppositeExposure(context.Position.Side, context.Intent.Action))
+            {
+                return Block("One-way futures mode blocks opening opposite exposure before the current position is closed.", RiskSeverity.Warning, RiskSuggestedAction.BlockNewOrders);
+            }
+
             var projectedNotional = context.Position.PositionValueUsdt + context.Intent.NotionalUsdt;
             if (projectedNotional > context.RiskOptions.MaxNotionalUsdt)
             {
@@ -87,6 +92,16 @@ public sealed class FuturesRiskManager
             if (context.Position.Size <= 0m)
             {
                 return Block("Reduce-only futures order requires an open position.", RiskSeverity.Warning, RiskSuggestedAction.BlockNewOrders);
+            }
+
+            if (context.Intent.Action == FuturesTradeAction.CloseLong && !IsLong(context.Position.Side))
+            {
+                return Block("CloseLong reduce-only order requires an open long position.", RiskSeverity.Warning, RiskSuggestedAction.BlockNewOrders);
+            }
+
+            if (context.Intent.Action == FuturesTradeAction.CloseShort && !IsShort(context.Position.Side))
+            {
+                return Block("CloseShort reduce-only order requires an open short position.", RiskSeverity.Warning, RiskSuggestedAction.BlockNewOrders);
             }
 
             if (context.Intent.Quantity > context.Position.Size)
@@ -145,6 +160,18 @@ public sealed class FuturesRiskManager
 
         return Math.Min(left, right);
     }
+
+    private static bool IsOppositeExposure(string positionSide, FuturesTradeAction action) =>
+        (IsLong(positionSide) && action == FuturesTradeAction.OpenShort) ||
+        (IsShort(positionSide) && action == FuturesTradeAction.OpenLong);
+
+    private static bool IsLong(string side) =>
+        string.Equals(side, "Buy", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(side, "Long", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsShort(string side) =>
+        string.Equals(side, "Sell", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(side, "Short", StringComparison.OrdinalIgnoreCase);
 
     private static RiskDecision Block(string reason, RiskSeverity severity, RiskSuggestedAction action) => new()
     {

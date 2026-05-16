@@ -128,7 +128,7 @@ public sealed class FuturesExecutionService
 
     public BybitCreateOrderRequest CreateBybitRequest(FuturesBotSettings settings, FuturesTradeIntent intent)
     {
-        ValidateMvpExecution(settings, intent, _futuresOptions.MvpMaxLeverage);
+        ValidateMvpExecution(settings, intent, _futuresOptions.MvpMaxLeverage, _appOptions.TradingMode);
         var request = FuturesOrderRequestFactory.Create(intent);
         if (intent.IsReduceOnly && request.ReduceOnly != true)
         {
@@ -145,15 +145,20 @@ public sealed class FuturesExecutionService
             throw new InvalidOperationException("Futures MVP requires positionIdx=0 for one-way mode.");
         }
 
-        if (intent.Action == FuturesTradeAction.OpenLong && string.IsNullOrWhiteSpace(request.StopLoss))
+        if (intent.Action is FuturesTradeAction.OpenLong or FuturesTradeAction.OpenShort &&
+            string.IsNullOrWhiteSpace(request.StopLoss))
         {
-            throw new InvalidOperationException("Futures OpenLong must attach stopLoss to order create.");
+            throw new InvalidOperationException("Futures open intents must attach stopLoss to order create.");
         }
 
         return request;
     }
 
-    private static void ValidateMvpExecution(FuturesBotSettings settings, FuturesTradeIntent intent, decimal maxLeverage)
+    private static void ValidateMvpExecution(
+        FuturesBotSettings settings,
+        FuturesTradeIntent intent,
+        decimal maxLeverage,
+        TradingMode tradingMode)
     {
         if (!string.Equals(settings.Category, "linear", StringComparison.OrdinalIgnoreCase) ||
             !string.Equals(intent.Category, "linear", StringComparison.OrdinalIgnoreCase))
@@ -171,9 +176,9 @@ public sealed class FuturesExecutionService
             throw new InvalidOperationException("Futures MVP supports only one-way mode.");
         }
 
-        if (settings.Direction != FuturesDirection.LongOnly)
+        if (settings.Direction != FuturesDirection.LongOnly && tradingMode != TradingMode.Paper)
         {
-            throw new InvalidOperationException("Futures MVP supports only long-only direction.");
+            throw new InvalidOperationException("Futures short direction is enabled only in paper mode.");
         }
 
         if (intent.PositionIdx != 0)
@@ -181,9 +186,10 @@ public sealed class FuturesExecutionService
             throw new InvalidOperationException("Futures MVP requires positionIdx=0.");
         }
 
-        if (intent.Action is FuturesTradeAction.OpenShort or FuturesTradeAction.CloseShort)
+        if (intent.Action is FuturesTradeAction.OpenShort or FuturesTradeAction.CloseShort &&
+            tradingMode != TradingMode.Paper)
         {
-            throw new InvalidOperationException("Futures MVP does not allow short actions.");
+            throw new InvalidOperationException("Futures short actions are enabled only in paper mode.");
         }
 
         if (settings.Leverage > maxLeverage || intent.Leverage > maxLeverage)

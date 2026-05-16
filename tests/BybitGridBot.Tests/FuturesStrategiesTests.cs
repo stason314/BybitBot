@@ -87,10 +87,50 @@ public sealed class FuturesStrategiesTests
         Assert.Equal(FuturesTradeAction.OpenLong, intent.Action);
     }
 
+    [Fact]
+    public void FuturesTrendFollowShortOnly_OpensShortOnNegativeMove()
+    {
+        var decision = new FuturesTrendFollowShortOnly().Decide(Context(
+            currentPrice: 49000m,
+            direction: FuturesDirection.ShortOnly));
+
+        var intent = Assert.Single(decision.TradeIntents);
+        Assert.Equal(FuturesTradeAction.OpenShort, intent.Action);
+        Assert.True(intent.StopLossPrice > intent.Price);
+        Assert.True(intent.TakeProfitPrice < intent.Price);
+    }
+
+    [Fact]
+    public void FuturesGridShortOnly_OpensShortNearResistance()
+    {
+        var decision = new FuturesGridShortOnly().Decide(Context(
+            currentPrice: 50140m,
+            direction: FuturesDirection.ShortOnly));
+
+        var intent = Assert.Single(decision.TradeIntents);
+        Assert.Equal(FuturesTradeAction.OpenShort, intent.Action);
+    }
+
+    [Fact]
+    public void FuturesReduceOnly_ClosesOpenShort()
+    {
+        var decision = new FuturesReduceOnly().Decide(Context(
+            currentPrice: 49000m,
+            positionSize: 0.01m,
+            entryPrice: 50000m,
+            positionSide: "Sell",
+            direction: FuturesDirection.ShortOnly));
+
+        var intent = Assert.Single(decision.TradeIntents);
+        Assert.Equal(FuturesTradeAction.CloseShort, intent.Action);
+    }
+
     private static FuturesStrategyContext Context(
         decimal currentPrice = 51000m,
         decimal positionSize = 0m,
         decimal entryPrice = 0m,
+        string? positionSide = null,
+        FuturesDirection direction = FuturesDirection.LongOnly,
         bool aggressiveModeEnabled = false,
         FuturesAggressiveModeKind aggressiveModeKind = FuturesAggressiveModeKind.Normal) => new()
     {
@@ -102,7 +142,7 @@ public sealed class FuturesStrategiesTests
             Leverage = 2m,
             MarginMode = FuturesMarginMode.Isolated,
             PositionMode = FuturesPositionMode.OneWay,
-            Direction = FuturesDirection.LongOnly,
+            Direction = direction,
             MaxNotionalUsdt = 100m,
             MaxMarginUsdt = 50m,
             StopLossPercent = 1m,
@@ -116,7 +156,7 @@ public sealed class FuturesStrategiesTests
         {
             Symbol = "BTCUSDT",
             Category = "linear",
-            Side = positionSize > 0m ? "Buy" : "None",
+            Side = positionSize > 0m ? positionSide ?? "Buy" : "None",
             Size = positionSize,
             EntryPrice = entryPrice,
             MarkPrice = currentPrice,

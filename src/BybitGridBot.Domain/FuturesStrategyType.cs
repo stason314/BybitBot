@@ -6,5 +6,8 @@ public enum FuturesStrategyType
     Breakout = 2,
     GridLongOnly = 3,
     ReduceOnly = 4,
-    Pause = 5
+    Pause = 5,
+    TrendFollowShortOnly = 6,
+    BreakdownShort = 7,
+    GridShortOnly = 8
 }

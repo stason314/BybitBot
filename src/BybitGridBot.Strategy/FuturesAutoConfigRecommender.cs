@@ -51,7 +51,8 @@ public sealed class FuturesAutoConfigRecommender
             ? decimal.Min(currentSettings.MaxMarginUsdt, maxNotional / recommendedLeverage)
             : currentSettings.MaxMarginUsdt;
 
-        if (IsDanger(movePercent, drawdownPercent, atrPercent))
+        if (IsDanger(movePercent, drawdownPercent, atrPercent) &&
+            currentSettings.Direction == FuturesDirection.LongOnly)
         {
             return Build(
                 currentSettings,
@@ -64,6 +65,38 @@ public sealed class FuturesAutoConfigRecommender
                 stopLossPercent,
                 takeProfitPercent,
                 entryNotionalMultiplier: 0.25m * exposureMultiplier * modeEntryMultiplier);
+        }
+
+        if (AllowsShort(currentSettings.Direction) && movePercent <= -1.2m)
+        {
+            return Build(
+                currentSettings,
+                FuturesStrategyType.TrendFollowShortOnly,
+                "Negative futures trend. Prefer short-only TrendFollow with stop-loss above entry.",
+                metrics,
+                recommendedLeverage,
+                maxNotional,
+                maxMargin,
+                stopLossPercent,
+                takeProfitPercent,
+                FuturesDirection.ShortOnly,
+                entryNotionalMultiplier: 0.25m * exposureMultiplier * modeEntryMultiplier);
+        }
+
+        if (AllowsShort(currentSettings.Direction) && lastPrice < low + (atr * 0.5m) && movePercent < -0.4m)
+        {
+            return Build(
+                currentSettings,
+                FuturesStrategyType.BreakdownShort,
+                "Potential downside breakdown. Use short-only Breakdown with reduced notional and stop-loss.",
+                metrics,
+                recommendedLeverage,
+                maxNotional,
+                maxMargin,
+                stopLossPercent,
+                takeProfitPercent,
+                FuturesDirection.ShortOnly,
+                entryNotionalMultiplier: 0.1875m * exposureMultiplier * modeEntryMultiplier);
         }
 
         if (movePercent >= 1.2m && drawdownPercent <= 2m)
@@ -98,14 +131,19 @@ public sealed class FuturesAutoConfigRecommender
 
         return Build(
             currentSettings,
-            FuturesStrategyType.GridLongOnly,
-            "Range-like futures market. Use long-only grid with conservative leverage.",
+            currentSettings.Direction == FuturesDirection.ShortOnly
+                ? FuturesStrategyType.GridShortOnly
+                : FuturesStrategyType.GridLongOnly,
+            currentSettings.Direction == FuturesDirection.ShortOnly
+                ? "Range-like futures market. Use short-only grid with conservative leverage."
+                : "Range-like futures market. Use long-only grid with conservative leverage.",
             metrics,
             decimal.Min(recommendedLeverage, 2m),
             maxNotional,
             maxMargin,
             stopLossPercent,
             takeProfitPercent,
+            currentSettings.Direction == FuturesDirection.ShortOnly ? FuturesDirection.ShortOnly : FuturesDirection.LongOnly,
             entryNotionalMultiplier: 0.1875m * exposureMultiplier * modeEntryMultiplier);
     }
 
@@ -119,6 +157,7 @@ public sealed class FuturesAutoConfigRecommender
         decimal? maxMarginUsdt = null,
         decimal? stopLossPercent = null,
         decimal? takeProfitPercent = null,
+        FuturesDirection? direction = null,
         decimal entryNotionalMultiplier = 0.25m)
     {
         var resolvedLeverage = decimal.Max(1m, leverage ?? currentSettings.Leverage);
@@ -134,7 +173,7 @@ public sealed class FuturesAutoConfigRecommender
             Leverage = decimal.Round(resolvedLeverage, 2, MidpointRounding.AwayFromZero),
             MarginMode = FuturesMarginMode.Isolated,
             PositionMode = FuturesPositionMode.OneWay,
-            Direction = FuturesDirection.LongOnly,
+            Direction = direction ?? FuturesDirection.LongOnly,
             MaxNotionalUsdt = decimal.Round(resolvedMaxNotional, 4, MidpointRounding.AwayFromZero),
             MaxMarginUsdt = decimal.Round(resolvedMaxMargin, 4, MidpointRounding.AwayFromZero),
             StopLossPercent = decimal.Round(resolvedStopLoss, 4, MidpointRounding.AwayFromZero),
@@ -147,6 +186,7 @@ public sealed class FuturesAutoConfigRecommender
                 resolvedStopLoss,
                 resolvedTakeProfit,
                 metrics,
+                direction ?? FuturesDirection.LongOnly,
                 entryNotionalMultiplier),
             Metrics = metrics
         };
@@ -158,6 +198,7 @@ public sealed class FuturesAutoConfigRecommender
         decimal stopLossPercent,
         decimal takeProfitPercent,
         FuturesAutoConfigMetrics metrics,
+        FuturesDirection direction,
         decimal entryNotionalMultiplier)
     {
         var config = new
@@ -169,7 +210,8 @@ public sealed class FuturesAutoConfigRecommender
             support = metrics.Support,
             resistance = metrics.Resistance,
             lastPrice = metrics.LastPrice,
-            longOnly = true,
+            longOnly = direction == FuturesDirection.LongOnly,
+            shortOnly = direction == FuturesDirection.ShortOnly,
             reduceOnlyOnExit = true
         };
 
@@ -204,6 +246,9 @@ public sealed class FuturesAutoConfigRecommender
 
     private static bool IsDanger(decimal movePercent, decimal drawdownPercent, decimal atrPercent) =>
         movePercent <= -1.5m || drawdownPercent >= 5m || atrPercent >= 6m;
+
+    private static bool AllowsShort(FuturesDirection direction) =>
+        direction is FuturesDirection.ShortOnly or FuturesDirection.LongAndShort;
 
     private static decimal CalculateAtr(IReadOnlyList<Candle> candles)
     {

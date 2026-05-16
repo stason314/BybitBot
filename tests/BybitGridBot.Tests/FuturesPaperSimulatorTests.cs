@@ -70,4 +70,101 @@ public sealed class FuturesPaperSimulatorTests
         Assert.Equal(0m, result.Position.Size);
         Assert.True(result.Position.RealizedPnl < 0m);
     }
+
+    [Fact]
+    public void Simulate_OpenShort_ProfitsWhenPriceFalls()
+    {
+        var simulator = new FuturesPaperSimulator(new FuturesAccounting());
+
+        var result = simulator.Simulate(new FuturesPaperSimulationRequest
+        {
+            Position = new FuturesPositionSnapshot
+            {
+                Symbol = "BTCUSDT",
+                Category = "linear"
+            },
+            Intent = new FuturesTradeIntent
+            {
+                Symbol = "BTCUSDT",
+                Category = "linear",
+                Action = FuturesTradeAction.OpenShort,
+                Price = 50000m,
+                Quantity = 0.01m,
+                Leverage = 2m,
+                LiquidationPrice = 75000m
+            },
+            MarkPrice = 49000m,
+            FeeRatePercent = 0.06m
+        });
+
+        Assert.False(result.IsLiquidated);
+        Assert.Equal("Sell", result.Position.Side);
+        Assert.Equal(10m, result.Position.UnrealizedPnl);
+        Assert.Equal(-0.3m, result.Position.RealizedPnl);
+    }
+
+    [Fact]
+    public void Simulate_CloseShort_RealizesProfitWhenPriceFalls()
+    {
+        var simulator = new FuturesPaperSimulator(new FuturesAccounting());
+
+        var result = simulator.Simulate(new FuturesPaperSimulationRequest
+        {
+            Position = new FuturesPositionSnapshot
+            {
+                Symbol = "BTCUSDT",
+                Category = "linear",
+                Side = "Sell",
+                Size = 0.01m,
+                EntryPrice = 50000m,
+                MarkPrice = 50000m,
+                LiquidationPrice = 75000m,
+                Leverage = 2m
+            },
+            Intent = new FuturesTradeIntent
+            {
+                Symbol = "BTCUSDT",
+                Category = "linear",
+                Action = FuturesTradeAction.CloseShort,
+                Price = 49000m,
+                Quantity = 0.01m,
+                Leverage = 2m
+            },
+            MarkPrice = 49000m,
+            FeeRatePercent = 0.06m
+        });
+
+        Assert.Equal("None", result.Position.Side);
+        Assert.Equal(0m, result.Position.Size);
+        Assert.Equal(9.706m, result.Position.RealizedPnl);
+    }
+
+    [Fact]
+    public void Simulate_OpenShort_LosesWhenPriceRises()
+    {
+        var simulator = new FuturesPaperSimulator(new FuturesAccounting());
+
+        var result = simulator.Simulate(new FuturesPaperSimulationRequest
+        {
+            Position = new FuturesPositionSnapshot
+            {
+                Symbol = "BTCUSDT",
+                Category = "linear"
+            },
+            Intent = new FuturesTradeIntent
+            {
+                Symbol = "BTCUSDT",
+                Category = "linear",
+                Action = FuturesTradeAction.OpenShort,
+                Price = 50000m,
+                Quantity = 0.01m,
+                Leverage = 2m,
+                LiquidationPrice = 75000m
+            },
+            MarkPrice = 51000m,
+            FeeRatePercent = 0.06m
+        });
+
+        Assert.Equal(-10m, result.Position.UnrealizedPnl);
+    }
 }
