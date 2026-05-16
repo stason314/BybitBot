@@ -75,6 +75,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
                 ?? BuildDefaultSettings(_futuresOptions, selectedSymbol);
 
         var position = BuildEmptyPosition(selectedSettings);
+        BybitPositionSnapshot? bybitPositionSnapshot = null;
         string? positionError = null;
         try
         {
@@ -84,10 +85,10 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             }
             else
             {
-                var bybitPosition = await _bybitRestClient.GetPositionAsync(selectedSettings.Category, selectedSettings.Symbol, cancellationToken);
-                if (bybitPosition is not null)
+                bybitPositionSnapshot = await _bybitRestClient.GetPositionAsync(selectedSettings.Category, selectedSettings.Symbol, cancellationToken);
+                if (bybitPositionSnapshot is not null)
                 {
-                    position = MapPosition(selectedSettings, bybitPosition);
+                    position = MapPosition(selectedSettings, bybitPositionSnapshot);
                 }
             }
         }
@@ -137,6 +138,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
             PaperAccount = BuildPaperAccount(state, position, _futuresOptions.PaperInitialEquityUsdt),
             PnlStats = BuildPnlStats(recentFills),
             TestnetSoak = BuildTestnetSoakStatus(position, activeOrders, recentOrders, recentFills, riskDecisions),
+            ProtectionStatus = BuildProtectionStatus(selectedSettings, position, bybitPositionSnapshot, riskDecisions),
             UserStreamStatus = BuildUserStreamStatus(),
             AggressiveMode = BuildAggressiveModeStatus(selectedSettings, recentFills, riskDecisions),
             AutoRecommendation = MapAutoRecommendation(recommendation),
@@ -965,6 +967,8 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
       </div>
       <div class="stats" id="testnetSoakStats" style="margin-bottom:0;"></div>
       <div class="subtle" id="testnetSoakRisk" style="margin-top:12px;"></div>
+      <div class="stats" id="protectionStats" style="margin-bottom:0;margin-top:12px;"></div>
+      <div class="subtle" id="protectionReason" style="margin-top:12px;"></div>
       <div class="stats" id="userStreamStats" style="margin-bottom:0;margin-top:12px;"></div>
     </section>
 
@@ -1419,6 +1423,16 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         ['Risk Events', formatNumber(soak.riskDecisionCount)]
       ].map(([label, value]) => `<div class="stat"><div class="label">${label}</div><div class="value">${escapeHtml(value)}</div></div>`).join('');
       byId('testnetSoakRisk').textContent = `${soak.lastRiskSource || '-'}: ${soak.lastRiskReason || '-'}`;
+      const protection = latest?.protectionStatus || {};
+      byId('protectionStats').innerHTML = [
+        ['Protection', protection.status || '-'],
+        ['Expected SL', formatNumber(protection.expectedStopLoss)],
+        ['Expected TP', formatNumber(protection.expectedTakeProfit)],
+        ['Current SL', formatNumber(protection.currentStopLoss)],
+        ['Current TP', formatNumber(protection.currentTakeProfit)],
+        ['Last Check', protection.lastCheckedAt ? formatDate(protection.lastCheckedAt) : '-']
+      ].map(([label, value]) => `<div class="stat"><div class="label">${label}</div><div class="value">${escapeHtml(value)}</div></div>`).join('');
+      byId('protectionReason').textContent = `${protection.lastSource || '-'}: ${protection.lastReason || '-'}`;
       const stream = latest?.userStreamStatus || {};
       byId('userStreamStats').innerHTML = [
         ['WS Enabled', stream.enabled ? 'yes' : 'no'],
@@ -1853,6 +1867,32 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         };
     }
 
+    private static FuturesProtectionStatusView BuildProtectionStatus(
+        FuturesBotSettings settings,
+        FuturesPositionView position,
+        BybitPositionSnapshot? bybitPosition,
+        IReadOnlyCollection<FuturesRiskDecisionRecord> riskDecisions)
+    {
+        var expectedStopLoss = ResolveExpectedStopLoss(settings, position);
+        var expectedTakeProfit = ResolveExpectedTakeProfit(settings, position);
+        var lastProtection = riskDecisions
+            .Where(decision => IsProtectionDecision(decision.Source))
+            .OrderByDescending(decision => decision.CreatedAt)
+            .FirstOrDefault();
+        return new FuturesProtectionStatusView
+        {
+            HasOpenPosition = position.Size > 0m,
+            ExpectedStopLoss = expectedStopLoss,
+            ExpectedTakeProfit = expectedTakeProfit,
+            CurrentStopLoss = bybitPosition?.StopLossPrice ?? 0m,
+            CurrentTakeProfit = bybitPosition?.TakeProfitPrice ?? 0m,
+            Status = ResolveProtectionStatus(position, bybitPosition, expectedStopLoss, expectedTakeProfit, lastProtection),
+            LastSource = lastProtection?.Source ?? "-",
+            LastReason = lastProtection?.Reason ?? "-",
+            LastCheckedAt = lastProtection?.CreatedAt
+        };
+    }
+
     private FuturesAggressiveModeView BuildAggressiveModeStatus(
         FuturesBotSettings settings,
         IReadOnlyCollection<FuturesFillRecord> fills,
@@ -1914,6 +1954,82 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
     private static bool IsNoTradeDecision(string source) =>
         string.Equals(source, "AggressiveNoTrade", StringComparison.OrdinalIgnoreCase) ||
         string.Equals(source, "StrategyNoTrade", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsProtectionDecision(string source) =>
+        string.Equals(source, "ProtectionVerify", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(source, "ProtectionRestore", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(source, "ProtectionFailed", StringComparison.OrdinalIgnoreCase);
+
+    private static string ResolveProtectionStatus(
+        FuturesPositionView position,
+        BybitPositionSnapshot? bybitPosition,
+        decimal expectedStopLoss,
+        decimal expectedTakeProfit,
+        FuturesRiskDecisionRecord? lastProtection)
+    {
+        if (position.Size <= 0m)
+        {
+            return "no-position";
+        }
+
+        if (lastProtection is not null &&
+            string.Equals(lastProtection.Source, "ProtectionFailed", StringComparison.OrdinalIgnoreCase))
+        {
+            return "failed";
+        }
+
+        if (lastProtection is not null &&
+            (string.Equals(lastProtection.Source, "ProtectionVerify", StringComparison.OrdinalIgnoreCase) ||
+             string.Equals(lastProtection.Source, "ProtectionRestore", StringComparison.OrdinalIgnoreCase)) &&
+            bybitPosition is null)
+        {
+            return "verified";
+        }
+
+        if (bybitPosition is null)
+        {
+            return "unknown";
+        }
+
+        return Matches(bybitPosition.StopLossPrice, expectedStopLoss) &&
+            Matches(bybitPosition.TakeProfitPrice, expectedTakeProfit)
+            ? "verified"
+            : "restore-required";
+    }
+
+    private static decimal ResolveExpectedStopLoss(FuturesBotSettings settings, FuturesPositionView position)
+    {
+        if (position.Size <= 0m || position.EntryPrice <= 0m)
+        {
+            return 0m;
+        }
+
+        return IsShort(position.Side)
+            ? position.EntryPrice * (1m + settings.StopLossPercent / 100m)
+            : position.EntryPrice * (1m - settings.StopLossPercent / 100m);
+    }
+
+    private static decimal ResolveExpectedTakeProfit(FuturesBotSettings settings, FuturesPositionView position)
+    {
+        if (position.Size <= 0m || position.EntryPrice <= 0m)
+        {
+            return 0m;
+        }
+
+        return IsShort(position.Side)
+            ? position.EntryPrice * (1m - settings.TakeProfitPercent / 100m)
+            : position.EntryPrice * (1m + settings.TakeProfitPercent / 100m);
+    }
+
+    private static bool Matches(decimal actual, decimal expected)
+    {
+        if (actual <= 0m || expected <= 0m)
+        {
+            return false;
+        }
+
+        return Math.Abs(actual - expected) <= decimal.Max(0.00000001m, expected * 0.000001m);
+    }
 
     private FuturesUserStreamStatusView BuildUserStreamStatus()
     {

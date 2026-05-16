@@ -274,6 +274,8 @@ public sealed class BybitUserStreamClient : IBybitUserStreamClient
         UnrealizedPnl = GetDecimal(item, "unrealisedPnl"),
         RealizedPnl = GetDecimal(item, "cumRealisedPnl"),
         CurRealizedPnl = GetDecimal(item, "curRealisedPnl"),
+        TakeProfitPrice = GetDecimal(item, "takeProfit"),
+        StopLossPrice = GetDecimal(item, "stopLoss"),
         PositionStatus = string.IsNullOrWhiteSpace(GetString(item, "positionStatus")) ? "Normal" : GetString(item, "positionStatus"),
         PositionIdx = GetInt(item, "positionIdx"),
         TradeMode = GetInt(item, "tradeMode"),

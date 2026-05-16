@@ -191,6 +191,88 @@ public sealed class FuturesIntegrationSafetyTests
         Assert.True(await repository.FuturesFillExistsAsync("exec-1", CancellationToken.None));
     }
 
+    [Fact]
+    public async Task Protection_RestoresMissingTradingStopOnTestnet()
+    {
+        var repository = await CreateRepositoryAsync();
+        var bybitClient = new FakeBybitRestClient
+        {
+            Position = new BybitPositionSnapshot
+            {
+                Symbol = "BTCUSDT",
+                Side = "Buy",
+                Size = 0.001m,
+                AveragePrice = 100m,
+                MarkPrice = 100m,
+                PositionIdx = 0,
+                Leverage = 2m
+            }
+        };
+        var service = new FuturesProtectionService(
+            Options.Create(new AppOptions { TradingMode = TradingMode.Testnet }),
+            bybitClient,
+            repository,
+            NullLogger<FuturesProtectionService>.Instance);
+
+        await service.EnsureProtectiveStopAsync(Settings(), Position(), CancellationToken.None);
+
+        var request = Assert.Single(bybitClient.TradingStopRequests);
+        Assert.Equal("99", request.StopLoss);
+        Assert.Equal("102", request.TakeProfit);
+        var decisions = await repository.GetFuturesRiskDecisionsAsync("BTCUSDT", 10, CancellationToken.None);
+        Assert.Contains(decisions, decision => decision.Source == "ProtectionRestore");
+    }
+
+    [Fact]
+    public async Task Protection_DoesNotRestoreWhenTradingStopMatches()
+    {
+        var repository = await CreateRepositoryAsync();
+        var bybitClient = new FakeBybitRestClient
+        {
+            Position = new BybitPositionSnapshot
+            {
+                Symbol = "BTCUSDT",
+                Side = "Buy",
+                Size = 0.001m,
+                AveragePrice = 100m,
+                MarkPrice = 100m,
+                StopLossPrice = 99m,
+                TakeProfitPrice = 102m,
+                PositionIdx = 0,
+                Leverage = 2m
+            }
+        };
+        var service = new FuturesProtectionService(
+            Options.Create(new AppOptions { TradingMode = TradingMode.Testnet }),
+            bybitClient,
+            repository,
+            NullLogger<FuturesProtectionService>.Instance);
+
+        await service.EnsureProtectiveStopAsync(Settings(), Position(), CancellationToken.None);
+
+        Assert.Empty(bybitClient.TradingStopRequests);
+        var decisions = await repository.GetFuturesRiskDecisionsAsync("BTCUSDT", 10, CancellationToken.None);
+        Assert.Contains(decisions, decision => decision.Source == "ProtectionVerify");
+    }
+
+    [Fact]
+    public async Task Protection_PaperRecordsVerifyWithoutBybitRestore()
+    {
+        var repository = await CreateRepositoryAsync();
+        var bybitClient = new FakeBybitRestClient();
+        var service = new FuturesProtectionService(
+            Options.Create(new AppOptions { TradingMode = TradingMode.Paper }),
+            bybitClient,
+            repository,
+            NullLogger<FuturesProtectionService>.Instance);
+
+        await service.EnsureProtectiveStopAsync(Settings(), Position(), CancellationToken.None);
+
+        Assert.Empty(bybitClient.TradingStopRequests);
+        var decisions = await repository.GetFuturesRiskDecisionsAsync("BTCUSDT", 10, CancellationToken.None);
+        Assert.Contains(decisions, decision => decision.Source == "ProtectionVerify");
+    }
+
 
     private static FuturesRiskEvaluationContext RiskContext(
         FuturesTradeIntent intent,
@@ -302,6 +384,20 @@ public sealed class FuturesIntegrationSafetyTests
         MinOrderAmount = minOrderAmount
     };
 
+    private static FuturesPositionSnapshot Position() => new()
+    {
+        Symbol = "BTCUSDT",
+        Category = "linear",
+        Side = "Buy",
+        Size = 0.001m,
+        EntryPrice = 100m,
+        MarkPrice = 100m,
+        PositionValueUsdt = 0.1m,
+        MarginUsedUsdt = 0.05m,
+        Leverage = 2m,
+        PositionIdx = 0
+    };
+
     private sealed class FakeBybitRestClient : IBybitRestClient
     {
         public IReadOnlyList<BybitOrderSnapshot> OpenOrders { get; init; } = [];
@@ -309,6 +405,10 @@ public sealed class FuturesIntegrationSafetyTests
         public IReadOnlyList<BybitOrderSnapshot> OrderHistory { get; init; } = [];
 
         public IReadOnlyList<BybitExecutionSnapshot> Executions { get; init; } = [];
+
+        public BybitPositionSnapshot? Position { get; init; }
+
+        public List<BybitSetTradingStopRequest> TradingStopRequests { get; } = [];
 
         public Task<BybitTicker> GetTickerAsync(string category, string symbol, CancellationToken cancellationToken) =>
             Task.FromResult(new BybitTicker(symbol, 100m, 99m, 101m));
@@ -356,7 +456,7 @@ public sealed class FuturesIntegrationSafetyTests
             });
 
         public Task<BybitPositionSnapshot?> GetPositionAsync(string category, string symbol, CancellationToken cancellationToken) =>
-            Task.FromResult<BybitPositionSnapshot?>(new BybitPositionSnapshot
+            Task.FromResult<BybitPositionSnapshot?>(Position ?? new BybitPositionSnapshot
             {
                 Symbol = symbol,
                 Side = "None",
@@ -374,7 +474,10 @@ public sealed class FuturesIntegrationSafetyTests
         public Task SwitchPositionModeAsync(BybitSwitchPositionModeRequest request, CancellationToken cancellationToken) =>
             Task.CompletedTask;
 
-        public Task SetTradingStopAsync(BybitSetTradingStopRequest request, CancellationToken cancellationToken) =>
-            Task.CompletedTask;
+        public Task SetTradingStopAsync(BybitSetTradingStopRequest request, CancellationToken cancellationToken)
+        {
+            TradingStopRequests.Add(request);
+            return Task.CompletedTask;
+        }
     }
 }

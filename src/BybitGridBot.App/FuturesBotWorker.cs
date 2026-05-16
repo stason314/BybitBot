@@ -18,6 +18,7 @@ public sealed class FuturesBotWorker : BackgroundService
     private readonly FuturesExecutionService _executionService;
     private readonly FuturesOptions _futuresOptions;
     private readonly FuturesPreflightService _preflightService;
+    private readonly FuturesProtectionService _protectionService;
     private readonly FuturesReconciliationService _reconciliationService;
     private readonly FuturesRiskManager _riskManager;
     private readonly FuturesRiskOptions _riskOptions;
@@ -35,6 +36,7 @@ public sealed class FuturesBotWorker : BackgroundService
         IBybitRestClient bybitRestClient,
         FuturesExecutionService executionService,
         FuturesPreflightService preflightService,
+        FuturesProtectionService protectionService,
         FuturesReconciliationService reconciliationService,
         FuturesRiskManager riskManager,
         FuturesStrategyRouter strategyRouter,
@@ -49,6 +51,7 @@ public sealed class FuturesBotWorker : BackgroundService
         _bybitRestClient = bybitRestClient;
         _executionService = executionService;
         _preflightService = preflightService;
+        _protectionService = protectionService;
         _reconciliationService = reconciliationService;
         _riskManager = riskManager;
         _strategyRouter = strategyRouter;
@@ -264,6 +267,11 @@ public sealed class FuturesBotWorker : BackgroundService
             FuturesReconciliationService.ApplyPositionToState(state, position, _appOptions.TradingMode == TradingMode.Paper);
             await _repository.SaveBotStateAsync(state, cancellationToken);
             await _repository.UpsertFuturesPositionAsync(position, _appOptions.TradingMode, cancellationToken);
+            if (position.Size > 0m)
+            {
+                await _protectionService.EnsureProtectiveStopAsync(settings, position, cancellationToken);
+            }
+
             _logger.LogInformation(
                 "Futures intent executed for {Symbol}. Action: {Action}. Paper: {IsPaper}. Message: {Message}",
                 settings.Symbol,

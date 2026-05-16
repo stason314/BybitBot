@@ -382,6 +382,8 @@ public sealed class FuturesDashboardResponse
 
     public required FuturesSoakStatusView TestnetSoak { get; init; }
 
+    public required FuturesProtectionStatusView ProtectionStatus { get; init; }
+
     public required FuturesUserStreamStatusView UserStreamStatus { get; init; }
 
     public required FuturesAggressiveModeView AggressiveMode { get; init; }
@@ -623,6 +625,27 @@ public sealed class FuturesSoakStatusView
     public string LastRiskSource { get; init; } = "-";
 
     public string LastRiskReason { get; init; } = "-";
+}
+
+public sealed class FuturesProtectionStatusView
+{
+    public bool HasOpenPosition { get; init; }
+
+    public decimal ExpectedStopLoss { get; init; }
+
+    public decimal ExpectedTakeProfit { get; init; }
+
+    public decimal CurrentStopLoss { get; init; }
+
+    public decimal CurrentTakeProfit { get; init; }
+
+    public required string Status { get; init; }
+
+    public required string LastSource { get; init; }
+
+    public required string LastReason { get; init; }
+
+    public DateTimeOffset? LastCheckedAt { get; init; }
 }
 
 public sealed class FuturesUserStreamStatusView

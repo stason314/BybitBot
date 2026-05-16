@@ -215,6 +215,10 @@ public sealed class BybitPositionSnapshot
 
     public decimal CurRealizedPnl { get; init; }
 
+    public decimal TakeProfitPrice { get; init; }
+
+    public decimal StopLossPrice { get; init; }
+
     public string PositionStatus { get; init; } = "Normal";
 
     public int PositionIdx { get; init; }
@@ -463,6 +467,12 @@ internal sealed class BybitPositionItem
 
     [JsonPropertyName("curRealisedPnl")]
     public string CurRealizedPnl { get; init; } = "0";
+
+    [JsonPropertyName("takeProfit")]
+    public string TakeProfit { get; init; } = "0";
+
+    [JsonPropertyName("stopLoss")]
+    public string StopLoss { get; init; } = "0";
 
     [JsonPropertyName("positionStatus")]
     public string PositionStatus { get; init; } = "Normal";
@@ -718,6 +728,8 @@ internal static class BybitModelMapper
             UnrealizedPnl = ParseDecimal(item.UnrealizedPnl),
             RealizedPnl = ParseDecimal(item.RealizedPnl),
             CurRealizedPnl = ParseDecimal(item.CurRealizedPnl),
+            TakeProfitPrice = ParseDecimal(item.TakeProfit),
+            StopLossPrice = ParseDecimal(item.StopLoss),
             PositionStatus = string.IsNullOrWhiteSpace(item.PositionStatus) ? "Normal" : item.PositionStatus,
             PositionIdx = item.PositionIdx,
             TradeMode = item.TradeMode,
