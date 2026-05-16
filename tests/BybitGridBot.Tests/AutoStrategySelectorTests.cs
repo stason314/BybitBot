@@ -138,9 +138,9 @@ public sealed class AutoStrategySelectorTests
         Assert.Equal(TradingStrategyType.Hybrid, recommendation.StrategyType);
         Assert.Equal(15m, config.RootElement.GetProperty("orderSizeUsdt").GetDecimal());
         Assert.True(config.RootElement.GetProperty("takeProfitLadderEnabled").GetBoolean());
-        Assert.Equal(0.6m, config.RootElement.GetProperty("takeProfitLadderFirstPercent").GetDecimal());
+        Assert.Equal(0.45m, config.RootElement.GetProperty("takeProfitLadderFirstPercent").GetDecimal());
         Assert.Equal(50m, config.RootElement.GetProperty("takeProfitLadderFirstQuantityPercent").GetDecimal());
-        Assert.Equal(1m, config.RootElement.GetProperty("takeProfitLadderSecondPercent").GetDecimal());
+        Assert.Equal(0.9m, config.RootElement.GetProperty("takeProfitLadderSecondPercent").GetDecimal());
         Assert.Equal(30m, config.RootElement.GetProperty("takeProfitLadderSecondQuantityPercent").GetDecimal());
         Assert.Equal(1.5m, config.RootElement.GetProperty("takeProfitLadderFinalPercent").GetDecimal());
         Assert.Equal(20m, config.RootElement.GetProperty("takeProfitLadderFinalQuantityPercent").GetDecimal());

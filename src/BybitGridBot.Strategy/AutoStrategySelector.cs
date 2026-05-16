@@ -77,7 +77,7 @@ public sealed class AutoStrategySelector
                 comboOrderSize,
                 stopLower,
                 stopUpper,
-                BuildComboConfig(comboOrderSize, currentOptions.MinOrderSizeUsdt, lower),
+                BuildComboConfig(comboOrderSize, currentOptions.MinOrderSizeUsdt, lower, lastPrice),
                 metrics);
         }
 
@@ -140,7 +140,7 @@ public sealed class AutoStrategySelector
                 dipOrderSize,
                 stopLower,
                 stopUpper,
-                BuildComboConfig(dipOrderSize, currentOptions.MinOrderSizeUsdt, lower),
+                BuildComboConfig(dipOrderSize, currentOptions.MinOrderSizeUsdt, lower, lastPrice),
                 metrics);
         }
 
@@ -156,7 +156,7 @@ public sealed class AutoStrategySelector
                 cautiousOrderSize,
                 stopLower,
                 stopUpper,
-                BuildComboConfig(cautiousOrderSize, currentOptions.MinOrderSizeUsdt, lower),
+                BuildComboConfig(cautiousOrderSize, currentOptions.MinOrderSizeUsdt, lower, lastPrice, activePullbacks: false),
                 metrics);
         }
 
@@ -207,7 +207,7 @@ public sealed class AutoStrategySelector
                 RecommendActiveOrderSize(currentOptions, orderSize * 0.75m),
                 stopLower,
                 stopUpper,
-                BuildComboConfig(RecommendActiveOrderSize(currentOptions, orderSize * 0.75m), currentOptions.MinOrderSizeUsdt, lower),
+                BuildComboConfig(RecommendActiveOrderSize(currentOptions, orderSize * 0.75m), currentOptions.MinOrderSizeUsdt, lower, lastPrice),
                 metrics),
 
             MarketRegimeType.LowVolatility => Build(
@@ -515,8 +515,16 @@ public sealed class AutoStrategySelector
         recommendation.StrategyType == TradingStrategyType.Btd &&
         recommendation.Reason.StartsWith("Reversal BTD after dump:", StringComparison.Ordinal);
 
-    private static string BuildComboConfig(decimal orderSize, decimal minOrderSize, decimal dcaBelowPrice)
+    private static string BuildComboConfig(
+        decimal orderSize,
+        decimal minOrderSize,
+        decimal dcaBelowPrice,
+        decimal lastPrice,
+        bool activePullbacks = true)
     {
+        var effectiveDcaBelowPrice = activePullbacks && lastPrice > 0m
+            ? decimal.Max(dcaBelowPrice, lastPrice)
+            : dcaBelowPrice;
         var config = new
         {
             orderSizeUsdt = decimal.Round(decimal.Max(minOrderSize, orderSize), 2, MidpointRounding.AwayFromZero),
@@ -531,11 +539,11 @@ public sealed class AutoStrategySelector
             takeProfitLadderFinalPercent = 1.5m,
             takeProfitLadderFinalQuantityPercent = 20m,
             limitOffsetPercent = 0.1m,
-            dipPercent = 0.7m,
+            dipPercent = activePullbacks ? 0.5m : 0.7m,
             dipLookbackCandles = 30,
             candleInterval = "1",
             maxPositionUsdt = 500m,
-            dcaBelowPrice = decimal.Round(dcaBelowPrice, 8, MidpointRounding.ToZero)
+            dcaBelowPrice = decimal.Round(effectiveDcaBelowPrice, 8, MidpointRounding.ToZero)
         };
 
         return JsonSerializer.Serialize(config, JsonOptions);
@@ -553,7 +561,7 @@ public sealed class AutoStrategySelector
         return strategyType switch
         {
             TradingStrategyType.Dca => BuildDcaConfig(orderSize, minOrderSize),
-            TradingStrategyType.Combo => BuildComboConfig(orderSize, minOrderSize, lower),
+            TradingStrategyType.Combo => BuildComboConfig(orderSize, minOrderSize, lower, metrics.LastPrice),
             TradingStrategyType.Btd => BuildBtdConfig(orderSize, minOrderSize, metrics.DrawdownPercent, metrics.LastPrice, stopLower, stopUpper),
             TradingStrategyType.Signal => BuildSignalConfig(orderSize, minOrderSize, stopLower, stopUpper),
             TradingStrategyType.TrendFollow => BuildTrendFollowingConfig(orderSize, minOrderSize, stopLower, stopUpper),
