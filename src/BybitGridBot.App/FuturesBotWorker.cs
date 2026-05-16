@@ -227,6 +227,18 @@ public sealed class FuturesBotWorker : BackgroundService
                 continue;
             }
 
+            var exposureNoTradeReason = GetStrategyExposureNoTradeReason(settings, position, intent);
+            if (exposureNoTradeReason is not null)
+            {
+                await RecordStrategyNoTradeDecisionAsync(settings.Symbol, exposureNoTradeReason, cancellationToken, intent.Action);
+                _logger.LogInformation(
+                    "Futures strategy skipped intent for {Symbol}. Action: {Action}. Reason: {Reason}",
+                    settings.Symbol,
+                    intent.Action,
+                    exposureNoTradeReason);
+                continue;
+            }
+
             var riskDecision = _riskManager.Evaluate(new FuturesRiskEvaluationContext
             {
                 RiskOptions = ResolveProfileRiskOptions(settings),
@@ -620,6 +632,32 @@ public sealed class FuturesBotWorker : BackgroundService
         return null;
     }
 
+    private string? GetStrategyExposureNoTradeReason(
+        FuturesBotSettings settings,
+        FuturesPositionSnapshot position,
+        FuturesTradeIntent intent)
+    {
+        if (!intent.IsPositionIncreasing)
+        {
+            return null;
+        }
+
+        var maxNotional = ResolveProfileRiskOptions(settings).MaxNotionalUsdt;
+        if (maxNotional <= 0m)
+        {
+            return null;
+        }
+
+        var currentNotional = decimal.Max(0m, position.PositionValueUsdt);
+        var projectedNotional = currentNotional + intent.NotionalUsdt;
+        if (projectedNotional <= maxNotional)
+        {
+            return null;
+        }
+
+        return $"Position is at max notional; waiting for partial close or exit. Current notional={currentNotional:F4}, next order={intent.NotionalUsdt:F4}, max={maxNotional:F4}.";
+    }
+
     private async Task<string?> GetAggressiveEntryBlockReasonAsync(
         FuturesBotSettings settings,
         FuturesPositionSnapshot position,
@@ -763,21 +801,34 @@ public sealed class FuturesBotWorker : BackgroundService
             CreatedAt = DateTimeOffset.UtcNow
         }, cancellationToken);
 
-    private Task RecordStrategyNoTradeDecisionAsync(
+    private async Task RecordStrategyNoTradeDecisionAsync(
         string symbol,
         string reason,
-        CancellationToken cancellationToken) =>
-        _repository.AddFuturesRiskDecisionAsync(new FuturesRiskDecisionRecord
+        CancellationToken cancellationToken,
+        FuturesTradeAction? action = null)
+    {
+        var recent = await _repository.GetFuturesRiskDecisionsAsync(symbol, 20, cancellationToken);
+        var duplicate = recent.Any(decision =>
+            string.Equals(decision.Source, "StrategyNoTrade", StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(decision.Reason, reason, StringComparison.Ordinal) &&
+            DateTimeOffset.UtcNow - decision.CreatedAt < TimeSpan.FromMinutes(5));
+        if (duplicate)
+        {
+            return;
+        }
+
+        await _repository.AddFuturesRiskDecisionAsync(new FuturesRiskDecisionRecord
         {
             Symbol = symbol,
             Source = "StrategyNoTrade",
-            Action = FuturesTradeAction.OpenLong,
+            Action = action,
             IsAllowed = false,
             Reason = reason,
             Severity = RiskSeverity.Info.ToString(),
             SuggestedAction = RiskSuggestedAction.Allow.ToString(),
             CreatedAt = DateTimeOffset.UtcNow
         }, cancellationToken);
+    }
 
     private static int CountConsecutiveLosingExits(IReadOnlyCollection<FuturesFillRecord> fills)
     {
