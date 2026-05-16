@@ -2349,6 +2349,42 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         return state is null ? null : MapPosition(settings, state);
     }
 
+    private async Task<BotState> EnsureFuturesStateAsync(
+        FuturesBotSettings settings,
+        decimal currentPrice,
+        CancellationToken cancellationToken)
+    {
+        var stateKey = FuturesStateKeys.ForSymbol(settings.Symbol);
+        var state = await _repository.GetBotStateAsync(stateKey, cancellationToken);
+        if (state is not null)
+        {
+            state.TradingMode = _appOptions.TradingMode;
+            state.LastObservedPrice = currentPrice;
+            if (_appOptions.TradingMode == TradingMode.Paper && state.QuoteAssetBalance <= 0m)
+            {
+                state.QuoteAssetBalance = _futuresOptions.PaperInitialEquityUsdt + state.TotalRealizedPnl;
+                state.PeakEquityUsdt = decimal.Max(state.PeakEquityUsdt, state.QuoteAssetBalance + state.UnrealizedPnl);
+            }
+
+            return state;
+        }
+
+        state = new BotState
+        {
+            Symbol = stateKey,
+            TradingMode = _appOptions.TradingMode,
+            LastObservedPrice = currentPrice,
+            PositionSide = "None",
+            Leverage = settings.Leverage,
+            MarginMode = settings.MarginMode.ToString(),
+            QuoteAssetBalance = _appOptions.TradingMode == TradingMode.Paper ? _futuresOptions.PaperInitialEquityUsdt : 0m,
+            PeakEquityUsdt = _appOptions.TradingMode == TradingMode.Paper ? _futuresOptions.PaperInitialEquityUsdt : 0m,
+            UpdatedAt = DateTimeOffset.UtcNow
+        };
+        await _repository.SaveBotStateAsync(state, cancellationToken);
+        return state;
+    }
+
     private static FuturesPositionView MapPosition(FuturesBotSettings settings, FuturesPositionSnapshot position) => new()
     {
         Symbol = settings.Symbol,

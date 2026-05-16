@@ -171,7 +171,7 @@ public sealed class FuturesPreflightService
 
     private bool AllowsShorts(FuturesBotSettings settings) =>
         _futuresOptions.TestnetShortsEnabled &&
-        settings.Direction is FuturesDirection.ShortOnly or FuturesDirection.LongShort;
+        settings.Direction is FuturesDirection.ShortOnly or FuturesDirection.LongAndShort;
 
     private Task AddPreflightDecisionAsync(string symbol, bool isAllowed, string reason, CancellationToken cancellationToken) =>
         _repository.AddFuturesRiskDecisionAsync(new FuturesRiskDecisionRecord
