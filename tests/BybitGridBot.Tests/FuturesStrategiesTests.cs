@@ -74,6 +74,39 @@ public sealed class FuturesStrategiesTests
     }
 
     [Fact]
+    public void FuturesGridLongOnly_ClosesOpenShortBeforeLongEntry()
+    {
+        var decision = new FuturesGridLongOnly().Decide(Context(
+            currentPrice: 50020m,
+            positionSize: 0.001m,
+            entryPrice: 50100m,
+            positionSide: "Sell",
+            direction: FuturesDirection.LongShort,
+            aggressiveModeEnabled: true));
+
+        var intent = Assert.Single(decision.TradeIntents);
+        Assert.Equal(FuturesTradeAction.CloseShort, intent.Action);
+        Assert.Equal("position-side-recovery", intent.Reason);
+    }
+
+    [Fact]
+    public void FuturesRouter_UsesShortCompatibleStrategyForOpenShort()
+    {
+        var router = Router();
+        var decision = router.Decide(Context(
+            currentPrice: 50020m,
+            positionSize: 0.001m,
+            entryPrice: 50100m,
+            positionSide: "Sell",
+            direction: FuturesDirection.LongShort,
+            aggressiveModeEnabled: true));
+
+        var intent = Assert.Single(decision.TradeIntents);
+        Assert.NotEqual(FuturesTradeAction.OpenLong, intent.Action);
+        Assert.NotEqual(FuturesTradeAction.CloseLong, intent.Action);
+    }
+
+    [Fact]
     public void FuturesGridLongOnly_TestModeOpensAwayFromSupport()
     {
         var decision = new FuturesGridLongOnly().Decide(Context(
@@ -123,6 +156,21 @@ public sealed class FuturesStrategiesTests
 
         var intent = Assert.Single(decision.TradeIntents);
         Assert.Equal(FuturesTradeAction.OpenShort, intent.Action);
+    }
+
+    [Fact]
+    public void FuturesGridShortOnly_ClosesOpenLongBeforeShortEntry()
+    {
+        var decision = new FuturesGridShortOnly().Decide(Context(
+            currentPrice: 50140m,
+            positionSize: 0.001m,
+            entryPrice: 50000m,
+            direction: FuturesDirection.LongShort,
+            aggressiveModeEnabled: true));
+
+        var intent = Assert.Single(decision.TradeIntents);
+        Assert.Equal(FuturesTradeAction.CloseLong, intent.Action);
+        Assert.Equal("position-side-recovery", intent.Reason);
     }
 
     [Fact]
@@ -190,6 +238,18 @@ public sealed class FuturesStrategiesTests
             MinOrderAmount = minOrderAmount
         }
     };
+
+    private static FuturesStrategyRouter Router() => new(
+    [
+        new FuturesPause(),
+        new FuturesReduceOnly(),
+        new FuturesTrendFollowLongOnly(),
+        new FuturesBreakoutLongOnly(),
+        new FuturesGridLongOnly(),
+        new FuturesTrendFollowShortOnly(),
+        new FuturesBreakdownShortOnly(),
+        new FuturesGridShortOnly()
+    ]);
 
     private static IReadOnlyList<Candle> Candles()
     {
