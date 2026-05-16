@@ -42,21 +42,21 @@ The futures UI is available at `/futures`. It is intentionally separate from the
 Current scope:
 
 - futures profile list and editor
-- futures auto-configuration on `/futures`, with refresh/apply actions based on recent `linear` candles
-- MVP is locked to USDT linear perpetuals: futures profile category `linear`, isolated margin, one-way mode, long-only
+- futures auto-configuration on `/futures`, with refresh/apply actions based on recent `linear` candles; `FUTURES_AUTO_APPLY_RECOMMENDATION=true` lets the worker apply compatible recommendations automatically
+- MVP is locked to USDT linear perpetuals: futures profile category `linear`, isolated margin, and one-way mode; shorts are paper-first and require `FUTURES_TESTNET_SHORTS_ENABLED=true` before testnet
 - leverage, max notional, max margin, stop loss, take profit, liquidation buffer, reduce-only flag
 - read-only Bybit position sync through `/v5/position/list` plus private WebSocket user stream sync for `order`, `execution`, and `position`
-- MVP strategy action model: `OpenLong`, `CloseLong`, `ReduceOnlyClose`
+- MVP strategy action model: `OpenLong`, `CloseLong`, `OpenShort`, `CloseShort`, `ReduceOnlyClose`
 - `FuturesBotWorker` runs independently from `GridBotWorker`: it reads `futures_settings`, fetches ticker/candles/position, builds a futures decision, applies `FuturesRiskManager`, and executes via paper simulation or Bybit testnet
 - `FuturesUserStreamWorker` runs outside paper mode when `FUTURES_USER_STREAM_ENABLED=true`: it authenticates to Bybit private WebSocket, keeps local managed orders/fills/positions current between 30-second REST reconciliation cycles, and pauses the profile on non-normal position status or liquidation-buffer breach
-- `FuturesExecutionService` is the dedicated execution layer: `OpenLong` maps to Bybit `Buy` with `reduceOnly=false`; `CloseLong` and `ReduceOnlyClose` map to Bybit `Sell` with `reduceOnly=true`
+- `FuturesExecutionService` is the dedicated execution layer: long open/close maps to Bybit `Buy`/`Sell`; short open/close maps to Bybit `Sell`/`Buy`; all closes are reduce-only
 - `FuturesPreflightService` validates `FUTURES_ENABLED=true`, `category=linear`, isolated margin, one-way mode, leverage, and instrument min qty/min notional before testnet trading
 - futures runtime guards keep execution paper-only unless `FUTURES_TESTNET_ENABLED=true`; mainnet also requires `FUTURES_MAINNET_ENABLED=true` and every `FUTURES_MAINNET_CONFIRM_*` checklist flag
-- the first `FUTURES_MIN_SIZE_ORDER_COUNT` futures open-long orders must use instrument minimum size, and leverage is capped by `FUTURES_MVP_MAX_LEVERAGE`
-- every futures `OpenLong` must attach `stopLoss` in Bybit order create; missing stop-loss protection blocks the order before it reaches Bybit
+- the first `FUTURES_MIN_SIZE_ORDER_COUNT` futures open orders must use instrument minimum size, and leverage is capped by `FUTURES_MVP_MAX_LEVERAGE`
+- every futures open order must attach `stopLoss` in Bybit order create; missing stop-loss protection blocks the order before it reaches Bybit
 - futures state now has dedicated SQLite tables: `futures_orders`, `futures_positions`, `futures_fills`, and `futures_risk_decisions`
 - `/futures` includes profile enable/disable, paper/testnet status, active futures orders, reduce-only close, cancel active futures orders, risk decision log, and latest pre-flight result
-- MVP futures strategies are separate implementations: `FuturesPause`, `FuturesReduceOnly`, `FuturesTrendFollowLongOnly`, `FuturesBreakoutLongOnly`, and `FuturesGridLongOnly`
+- MVP futures strategies are separate implementations: `FuturesPause`, `FuturesReduceOnly`, long-only trend/breakout/grid, and short-only trend/breakdown/grid
 - `FuturesReconciliationService` syncs Bybit open orders, recent order history, recent managed execution fills from `/v5/execution/list`, and current position before each testnet strategy decision; locally active managed orders missing from Bybit are marked cancelled after a per-order history check
 - Bybit futures client methods are present for `/v5/position/set-leverage`, `/v5/position/switch-isolated`, `/v5/position/switch-mode`, and `/v5/position/trading-stop`
 - futures accounting is separated from spot accounting through `FuturesAccounting` and `FuturesPositionSnapshot`
@@ -83,6 +83,7 @@ FUTURES_MVP_MAX_LEVERAGE=2
 FUTURES_MIN_SIZE_ORDER_COUNT=3
 FUTURES_PAPER_INITIAL_EQUITY_USDT=1000
 FUTURES_AGGRESSIVE_MODE_ENABLED=false
+FUTURES_AUTO_APPLY_RECOMMENDATION=false
 FUTURES_AGGRESSIVE_MODE_KIND=normal
 FUTURES_AGGRESSIVE_ENTRY_MULTIPLIER=1.5
 MARGIN_MODE=isolated

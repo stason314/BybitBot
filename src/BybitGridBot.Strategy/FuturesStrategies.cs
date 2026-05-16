@@ -266,7 +266,7 @@ internal static class FuturesLongOnlySignals
 
     public static bool ShouldCloseOpenLong(FuturesStrategyContext context, FuturesLongOnlySignal signal)
     {
-        if (context.Position.Size <= 0m)
+        if (context.Position.Size <= 0m || !IsLong(context.Position.Side))
         {
             return false;
         }
@@ -281,10 +281,16 @@ internal static class FuturesLongOnlySignals
     public static bool ShouldOpenAggressiveTestLong(FuturesStrategyContext context, FuturesLongOnlySignal signal) =>
         context.Settings.AggressiveModeEnabled &&
         context.Settings.AggressiveModeKind == FuturesAggressiveModeKind.Test &&
+        !FuturesShortOnlySignals.IsShort(context.Position.Side) &&
         signal.MovePercent > -1.2m;
 
     public static FuturesStrategyDecision OpenLong(FuturesStrategyContext context)
     {
+        if (FuturesShortOnlySignals.IsShort(context.Position.Side))
+        {
+            return FuturesShortOnlySignals.CloseShort(context, "position-side-recovery");
+        }
+
         var entryIntent = FuturesStrategyIntentFactory.OpenLong(
             context.Settings,
             context.CurrentPrice,
@@ -306,6 +312,10 @@ internal static class FuturesLongOnlySignals
                 reason)
         ]
     };
+
+    private static bool IsLong(string side) =>
+        string.Equals(side, "Buy", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(side, "Long", StringComparison.OrdinalIgnoreCase);
 }
 
 internal readonly record struct FuturesLongOnlySignal(
@@ -336,10 +346,16 @@ internal static class FuturesShortOnlySignals
     public static bool ShouldOpenAggressiveTestShort(FuturesStrategyContext context, FuturesLongOnlySignal signal) =>
         context.Settings.AggressiveModeEnabled &&
         context.Settings.AggressiveModeKind == FuturesAggressiveModeKind.Test &&
+        !IsLong(context.Position.Side) &&
         signal.MovePercent < 1.2m;
 
     public static FuturesStrategyDecision OpenShort(FuturesStrategyContext context)
     {
+        if (IsLong(context.Position.Side))
+        {
+            return FuturesLongOnlySignals.CloseLong(context, "position-side-recovery");
+        }
+
         var entryIntent = FuturesStrategyIntentFactory.OpenShort(
             context.Settings,
             context.CurrentPrice,
@@ -365,4 +381,8 @@ internal static class FuturesShortOnlySignals
     public static bool IsShort(string side) =>
         string.Equals(side, "Sell", StringComparison.OrdinalIgnoreCase) ||
         string.Equals(side, "Short", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsLong(string side) =>
+        string.Equals(side, "Buy", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(side, "Long", StringComparison.OrdinalIgnoreCase);
 }
