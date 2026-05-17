@@ -536,6 +536,10 @@ public sealed class FuturesMarketScanItem
 
     public required string StrategyPerformanceLabel { get; init; }
 
+    public decimal PairEfficiencyScore { get; init; }
+
+    public required string PairEfficiencyLabel { get; init; }
+
     public required string Label { get; init; }
 
     public required string RecommendedStrategy { get; init; }

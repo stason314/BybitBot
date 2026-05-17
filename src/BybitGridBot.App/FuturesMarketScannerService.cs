@@ -184,6 +184,7 @@ public sealed class FuturesMarketScannerService : IFuturesMarketScannerService
         var recentRiskDecisions = await _repository.GetFuturesRiskDecisionsAsync(instrument.Symbol, 20, cancellationToken);
         var recentFills = await _repository.GetFuturesFillsAsync(instrument.Symbol, 1000, cancellationToken);
         var strategyPerformance = StrategyPerformanceScorer.ScoreFutures(strategy, recentFills);
+        var pairEfficiency = PairBotEfficiencyScorer.ScoreFutures(instrument.Symbol, strategy, recentFills);
         var minNetProfit = ResolveMinNetProfitThreshold(entryNotional);
         var immediateTrade = FuturesImmediateTradeProbabilityAnalyzer.Analyze(new FuturesImmediateTradeProbabilityInput(
             strategy,
@@ -225,6 +226,10 @@ public sealed class FuturesMarketScannerService : IFuturesMarketScannerService
         {
             reasons.Add(reason);
         }
+        foreach (var reason in pairEfficiency.Reasons)
+        {
+            reasons.Add(reason);
+        }
 
         return new FuturesMarketScanItem
         {
@@ -238,6 +243,8 @@ public sealed class FuturesMarketScannerService : IFuturesMarketScannerService
             ImmediateTradeProbabilityLabel = immediateTrade.Label,
             StrategyPerformanceScore = strategyPerformance.Score,
             StrategyPerformanceLabel = strategyPerformance.Label,
+            PairEfficiencyScore = pairEfficiency.Score,
+            PairEfficiencyLabel = pairEfficiency.Label,
             Label = label,
             RecommendedStrategy = FormatEnum(strategy),
             RecommendedDirection = FormatEnum(direction),
@@ -541,6 +548,8 @@ public sealed class FuturesMarketScannerService : IFuturesMarketScannerService
         ImmediateTradeProbabilityLabel = "BLOCKED",
         StrategyPerformanceScore = 50m,
         StrategyPerformanceLabel = "NO_HISTORY",
+        PairEfficiencyScore = 50m,
+        PairEfficiencyLabel = "NO_HISTORY",
         Label = "NO_TRADE",
         RecommendedStrategy = "pause",
         RecommendedDirection = "long-only",
