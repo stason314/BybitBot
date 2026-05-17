@@ -10,6 +10,17 @@ public interface IGridRepository
     Task<IReadOnlyList<GridBotSettings>> GetRuntimeSettingsProfilesAsync(CancellationToken cancellationToken);
     Task SaveRuntimeSettingsAsync(GridBotSettings settings, CancellationToken cancellationToken);
     Task DeleteRuntimeSettingsAsync(string symbol, CancellationToken cancellationToken);
+    Task<RotationStateRecord?> GetRotationStateAsync(CancellationToken cancellationToken);
+    Task SaveRotationStateAsync(RotationStateRecord state, CancellationToken cancellationToken);
+    Task<IReadOnlyList<ActivePairSlotRecord>> GetActivePairSlotsAsync(CancellationToken cancellationToken);
+    Task UpsertActivePairSlotAsync(ActivePairSlotRecord slot, CancellationToken cancellationToken);
+    Task AddPairRotationHistoryAsync(PairRotationHistoryRecord history, CancellationToken cancellationToken);
+    Task UpsertStrategyPerformanceScoreAsync(StrategyPerformanceScoreRecord score, CancellationToken cancellationToken);
+    Task<IReadOnlyList<StrategyPerformanceScoreRecord>> GetStrategyPerformanceScoresAsync(int limit, CancellationToken cancellationToken);
+    Task UpsertPairStrategyScoreAsync(PairStrategyScoreRecord score, CancellationToken cancellationToken);
+    Task<IReadOnlyList<PairStrategyScoreRecord>> GetPairStrategyScoresAsync(int limit, CancellationToken cancellationToken);
+    Task AddRotationDecisionAsync(RotationDecisionRecord decision, CancellationToken cancellationToken);
+    Task<IReadOnlyList<RotationDecisionRecord>> GetRotationDecisionsAsync(int limit, CancellationToken cancellationToken);
     Task<FuturesBotSettings?> GetFuturesSettingsAsync(string symbol, CancellationToken cancellationToken);
     Task<IReadOnlyList<FuturesBotSettings>> GetFuturesSettingsProfilesAsync(CancellationToken cancellationToken);
     Task SaveFuturesSettingsAsync(FuturesBotSettings settings, CancellationToken cancellationToken);
