@@ -1550,7 +1550,7 @@ public sealed class GridBotWorker : BackgroundService
                 activeGridOrders = await _repository.GetActiveOrdersAsync(_gridOptions.Symbol, cancellationToken);
             }
 
-            if (state.BaseAssetQuantity > 0m)
+            if (HasMaterialPosition(state, currentPrice))
             {
                 await ApplyReduceOnlyProtectionAsync(
                     profile,
@@ -1582,7 +1582,7 @@ public sealed class GridBotWorker : BackgroundService
 
             await CancelActiveBuyOrdersAsync(activeGridOrders, cancellationToken);
             activeGridOrders = await _repository.GetActiveOrdersAsync(_gridOptions.Symbol, cancellationToken);
-            if (state.BaseAssetQuantity > 0m)
+            if (HasMaterialPosition(state, currentPrice))
             {
                 activeGridOrders = await ApplyReduceOnlyProtectionAsync(
                     profile,
@@ -1604,7 +1604,7 @@ public sealed class GridBotWorker : BackgroundService
         {
             await CancelActiveBuyOrdersAsync(activeGridOrders, cancellationToken);
             activeGridOrders = await _repository.GetActiveOrdersAsync(_gridOptions.Symbol, cancellationToken);
-            if (state.BaseAssetQuantity <= 0m)
+            if (!HasMaterialPosition(state, currentPrice))
             {
                 await _repository.SaveBotStateAsync(state, cancellationToken);
                 return state;
@@ -2311,6 +2311,7 @@ public sealed class GridBotWorker : BackgroundService
             : ShouldApplyTrailingProtection(candles, currentPrice, out var pumpPercent, out var pullbackPercent)
                 ? $"{ReduceOnlyReasonTrailing}: pump={pumpPercent:0.####}%, pullback={pullbackPercent:0.####}%"
                 : null;
+        var hasMaterialPosition = HasMaterialPosition(state, currentPrice);
         RefreshProfitProtectionState(state, currentPrice);
         var marketPhase = _priceActionPhaseDetector.Detect(_gridOptions, currentPrice, candles, []);
         var profitProtection = _profitProtectionManager.Evaluate(
@@ -2318,7 +2319,7 @@ public sealed class GridBotWorker : BackgroundService
             new PositionSnapshot
             {
                 Symbol = _gridOptions.Symbol,
-                BaseAssetQuantity = state.BaseAssetQuantity,
+                BaseAssetQuantity = hasMaterialPosition ? state.BaseAssetQuantity : 0m,
                 AverageEntryPrice = state.AverageEntryPrice,
                 QuoteAssetBalance = state.QuoteAssetBalance,
                 CurrentPrice = currentPrice
@@ -2343,7 +2344,7 @@ public sealed class GridBotWorker : BackgroundService
             return false;
         }
 
-        if (state.BaseAssetQuantity <= 0m)
+        if (!hasMaterialPosition)
         {
             foreach (var order in activeOrders.Where(order => order.IsActive && order.Side == TradeSide.Buy).ToArray())
             {
@@ -2416,7 +2417,7 @@ public sealed class GridBotWorker : BackgroundService
 
     private void RefreshProfitProtectionState(BotState state, decimal currentPrice)
     {
-        if (state.BaseAssetQuantity <= 0m || state.AverageEntryPrice <= 0m || currentPrice <= 0m)
+        if (!HasMaterialPosition(state, currentPrice) || state.AverageEntryPrice <= 0m || currentPrice <= 0m)
         {
             state.ProfitProtectionPeakPrice = 0m;
             state.ProfitProtectionTrailingStopPrice = 0m;
@@ -4476,7 +4477,7 @@ public sealed class GridBotWorker : BackgroundService
         var topPairGate = await ResolveTopPairGateAsync(state, score, profitStats, cancellationToken);
         if (!topPairGate.IsAllowed)
         {
-            var nonTopMultiplier = ResolveNonTopPairMultiplier(state, profitStats);
+            var nonTopMultiplier = ResolveNonTopPairMultiplier(state, profitStats, topPairGate);
             if (nonTopMultiplier <= 0m)
             {
                 await RecordNoTradeReasonAsync(
@@ -4634,12 +4635,20 @@ public sealed class GridBotWorker : BackgroundService
             ? lastNoTradeReason.ReasonCode
             : NoTradeReason.CapitalRejected;
 
-    private static decimal ApplyPairScoreOrderSizeMultiplier(decimal orderSizeUsdt, PairScoreSizingDecision sizing)
+    private decimal ApplyPairScoreOrderSizeMultiplier(decimal orderSizeUsdt, PairScoreSizingDecision sizing)
     {
         var adjustedOrderSizeUsdt = decimal.Max(0m, orderSizeUsdt * decimal.Max(0m, sizing.Multiplier));
-        return sizing.MaxAdditionalBuyNotionalUsdt is { } maxAdditionalBuyNotionalUsdt
+        if (orderSizeUsdt > 0m && sizing.Multiplier > 0m)
+        {
+            adjustedOrderSizeUsdt = decimal.Max(adjustedOrderSizeUsdt, ResolveMinimumOrderNotionalUsdt());
+        }
+
+        var cappedOrderSizeUsdt = sizing.MaxAdditionalBuyNotionalUsdt is { } maxAdditionalBuyNotionalUsdt
             ? decimal.Min(adjustedOrderSizeUsdt, decimal.Max(0m, maxAdditionalBuyNotionalUsdt))
             : adjustedOrderSizeUsdt;
+        return orderSizeUsdt > 0m && sizing.Multiplier > 0m && cappedOrderSizeUsdt < ResolveMinimumOrderNotionalUsdt()
+            ? 0m
+            : cappedOrderSizeUsdt;
     }
 
     private decimal ApplyProfitReinvestMultiplier(BotState state, decimal multiplier)
@@ -4737,6 +4746,20 @@ public sealed class GridBotWorker : BackgroundService
             : state.MarkPrice > 0m
                 ? state.MarkPrice
                 : state.AverageEntryPrice;
+
+    private bool HasMaterialPosition(BotState state, decimal? currentPrice = null)
+    {
+        if (state.BaseAssetQuantity <= 0m)
+        {
+            return false;
+        }
+
+        var price = currentPrice is > 0m ? currentPrice.Value : ResolveCurrentPrice(state);
+        return price > 0m && state.BaseAssetQuantity * price >= ResolveMinimumOrderNotionalUsdt();
+    }
+
+    private decimal ResolveMinimumOrderNotionalUsdt() =>
+        decimal.Max(_gridOptions.MinOrderSizeUsdt, _riskOptions.MinOrderSizeUsdt);
 
     private static decimal CalculateStateEquityUsdt(BotState state, decimal currentPrice) =>
         state.QuoteAssetBalance + (currentPrice > 0m ? state.BaseAssetQuantity * currentPrice : 0m);
@@ -4922,9 +4945,12 @@ public sealed class GridBotWorker : BackgroundService
             ? _gridOptions.TopPairLimitOffsetPercent
             : decimal.Max(configuredLimitOffsetPercent, 0.1m);
 
-    private decimal ResolveNonTopPairMultiplier(BotState state, PairProfitStats profitStats)
+    private decimal ResolveNonTopPairMultiplier(
+        BotState state,
+        PairProfitStats profitStats,
+        TopPairGateResult topPairGate)
     {
-        if (state.BaseAssetQuantity > 0m)
+        if (HasMaterialPosition(state))
         {
             return 0m;
         }
@@ -4939,9 +4965,19 @@ public sealed class GridBotWorker : BackgroundService
             return _gridOptions.PairScoreNegativeDailyMaxMultiplier;
         }
 
-        return profitStats.ProfitableClosedSellCount == 0
-            ? _gridOptions.NonTopPairProbationMultiplier
-            : _gridOptions.NonTopPairMultiplier;
+        if (profitStats.CurrentProfitStreak > 0 &&
+            profitStats.CurrentProfitStreak < _gridOptions.TopPairMinProfitStreak &&
+            topPairGate.Reason.Contains("profit streak", StringComparison.OrdinalIgnoreCase))
+        {
+            return _gridOptions.PairScoreFirstProfitMultiplier;
+        }
+
+        if (profitStats.CurrentProfitStreak <= 0)
+        {
+            return _gridOptions.NonTopPairProbationMultiplier;
+        }
+
+        return _gridOptions.NonTopPairMultiplier;
     }
 
     private bool IsTopPairCandidate(

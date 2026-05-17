@@ -880,7 +880,7 @@ public sealed class GridDashboardService : IGridDashboardService
         return new DashboardPairScoreCandidate(
             item,
             dailyPnl,
-            state?.BaseAssetQuantity > 0m,
+            HasDashboardMaterialPosition(state, market.LastPrice, gridOptions),
             CalculateDashboardStateEquityUsdt(state, market.LastPrice),
             CalculateDashboardActiveExposureUsdt(state, orders, market.LastPrice),
             profitStats,
@@ -987,7 +987,7 @@ public sealed class GridDashboardService : IGridDashboardService
 
         if (!IsDashboardTopPairCandidate(candidate.Item.Score, candidate.DailyPnl, candidate.ProfitStats, _defaultGridOptions, out var reason))
         {
-            multiplier = ResolveDashboardNonTopPairMultiplier(candidate);
+            multiplier = ResolveDashboardNonTopPairMultiplier(candidate, reason);
             reasons.Add($"top-pair gate: {reason}");
             return CopyDashboardPairScoreItem(candidate.Item, multiplier, reasons);
         }
@@ -997,7 +997,7 @@ public sealed class GridDashboardService : IGridDashboardService
             : int.MaxValue;
         if (rank > _defaultGridOptions.TopPairActiveCount)
         {
-            multiplier = ResolveDashboardNonTopPairMultiplier(candidate);
+            multiplier = ResolveDashboardNonTopPairMultiplier(candidate, $"rank {rank} outside top {_defaultGridOptions.TopPairActiveCount}");
             reasons.Add($"top-pair gate: rank {rank} outside top {_defaultGridOptions.TopPairActiveCount}");
             return CopyDashboardPairScoreItem(candidate.Item, multiplier, reasons);
         }
@@ -1054,8 +1054,13 @@ public sealed class GridDashboardService : IGridDashboardService
             : null;
     }
 
-    private decimal ResolveDashboardNonTopPairMultiplier(DashboardPairScoreCandidate candidate)
+    private decimal ResolveDashboardNonTopPairMultiplier(DashboardPairScoreCandidate candidate, string topPairGateReason)
     {
+        if (candidate.Item.Score < _defaultGridOptions.PairScoreMinBuyScore)
+        {
+            return 0m;
+        }
+
         if (candidate.HasPosition)
         {
             return 0m;
@@ -1071,9 +1076,19 @@ public sealed class GridDashboardService : IGridDashboardService
             return _defaultGridOptions.PairScoreNegativeDailyMaxMultiplier;
         }
 
-        return candidate.ProfitStats.ProfitableClosedSellCount == 0
-            ? _defaultGridOptions.NonTopPairProbationMultiplier
-            : _defaultGridOptions.NonTopPairMultiplier;
+        if (candidate.ProfitStats.CurrentProfitStreak > 0 &&
+            candidate.ProfitStats.CurrentProfitStreak < _defaultGridOptions.TopPairMinProfitStreak &&
+            topPairGateReason.Contains("profit streak", StringComparison.OrdinalIgnoreCase))
+        {
+            return _defaultGridOptions.PairScoreFirstProfitMultiplier;
+        }
+
+        if (candidate.ProfitStats.CurrentProfitStreak <= 0)
+        {
+            return _defaultGridOptions.NonTopPairProbationMultiplier;
+        }
+
+        return _defaultGridOptions.NonTopPairMultiplier;
     }
 
     private static bool IsDashboardTopPairCandidate(
@@ -1185,6 +1200,17 @@ public sealed class GridDashboardService : IGridDashboardService
                 : state.MarkPrice > 0m
                     ? state.MarkPrice
                     : state.AverageEntryPrice;
+
+    private static bool HasDashboardMaterialPosition(BotState? state, decimal currentPrice, GridOptions gridOptions)
+    {
+        if (state is null || state.BaseAssetQuantity <= 0m)
+        {
+            return false;
+        }
+
+        var resolvedPrice = ResolveDashboardCurrentPrice(state, currentPrice);
+        return resolvedPrice > 0m && state.BaseAssetQuantity * resolvedPrice >= gridOptions.MinOrderSizeUsdt;
+    }
 
     private static DashboardPairProfitStats CalculateDashboardPairProfitStats(IReadOnlyCollection<GridOrder> orders)
     {
