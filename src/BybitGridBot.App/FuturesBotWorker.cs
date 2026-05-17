@@ -14,7 +14,10 @@ public sealed class FuturesBotWorker : BackgroundService
     private static readonly TimeSpan LoopInterval = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan UserStreamStaleThreshold = TimeSpan.FromMinutes(2);
     private static readonly TimeSpan UserStreamFallbackAlertCooldown = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan ProfitEfficiencyLookback = TimeSpan.FromHours(3);
     private const decimal DefaultFuturesFeeRatePercent = 0.06m;
+    private const decimal SmallOrderNotionalThresholdUsdt = 10m;
+    private const decimal SmallOrderMaxNetProfitPercent = 0.35m;
 
     private readonly AppOptions _appOptions;
     private readonly IBybitRestClient _bybitRestClient;
@@ -700,7 +703,7 @@ public sealed class FuturesBotWorker : BackgroundService
 
         var fills = await _repository.GetFuturesFillsAsync(settings.Symbol, 1000, cancellationToken);
         var profitEfficiency = BuildProfitEfficiency(fills);
-        var feeOpportunityReason = GetEntryFeeOpportunityBlockReason(intent, candles, profitEfficiency);
+        var feeOpportunityReason = GetEntryFeeOpportunityBlockReason(settings, intent, candles, profitEfficiency);
         if (feeOpportunityReason is not null)
         {
             return feeOpportunityReason;
@@ -791,6 +794,7 @@ public sealed class FuturesBotWorker : BackgroundService
         string.Equals(reason, "exit-signal", StringComparison.OrdinalIgnoreCase);
 
     private string? GetEntryFeeOpportunityBlockReason(
+        FuturesBotSettings settings,
         FuturesTradeIntent intent,
         IReadOnlyList<Candle> candles,
         FuturesProfitEfficiencySnapshot profitEfficiency)
@@ -800,10 +804,10 @@ public sealed class FuturesBotWorker : BackgroundService
             return null;
         }
 
-        var estimatedMovePercent = CalculateEntryOpportunityPercent(candles);
+        var estimatedMovePercent = CalculateEntryOpportunityPercent(candles, settings.StrategyType, intent.Action);
         var estimatedGrossPnl = intent.NotionalUsdt * estimatedMovePercent / 100m;
         var roundTripFees = intent.NotionalUsdt * DefaultFuturesFeeRatePercent / 100m * 2m;
-        var threshold = ResolveMinNetProfitThreshold(intent.NotionalUsdt) * profitEfficiency.MinNetProfitMultiplier;
+        var threshold = ResolveAdjustedMinNetProfitThreshold(intent.NotionalUsdt, profitEfficiency);
         var requiredGrossPnl = roundTripFees + threshold;
         if (estimatedGrossPnl >= requiredGrossPnl)
         {
@@ -812,10 +816,10 @@ public sealed class FuturesBotWorker : BackgroundService
 
         if (profitEfficiency.Status != "good")
         {
-            return $"Fee efficiency guard active. Fees are {profitEfficiency.FeeToTradingPnlPercent:F2}% of trading PnL; entry skipped until expected opportunity covers fees plus adjusted min profit. ExpectedGross={estimatedGrossPnl:F6}, fees={roundTripFees:F6}, requiredNet={threshold:F6}.";
+            return $"Fee efficiency guard active. Rolling fees are {profitEfficiency.FeeToTradingPnlPercent:F2}% of trading PnL; entry skipped until expected opportunity covers fees plus adjusted min profit. ExpectedMove={estimatedMovePercent:F4}%, expectedGross={estimatedGrossPnl:F6}, fees={roundTripFees:F6}, requiredNet={threshold:F6}.";
         }
 
-        return $"Fee protection: entry skipped because expected ATR/range opportunity does not cover round-trip fees plus min profit. ExpectedGross={estimatedGrossPnl:F6}, fees={roundTripFees:F6}, requiredNet={threshold:F6}.";
+        return $"Fee protection: entry skipped because expected ATR/range/momentum opportunity does not cover round-trip fees plus min profit. ExpectedMove={estimatedMovePercent:F4}%, expectedGross={estimatedGrossPnl:F6}, fees={roundTripFees:F6}, requiredNet={threshold:F6}.";
     }
 
     private decimal ResolveMinNetProfitThreshold(decimal notionalUsdt)
@@ -824,6 +828,20 @@ public sealed class FuturesBotWorker : BackgroundService
         var minPercent = decimal.Max(0m, _riskOptions.MinNetProfitPercent);
         var percentThreshold = notionalUsdt * minPercent / 100m;
         return decimal.Max(minUsdt, percentThreshold);
+    }
+
+    private decimal ResolveAdjustedMinNetProfitThreshold(
+        decimal notionalUsdt,
+        FuturesProfitEfficiencySnapshot profitEfficiency)
+    {
+        var adjusted = ResolveMinNetProfitThreshold(notionalUsdt) * profitEfficiency.MinNetProfitMultiplier;
+        if (notionalUsdt <= SmallOrderNotionalThresholdUsdt)
+        {
+            var smallOrderCap = notionalUsdt * SmallOrderMaxNetProfitPercent / 100m;
+            return smallOrderCap > 0m ? decimal.Min(adjusted, smallOrderCap) : adjusted;
+        }
+
+        return adjusted;
     }
 
     private async Task<string?> GetAggressiveEntryBlockReasonAsync(
@@ -868,7 +886,7 @@ public sealed class FuturesBotWorker : BackgroundService
             {
                 if (profitEfficiency.Status != "good" && maxOrdersPerHour < configuredMaxOrdersPerHour)
                 {
-                    return $"Fee efficiency guard active. Fees are {profitEfficiency.FeeToTradingPnlPercent:F2}% of trading PnL; aggressive entries reduced to {maxOrdersPerHour}/h.";
+                    return $"Fee efficiency guard active. Rolling fees are {profitEfficiency.FeeToTradingPnlPercent:F2}% of trading PnL; aggressive entries reduced to {maxOrdersPerHour}/h.";
                 }
 
                 return "FUTURES_AGGRESSIVE_MAX_ORDERS_PER_HOUR limit reached.";
@@ -1057,12 +1075,22 @@ public sealed class FuturesBotWorker : BackgroundService
 
     private static FuturesProfitEfficiencySnapshot BuildProfitEfficiency(IReadOnlyCollection<FuturesFillRecord> fills)
     {
+        var closingFills = fills
+            .Where(fill => fill.Quantity > 0m)
+            .Where(fill => fill.Action != FuturesTradeAction.Funding)
+            .Where(fill => fill.Action is FuturesTradeAction.CloseLong or FuturesTradeAction.CloseShort or FuturesTradeAction.ReduceOnlyClose)
+            .Where(fill => DateTimeOffset.UtcNow - fill.CreatedAt <= ProfitEfficiencyLookback)
+            .ToArray();
+        if (closingFills.Length == 0)
+        {
+            return new FuturesProfitEfficiencySnapshot(0m, "good", 1m);
+        }
+
+        var windowStart = closingFills.Min(fill => fill.CreatedAt);
         var filled = fills
             .Where(fill => fill.Quantity > 0m)
             .Where(fill => fill.Action != FuturesTradeAction.Funding)
-            .ToArray();
-        var closingFills = filled
-            .Where(fill => fill.Action is FuturesTradeAction.CloseLong or FuturesTradeAction.CloseShort or FuturesTradeAction.ReduceOnlyClose)
+            .Where(fill => fill.CreatedAt >= windowStart)
             .ToArray();
         var realizedTradingPnl = closingFills.Sum(fill => fill.RealizedPnl + fill.Fee - fill.Funding);
         var feesPaid = filled.Sum(fill => fill.Fee);
@@ -1442,7 +1470,10 @@ public sealed class FuturesBotWorker : BackgroundService
         return atr / ordered[^1].Close * 100m;
     }
 
-    private static decimal CalculateEntryOpportunityPercent(IReadOnlyList<Candle> candles)
+    private static decimal CalculateEntryOpportunityPercent(
+        IReadOnlyList<Candle> candles,
+        FuturesStrategyType strategyType,
+        FuturesTradeAction action)
     {
         var ordered = candles.OrderBy(candle => candle.OpenTime).ToArray();
         if (ordered.Length < 2 || ordered[^1].Close <= 0m)
@@ -1456,8 +1487,29 @@ public sealed class FuturesBotWorker : BackgroundService
         var rangePercent = lastPrice > 0m
             ? (lookback.Max(candle => candle.High) - lookback.Min(candle => candle.Low)) / lastPrice * 100m
             : 0m;
-        return decimal.Max(atrPercent, rangePercent * 0.25m);
+        var baseline = decimal.Max(atrPercent, rangePercent * 0.25m);
+        if (!IsMomentumEntryStrategy(strategyType))
+        {
+            return baseline;
+        }
+
+        var momentumLookback = ordered.TakeLast(Math.Min(12, ordered.Length)).ToArray();
+        var first = momentumLookback[0].Open > 0m ? momentumLookback[0].Open : momentumLookback[0].Close;
+        var last = momentumLookback[^1].Close;
+        var movePercent = first > 0m ? (last - first) / first * 100m : 0m;
+        var directionalMomentum = action switch
+        {
+            FuturesTradeAction.OpenLong => decimal.Max(0m, movePercent),
+            FuturesTradeAction.OpenShort => decimal.Max(0m, -movePercent),
+            _ => 0m
+        };
+
+        return decimal.Max(baseline, directionalMomentum * 0.85m);
     }
+
+    private static bool IsMomentumEntryStrategy(FuturesStrategyType strategyType) =>
+        strategyType is FuturesStrategyType.Breakout or FuturesStrategyType.TrendFollow or
+            FuturesStrategyType.BreakdownShort or FuturesStrategyType.TrendFollowShortOnly;
 
     private static decimal CalculateMovePercent(IReadOnlyList<Candle> candles)
     {

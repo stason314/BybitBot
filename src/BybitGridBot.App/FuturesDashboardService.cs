@@ -28,6 +28,7 @@ public interface IFuturesDashboardService
 
 public sealed class FuturesDashboardService : IFuturesDashboardService
 {
+    private static readonly TimeSpan ProfitEfficiencyLookback = TimeSpan.FromHours(3);
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private static readonly IReadOnlyList<string> StrategyActions =
     [
@@ -2389,12 +2390,22 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
 
     private static FuturesProfitEfficiencyView BuildProfitEfficiency(IReadOnlyCollection<FuturesFillRecord> fills)
     {
+        var closingFills = fills
+            .Where(fill => fill.Quantity > 0m)
+            .Where(fill => fill.Action != FuturesTradeAction.Funding)
+            .Where(fill => fill.Action is FuturesTradeAction.CloseLong or FuturesTradeAction.CloseShort or FuturesTradeAction.ReduceOnlyClose)
+            .Where(fill => DateTimeOffset.UtcNow - fill.CreatedAt <= ProfitEfficiencyLookback)
+            .ToArray();
+        if (closingFills.Length == 0)
+        {
+            return new FuturesProfitEfficiencyView(0m, "good");
+        }
+
+        var windowStart = closingFills.Min(fill => fill.CreatedAt);
         var filled = fills
             .Where(fill => fill.Quantity > 0m)
             .Where(fill => fill.Action != FuturesTradeAction.Funding)
-            .ToArray();
-        var closingFills = filled
-            .Where(fill => fill.Action is FuturesTradeAction.CloseLong or FuturesTradeAction.CloseShort or FuturesTradeAction.ReduceOnlyClose)
+            .Where(fill => fill.CreatedAt >= windowStart)
             .ToArray();
         var realizedTradingPnl = closingFills.Sum(fill => fill.RealizedPnl + fill.Fee - fill.Funding);
         var feesPaid = filled.Sum(fill => fill.Fee);
