@@ -182,6 +182,23 @@ public sealed class FuturesMarketScannerService : IFuturesMarketScannerService
             lastPrice);
         var position = await _repository.GetFuturesPositionAsync(instrument.Symbol, cancellationToken);
         var recentRiskDecisions = await _repository.GetFuturesRiskDecisionsAsync(instrument.Symbol, 20, cancellationToken);
+        var minNetProfit = ResolveMinNetProfitThreshold(entryNotional);
+        var immediateTrade = FuturesImmediateTradeProbabilityAnalyzer.Analyze(new FuturesImmediateTradeProbabilityInput(
+            strategy,
+            direction,
+            position,
+            maxNotional,
+            entryNotional,
+            lastPrice,
+            support,
+            resistance,
+            decimal.Max(instrument.TickSize, resistance - support),
+            atrPercent,
+            volatilityPercent,
+            momentumPercent,
+            spreadPercent,
+            minNetProfit,
+            recentRiskDecisions));
         var actionability = BuildActionability(
             score,
             strategy,
@@ -198,6 +215,10 @@ public sealed class FuturesMarketScannerService : IFuturesMarketScannerService
         {
             reasons.Add(reason);
         }
+        foreach (var reason in immediateTrade.Reasons)
+        {
+            reasons.Add(reason);
+        }
 
         return new FuturesMarketScanItem
         {
@@ -207,6 +228,8 @@ public sealed class FuturesMarketScannerService : IFuturesMarketScannerService
             MarketFitScore = score,
             ActionabilityScore = actionability.Score,
             ActionabilityLabel = actionability.Label,
+            ImmediateTradeProbabilityScore = immediateTrade.Score,
+            ImmediateTradeProbabilityLabel = immediateTrade.Label,
             Label = label,
             RecommendedStrategy = FormatEnum(strategy),
             RecommendedDirection = FormatEnum(direction),
@@ -506,6 +529,8 @@ public sealed class FuturesMarketScannerService : IFuturesMarketScannerService
         MarketFitScore = 0m,
         ActionabilityScore = 0m,
         ActionabilityLabel = "NO_TRADE",
+        ImmediateTradeProbabilityScore = 0m,
+        ImmediateTradeProbabilityLabel = "BLOCKED",
         Label = "NO_TRADE",
         RecommendedStrategy = "pause",
         RecommendedDirection = "long-only",

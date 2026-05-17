@@ -528,6 +528,10 @@ public sealed class FuturesMarketScanItem
 
     public required string ActionabilityLabel { get; init; }
 
+    public decimal ImmediateTradeProbabilityScore { get; init; }
+
+    public required string ImmediateTradeProbabilityLabel { get; init; }
+
     public required string Label { get; init; }
 
     public required string RecommendedStrategy { get; init; }
