@@ -472,6 +472,21 @@ public sealed class RotationManagerService : IRotationManagerService
         var lifetimeElapsed = now - slot.ActivatedAt >= TimeSpan.FromMinutes(Math.Max(0, state.MinPairLifetimeMinutes));
 
         var lifecycle = await ResolveOpenLifecycleAsync(profile, cancellationToken);
+        if (!IsBuyCapableProfile(profile))
+        {
+            if (lifecycle is not null)
+            {
+                return new ReplacementEvaluation(
+                    true,
+                    lifecycle.Value.Status,
+                    currentScore,
+                    candidateScore,
+                    $"{profile.StrategyType} profile cannot open new entries. {lifecycle.Value.Reason} Detaching old pair and freeing rotation slot.");
+            }
+
+            return new ReplacementEvaluation(true, RotationPairStatus.Disabled, currentScore, candidateScore, $"{profile.StrategyType} profile can be replaced.");
+        }
+
         if (lifecycle is not null)
         {
             if (!lifetimeElapsed)
@@ -495,11 +510,6 @@ public sealed class RotationManagerService : IRotationManagerService
         if (!lifetimeElapsed)
         {
             return new ReplacementEvaluation(false, RotationPairStatus.Active, currentScore, candidateScore, $"Minimum lifetime not reached for {symbol}.");
-        }
-
-        if (!IsBuyCapableProfile(profile))
-        {
-            return new ReplacementEvaluation(true, RotationPairStatus.Disabled, currentScore, candidateScore, $"{profile.StrategyType} profile can be replaced.");
         }
 
         var latestReason = await _repository.GetLatestNoTradeReasonAsync(symbol, cancellationToken);
