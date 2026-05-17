@@ -2210,6 +2210,49 @@ public sealed class GridDashboardService : IGridDashboardService
       -webkit-line-clamp: 2;
       line-clamp: 2;
     }
+    .rotation-panel { margin-bottom: 20px; }
+    .rotation-controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: end;
+      justify-content: flex-end;
+    }
+    .rotation-controls input {
+      width: 110px;
+      min-width: 110px;
+    }
+    .rotation-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 10px;
+    }
+    .rotation-reason {
+      max-width: 520px;
+      color: var(--muted);
+    }
+    .rotation-status-pill {
+      display: inline-flex;
+      align-items: center;
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: rgba(23,102,78,0.1);
+      color: var(--accent-2);
+      font-weight: 700;
+      white-space: nowrap;
+    }
+    .rotation-status-pill.waiting,
+    .rotation-status-pill.candidate,
+    .rotation-status-pill.cooldown {
+      background: rgba(198,103,47,0.12);
+      color: var(--accent);
+    }
+    .rotation-status-pill.locked-position,
+    .rotation-status-pill.disabled {
+      background: rgba(177,54,34,0.1);
+      color: var(--danger);
+    }
     .config-summary-panel { margin-bottom: 20px; }
     .config-profit-totals {
       display: flex;
@@ -2457,6 +2500,35 @@ public sealed class GridDashboardService : IGridDashboardService
         <div class="status" id="formStatus"></div>
       </section>
     </div>
+
+    <section class="panel section rotation-panel">
+      <div class="section-head">
+        <div>
+          <h2>Market Rotation</h2>
+          <div class="subtle">Keeps only the strongest flat spot pairs active and records every switch decision.</div>
+        </div>
+        <div class="rotation-controls">
+          <div>
+            <label for="rotationPoolSize">Active pairs</label>
+            <input id="rotationPoolSize" type="number" min="1" max="30" step="1" value="5" />
+          </div>
+          <button type="button" class="compact-button" id="startRotation">Start Rotation</button>
+          <button type="button" class="secondary-button compact-button" id="stopRotation">Stop Rotation</button>
+        </div>
+      </div>
+      <div class="status" id="rotationStatus">Rotation status has not loaded yet.</div>
+      <div class="rotation-meta" id="rotationMeta"></div>
+      <div class="table-wrap">
+        <table class="rotation-table">
+          <thead>
+            <tr>
+              <th>Slot</th><th>Symbol</th><th>Status</th><th>Score</th><th>Reason</th><th>Activated</th><th>Updated</th>
+            </tr>
+          </thead>
+          <tbody id="rotationSlotRows"></tbody>
+        </table>
+      </div>
+    </section>
 
     <section class="panel section config-summary-panel">
       <div class="section-head">
@@ -2790,6 +2862,83 @@ public sealed class GridDashboardService : IGridDashboardService
                 <button type="button" class="danger-button compact-button" data-action="delete-config" data-symbol="${escapeHtml(config.symbol)}">Delete</button>
               </td>
             </tr>`).join('');
+    };
+    const formatRotationStatusLabel = (status) => formatEnumLabel(String(status || 'waiting').replaceAll('-', ' '));
+    const renderRotationStatus = (rotation) => {
+      if (!rotation) {
+        byId('rotationStatus').className = 'status error';
+        byId('rotationStatus').textContent = 'Rotation status is unavailable.';
+        byId('rotationSlotRows').innerHTML = `<tr><td colspan="7">No rotation data.</td></tr>`;
+        return;
+      }
+
+      if (document.activeElement !== byId('rotationPoolSize')) {
+        byId('rotationPoolSize').value = rotation.activePairPoolSize || 5;
+      }
+
+      byId('rotationStatus').className = `status ${rotation.rotationEnabled ? 'ok' : ''}`;
+      byId('rotationStatus').textContent = rotation.rotationEnabled
+        ? `Rotation is running in ${rotation.rotationMode || 'PaperOnly'} mode.`
+        : `Rotation is stopped in ${rotation.rotationMode || 'PaperOnly'} mode.`;
+      byId('rotationMeta').innerHTML = [
+        ['Scan', `${formatNumber(rotation.scanIntervalMinutes)}m`],
+        ['Lifetime', `${formatNumber(rotation.minPairLifetimeMinutes)}m`],
+        ['Gap', formatNumber(rotation.replacementScoreGap)],
+        ['Flat only', rotation.allowReplaceOnlyWhenFlat ? 'yes' : 'no'],
+        ['Max positions', formatNumber(rotation.maxActivePositions)],
+        ['Last scan', rotation.lastScanAt ? formatDate(rotation.lastScanAt) : '-']
+      ].map(([label, value]) => `<span class="regime-chip">${escapeHtml(label)}: ${escapeHtml(value)}</span>`).join('');
+
+      const slots = rotation.slots || [];
+      byId('rotationSlotRows').innerHTML = slots.length === 0
+        ? `<tr><td colspan="7">No active rotation slots yet.</td></tr>`
+        : slots.map(slot => `
+            <tr>
+              <td>${formatNumber(slot.slotIndex)}</td>
+              <td><strong>${escapeHtml(slot.symbol || '-')}</strong><div class="subtle">${escapeHtml(slot.category || 'spot')}</div></td>
+              <td><span class="rotation-status-pill ${escapeHtml(slot.status || 'waiting')}">${escapeHtml(formatRotationStatusLabel(slot.status))}</span></td>
+              <td>${formatNumber(slot.score)}</td>
+              <td><div class="rotation-reason">${escapeHtml(slot.reason || '-')}</div></td>
+              <td>${formatDate(slot.activatedAt)}</td>
+              <td>${formatDate(slot.updatedAt)}</td>
+            </tr>`).join('');
+    };
+    const loadRotationStatus = async () => {
+      const response = await fetch('/api/rotation', { cache: 'no-store' });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data?.message || data?.errors?.join(' | ') || 'Failed to load rotation status.');
+      }
+
+      renderRotationStatus(data);
+      return data;
+    };
+    const startRotation = async () => {
+      const activePairPoolSize = Math.max(1, Number(byId('rotationPoolSize').value || 5));
+      byId('rotationStatus').className = 'status';
+      byId('rotationStatus').textContent = 'Starting rotation...';
+      const response = await fetch('/api/rotation/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ activePairPoolSize })
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data?.message || data?.errors?.join(' | ') || 'Failed to start rotation.');
+      }
+
+      renderRotationStatus(data);
+    };
+    const stopRotation = async () => {
+      byId('rotationStatus').className = 'status';
+      byId('rotationStatus').textContent = 'Stopping rotation...';
+      const response = await fetch('/api/rotation/stop', { method: 'POST' });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data?.message || data?.errors?.join(' | ') || 'Failed to stop rotation.');
+      }
+
+      renderRotationStatus(data);
     };
     const deleteProfile = async (symbol) => {
       const normalizedSymbol = String(symbol || '').toUpperCase();
@@ -3358,6 +3507,10 @@ public sealed class GridDashboardService : IGridDashboardService
       } else {
         renderConfigSummaries(data.configSummaries || []);
       }
+      loadRotationStatus().catch((error) => {
+        byId('rotationStatus').className = 'status error';
+        byId('rotationStatus').textContent = error.message;
+      });
 
       byId('modePill').textContent = `${data.state.tradingMode} mode`;
       byId('modePill').className = data.state.isPaused ? 'pill paused' : 'pill';
@@ -3565,6 +3718,18 @@ public sealed class GridDashboardService : IGridDashboardService
         byId('marketScanStatus').className = 'status error';
         byId('marketScanStatus').textContent = error.message;
         setDashboardLoading(false);
+      });
+    });
+    byId('startRotation').addEventListener('click', () => {
+      startRotation().catch((error) => {
+        byId('rotationStatus').className = 'status error';
+        byId('rotationStatus').textContent = error.message;
+      });
+    });
+    byId('stopRotation').addEventListener('click', () => {
+      stopRotation().catch((error) => {
+        byId('rotationStatus').className = 'status error';
+        byId('rotationStatus').textContent = error.message;
       });
     });
     byId('marketScanRows').addEventListener('click', (event) => {

@@ -606,8 +606,23 @@ public sealed class RotationManagerService : IRotationManagerService
     };
 
     private static string FormatEnum<T>(T value)
-        where T : struct, Enum =>
-        value.ToString().ToLower(CultureInfo.InvariantCulture);
+        where T : struct, Enum
+    {
+        var text = value.ToString();
+        var output = new List<char>(text.Length + 4);
+        for (var index = 0; index < text.Length; index++)
+        {
+            var character = text[index];
+            if (index > 0 && char.IsUpper(character))
+            {
+                output.Add('-');
+            }
+
+            output.Add(char.ToLower(character, CultureInfo.InvariantCulture));
+        }
+
+        return new string(output.ToArray());
+    }
 
     private readonly record struct ReplacementEvaluation(
         bool ShouldReplace,
