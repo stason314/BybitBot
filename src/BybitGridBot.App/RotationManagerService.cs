@@ -58,18 +58,23 @@ public sealed class RotationManagerService : IRotationManagerService
         var activePairPoolSize = request.ActivePairPoolSize is > 0
             ? request.ActivePairPoolSize.Value
             : current.ActivePairPoolSize;
+        var maxActivePositions = request.MaxActivePositions is > 0
+            ? request.MaxActivePositions.Value
+            : activePairPoolSize;
         var updated = current with
         {
             RotationEnabled = true,
             ActivePairPoolSize = Math.Max(1, activePairPoolSize),
+            MaxActivePositions = Math.Max(1, maxActivePositions),
             StartedAt = now,
             StoppedAt = null,
             UpdatedAt = now
         };
 
         await _repository.SaveRotationStateAsync(updated, cancellationToken);
-        await AddDecisionAsync(DecisionStart, null, null, null, 0m, 0m, "Rotation started.", now, cancellationToken);
-        return await BuildStatusAsync(updated, cancellationToken);
+        await AddDecisionAsync(DecisionStart, null, null, null, 0m, 0m, $"Rotation started with {updated.ActivePairPoolSize} active pair slot(s).", now, cancellationToken);
+        await RunOnceAsync(cancellationToken);
+        return await GetStatusAsync(cancellationToken);
     }
 
     public async Task<RotationStatusResponse> StopAsync(CancellationToken cancellationToken)
@@ -746,6 +751,8 @@ public sealed class RotationManagerService : IRotationManagerService
 public sealed class RotationStartRequest
 {
     public int? ActivePairPoolSize { get; init; }
+
+    public int? MaxActivePositions { get; init; }
 }
 
 public sealed class RotationRunResult

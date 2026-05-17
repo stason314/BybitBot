@@ -2924,7 +2924,7 @@ public sealed class GridDashboardService : IGridDashboardService
       const response = await fetch('/api/rotation/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ activePairPoolSize })
+        body: JSON.stringify({ activePairPoolSize, maxActivePositions: activePairPoolSize })
       });
       const data = await response.json();
       if (!response.ok) {
