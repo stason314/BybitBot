@@ -88,6 +88,7 @@ builder.Services.AddSingleton<IGridDashboardService, GridDashboardService>();
 builder.Services.AddSingleton<IFuturesDashboardService, FuturesDashboardService>();
 builder.Services.AddSingleton<IMarketScannerService, MarketScannerService>();
 builder.Services.AddSingleton<IFuturesMarketScannerService, FuturesMarketScannerService>();
+builder.Services.AddSingleton<IRotationManagerService, RotationManagerService>();
 
 builder.Services.AddHttpClient<IBybitRestClient, BybitRestClient>(client =>
 {
