@@ -39,6 +39,7 @@ builder.Services.AddOptions<FuturesRiskOptions>().Bind(builder.Configuration);
 builder.Services.AddOptions<FuturesStrategyQualityOptions>().Bind(builder.Configuration);
 builder.Services.AddOptions<FuturesMainnetChecklistOptions>().Bind(builder.Configuration);
 builder.Services.AddOptions<TelegramOptions>().Bind(builder.Configuration);
+builder.Services.AddOptions<RotationOptions>().Bind(builder.Configuration);
 
 builder.Services.AddSingleton<BybitSigner>();
 builder.Services.AddSingleton<BybitUserStreamTelemetry>();
@@ -87,6 +88,7 @@ builder.Services.AddSingleton<IGridDashboardService, GridDashboardService>();
 builder.Services.AddSingleton<IFuturesDashboardService, FuturesDashboardService>();
 builder.Services.AddSingleton<IMarketScannerService, MarketScannerService>();
 builder.Services.AddSingleton<IFuturesMarketScannerService, FuturesMarketScannerService>();
+builder.Services.AddSingleton<IRotationManagerService, RotationManagerService>();
 
 builder.Services.AddHttpClient<IBybitRestClient, BybitRestClient>(client =>
 {
@@ -110,6 +112,7 @@ if (ShouldRunSpotWorker(builder.Configuration))
 {
     builder.Services.AddHostedService<GridBotWorker>();
     builder.Services.AddHostedService<SpotUserStreamWorker>();
+    builder.Services.AddHostedService<MarketRotationWorker>();
 }
 
 builder.Services.AddHostedService<FuturesBotWorker>();
@@ -130,6 +133,18 @@ app.MapGet("/api/dashboard", async (string? symbol, bool? fast, IGridDashboardSe
 
 app.MapGet("/api/market-scan", async (string? category, int? limit, IMarketScannerService marketScannerService, CancellationToken cancellationToken) =>
     Results.Ok(await marketScannerService.ScanAsync(category, limit, cancellationToken)));
+
+app.MapGet("/api/rotation", async (IRotationManagerService rotationManagerService, CancellationToken cancellationToken) =>
+    Results.Ok(await rotationManagerService.GetStatusAsync(cancellationToken)));
+
+app.MapPost("/api/rotation/start", async (RotationStartRequest request, IRotationManagerService rotationManagerService, CancellationToken cancellationToken) =>
+    Results.Ok(await rotationManagerService.StartAsync(request, cancellationToken)));
+
+app.MapPost("/api/rotation/stop", async (IRotationManagerService rotationManagerService, CancellationToken cancellationToken) =>
+    Results.Ok(await rotationManagerService.StopAsync(cancellationToken)));
+
+app.MapPost("/api/rotation/run-once", async (IRotationManagerService rotationManagerService, CancellationToken cancellationToken) =>
+    Results.Ok(await rotationManagerService.RunOnceAsync(cancellationToken)));
 
 app.MapPost("/api/settings", async (UpdateSettingsRequest request, IGridDashboardService dashboardService, CancellationToken cancellationToken) =>
 {

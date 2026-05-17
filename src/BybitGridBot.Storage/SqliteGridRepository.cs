@@ -108,6 +108,80 @@ public sealed class SqliteGridRepository : IGridRepository
                 updated_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS rotation_state (
+                state_id TEXT NOT NULL PRIMARY KEY,
+                rotation_enabled INTEGER NOT NULL,
+                active_pair_pool_size INTEGER NOT NULL,
+                scan_interval_minutes INTEGER NOT NULL,
+                min_pair_lifetime_minutes INTEGER NOT NULL,
+                replacement_score_gap TEXT NOT NULL,
+                allow_replace_only_when_flat INTEGER NOT NULL,
+                max_active_positions INTEGER NOT NULL,
+                rotation_mode TEXT NOT NULL,
+                started_at TEXT NULL,
+                stopped_at TEXT NULL,
+                last_scan_at TEXT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS active_pair_slots (
+                slot_index INTEGER NOT NULL PRIMARY KEY,
+                symbol TEXT NULL,
+                category TEXT NOT NULL,
+                status TEXT NOT NULL,
+                score TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                activated_at TEXT NOT NULL,
+                cooldown_until TEXT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS pair_rotation_history (
+                rotation_history_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                slot_index INTEGER NOT NULL,
+                previous_symbol TEXT NULL,
+                new_symbol TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                previous_score TEXT NOT NULL,
+                new_score TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS strategy_performance_scores (
+                symbol TEXT NOT NULL,
+                strategy_type TEXT NOT NULL,
+                score TEXT NOT NULL,
+                net_pnl TEXT NOT NULL,
+                win_rate TEXT NOT NULL,
+                trades_count INTEGER NOT NULL,
+                metrics_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(symbol, strategy_type)
+            );
+
+            CREATE TABLE IF NOT EXISTS pair_strategy_scores (
+                symbol TEXT NOT NULL,
+                category TEXT NOT NULL,
+                strategy_type TEXT NOT NULL,
+                score TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                metrics_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(symbol, category, strategy_type)
+            );
+
+            CREATE TABLE IF NOT EXISTS rotation_decisions (
+                rotation_decision_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                action TEXT NOT NULL,
+                symbol TEXT NULL,
+                candidate_symbol TEXT NULL,
+                slot_index INTEGER NULL,
+                current_score TEXT NOT NULL,
+                candidate_score TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS futures_settings (
                 settings_id TEXT NOT NULL PRIMARY KEY,
                 enabled INTEGER NOT NULL DEFAULT 1,
@@ -560,6 +634,307 @@ public sealed class SqliteGridRepository : IGridRepository
         command.CommandText = sql;
         command.Parameters.AddWithValue("$settings_id", symbol);
         await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    public async Task<RotationStateRecord?> GetRotationStateAsync(CancellationToken cancellationToken)
+    {
+        const string sql = """
+            SELECT rotation_enabled, active_pair_pool_size, scan_interval_minutes, min_pair_lifetime_minutes,
+                   replacement_score_gap, allow_replace_only_when_flat, max_active_positions, rotation_mode,
+                   started_at, stopped_at, last_scan_at, updated_at
+            FROM rotation_state
+            WHERE state_id = 'default'
+            LIMIT 1;
+            """;
+
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        return await reader.ReadAsync(cancellationToken)
+            ? ReadRotationState(reader)
+            : null;
+    }
+
+    public async Task SaveRotationStateAsync(RotationStateRecord state, CancellationToken cancellationToken)
+    {
+        const string sql = """
+            INSERT INTO rotation_state (
+                state_id, rotation_enabled, active_pair_pool_size, scan_interval_minutes, min_pair_lifetime_minutes,
+                replacement_score_gap, allow_replace_only_when_flat, max_active_positions, rotation_mode,
+                started_at, stopped_at, last_scan_at, updated_at
+            )
+            VALUES (
+                'default', $rotation_enabled, $active_pair_pool_size, $scan_interval_minutes, $min_pair_lifetime_minutes,
+                $replacement_score_gap, $allow_replace_only_when_flat, $max_active_positions, $rotation_mode,
+                $started_at, $stopped_at, $last_scan_at, $updated_at
+            )
+            ON CONFLICT(state_id) DO UPDATE SET
+                rotation_enabled = excluded.rotation_enabled,
+                active_pair_pool_size = excluded.active_pair_pool_size,
+                scan_interval_minutes = excluded.scan_interval_minutes,
+                min_pair_lifetime_minutes = excluded.min_pair_lifetime_minutes,
+                replacement_score_gap = excluded.replacement_score_gap,
+                allow_replace_only_when_flat = excluded.allow_replace_only_when_flat,
+                max_active_positions = excluded.max_active_positions,
+                rotation_mode = excluded.rotation_mode,
+                started_at = excluded.started_at,
+                stopped_at = excluded.stopped_at,
+                last_scan_at = excluded.last_scan_at,
+                updated_at = excluded.updated_at;
+            """;
+
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        command.Parameters.AddWithValue("$rotation_enabled", state.RotationEnabled ? 1 : 0);
+        command.Parameters.AddWithValue("$active_pair_pool_size", state.ActivePairPoolSize);
+        command.Parameters.AddWithValue("$scan_interval_minutes", state.ScanIntervalMinutes);
+        command.Parameters.AddWithValue("$min_pair_lifetime_minutes", state.MinPairLifetimeMinutes);
+        command.Parameters.AddWithValue("$replacement_score_gap", FormatDecimal(state.ReplacementScoreGap));
+        command.Parameters.AddWithValue("$allow_replace_only_when_flat", state.AllowReplaceOnlyWhenFlat ? 1 : 0);
+        command.Parameters.AddWithValue("$max_active_positions", state.MaxActivePositions);
+        command.Parameters.AddWithValue("$rotation_mode", state.RotationMode.ToString());
+        AddNullableDateTimeParameter(command, "$started_at", state.StartedAt);
+        AddNullableDateTimeParameter(command, "$stopped_at", state.StoppedAt);
+        AddNullableDateTimeParameter(command, "$last_scan_at", state.LastScanAt);
+        command.Parameters.AddWithValue("$updated_at", state.UpdatedAt.ToString("O", CultureInfo.InvariantCulture));
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    public async Task<IReadOnlyList<ActivePairSlotRecord>> GetActivePairSlotsAsync(CancellationToken cancellationToken)
+    {
+        const string sql = """
+            SELECT slot_index, symbol, category, status, score, reason, activated_at, cooldown_until, updated_at
+            FROM active_pair_slots
+            ORDER BY slot_index;
+            """;
+
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        var result = new List<ActivePairSlotRecord>();
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            result.Add(ReadActivePairSlot(reader));
+        }
+
+        return result;
+    }
+
+    public async Task UpsertActivePairSlotAsync(ActivePairSlotRecord slot, CancellationToken cancellationToken)
+    {
+        const string sql = """
+            INSERT INTO active_pair_slots (
+                slot_index, symbol, category, status, score, reason, activated_at, cooldown_until, updated_at
+            )
+            VALUES (
+                $slot_index, $symbol, $category, $status, $score, $reason, $activated_at, $cooldown_until, $updated_at
+            )
+            ON CONFLICT(slot_index) DO UPDATE SET
+                symbol = excluded.symbol,
+                category = excluded.category,
+                status = excluded.status,
+                score = excluded.score,
+                reason = excluded.reason,
+                activated_at = excluded.activated_at,
+                cooldown_until = excluded.cooldown_until,
+                updated_at = excluded.updated_at;
+            """;
+
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        command.Parameters.AddWithValue("$slot_index", slot.SlotIndex);
+        command.Parameters.AddWithValue("$symbol", string.IsNullOrWhiteSpace(slot.Symbol) ? DBNull.Value : slot.Symbol);
+        command.Parameters.AddWithValue("$category", slot.Category);
+        command.Parameters.AddWithValue("$status", slot.Status.ToString());
+        command.Parameters.AddWithValue("$score", FormatDecimal(slot.Score));
+        command.Parameters.AddWithValue("$reason", slot.Reason);
+        command.Parameters.AddWithValue("$activated_at", slot.ActivatedAt.ToString("O", CultureInfo.InvariantCulture));
+        AddNullableDateTimeParameter(command, "$cooldown_until", slot.CooldownUntil);
+        command.Parameters.AddWithValue("$updated_at", slot.UpdatedAt.ToString("O", CultureInfo.InvariantCulture));
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    public async Task AddPairRotationHistoryAsync(PairRotationHistoryRecord history, CancellationToken cancellationToken)
+    {
+        const string sql = """
+            INSERT INTO pair_rotation_history (
+                slot_index, previous_symbol, new_symbol, reason, previous_score, new_score, created_at
+            )
+            VALUES (
+                $slot_index, $previous_symbol, $new_symbol, $reason, $previous_score, $new_score, $created_at
+            );
+            """;
+
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        command.Parameters.AddWithValue("$slot_index", history.SlotIndex);
+        command.Parameters.AddWithValue("$previous_symbol", string.IsNullOrWhiteSpace(history.PreviousSymbol) ? DBNull.Value : history.PreviousSymbol);
+        command.Parameters.AddWithValue("$new_symbol", history.NewSymbol);
+        command.Parameters.AddWithValue("$reason", history.Reason);
+        command.Parameters.AddWithValue("$previous_score", FormatDecimal(history.PreviousScore));
+        command.Parameters.AddWithValue("$new_score", FormatDecimal(history.NewScore));
+        command.Parameters.AddWithValue("$created_at", history.CreatedAt.ToString("O", CultureInfo.InvariantCulture));
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    public async Task UpsertStrategyPerformanceScoreAsync(StrategyPerformanceScoreRecord score, CancellationToken cancellationToken)
+    {
+        const string sql = """
+            INSERT INTO strategy_performance_scores (
+                symbol, strategy_type, score, net_pnl, win_rate, trades_count, metrics_json, updated_at
+            )
+            VALUES (
+                $symbol, $strategy_type, $score, $net_pnl, $win_rate, $trades_count, $metrics_json, $updated_at
+            )
+            ON CONFLICT(symbol, strategy_type) DO UPDATE SET
+                score = excluded.score,
+                net_pnl = excluded.net_pnl,
+                win_rate = excluded.win_rate,
+                trades_count = excluded.trades_count,
+                metrics_json = excluded.metrics_json,
+                updated_at = excluded.updated_at;
+            """;
+
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        command.Parameters.AddWithValue("$symbol", score.Symbol);
+        command.Parameters.AddWithValue("$strategy_type", score.StrategyType);
+        command.Parameters.AddWithValue("$score", FormatDecimal(score.Score));
+        command.Parameters.AddWithValue("$net_pnl", FormatDecimal(score.NetPnl));
+        command.Parameters.AddWithValue("$win_rate", FormatDecimal(score.WinRate));
+        command.Parameters.AddWithValue("$trades_count", score.TradesCount);
+        command.Parameters.AddWithValue("$metrics_json", score.MetricsJson);
+        command.Parameters.AddWithValue("$updated_at", score.UpdatedAt.ToString("O", CultureInfo.InvariantCulture));
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    public async Task<IReadOnlyList<StrategyPerformanceScoreRecord>> GetStrategyPerformanceScoresAsync(int limit, CancellationToken cancellationToken)
+    {
+        const string sql = """
+            SELECT symbol, strategy_type, score, net_pnl, win_rate, trades_count, metrics_json, updated_at
+            FROM strategy_performance_scores
+            ORDER BY CAST(score AS REAL) DESC, updated_at DESC
+            LIMIT $limit;
+            """;
+
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        command.Parameters.AddWithValue("$limit", Math.Max(1, limit));
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        var result = new List<StrategyPerformanceScoreRecord>();
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            result.Add(ReadStrategyPerformanceScore(reader));
+        }
+
+        return result;
+    }
+
+    public async Task UpsertPairStrategyScoreAsync(PairStrategyScoreRecord score, CancellationToken cancellationToken)
+    {
+        const string sql = """
+            INSERT INTO pair_strategy_scores (
+                symbol, category, strategy_type, score, reason, metrics_json, updated_at
+            )
+            VALUES (
+                $symbol, $category, $strategy_type, $score, $reason, $metrics_json, $updated_at
+            )
+            ON CONFLICT(symbol, category, strategy_type) DO UPDATE SET
+                score = excluded.score,
+                reason = excluded.reason,
+                metrics_json = excluded.metrics_json,
+                updated_at = excluded.updated_at;
+            """;
+
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        command.Parameters.AddWithValue("$symbol", score.Symbol);
+        command.Parameters.AddWithValue("$category", score.Category);
+        command.Parameters.AddWithValue("$strategy_type", score.StrategyType);
+        command.Parameters.AddWithValue("$score", FormatDecimal(score.Score));
+        command.Parameters.AddWithValue("$reason", score.Reason);
+        command.Parameters.AddWithValue("$metrics_json", score.MetricsJson);
+        command.Parameters.AddWithValue("$updated_at", score.UpdatedAt.ToString("O", CultureInfo.InvariantCulture));
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    public async Task<IReadOnlyList<PairStrategyScoreRecord>> GetPairStrategyScoresAsync(int limit, CancellationToken cancellationToken)
+    {
+        const string sql = """
+            SELECT symbol, category, strategy_type, score, reason, metrics_json, updated_at
+            FROM pair_strategy_scores
+            ORDER BY CAST(score AS REAL) DESC, updated_at DESC
+            LIMIT $limit;
+            """;
+
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        command.Parameters.AddWithValue("$limit", Math.Max(1, limit));
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        var result = new List<PairStrategyScoreRecord>();
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            result.Add(ReadPairStrategyScore(reader));
+        }
+
+        return result;
+    }
+
+    public async Task AddRotationDecisionAsync(RotationDecisionRecord decision, CancellationToken cancellationToken)
+    {
+        const string sql = """
+            INSERT INTO rotation_decisions (
+                action, symbol, candidate_symbol, slot_index, current_score, candidate_score, reason, created_at
+            )
+            VALUES (
+                $action, $symbol, $candidate_symbol, $slot_index, $current_score, $candidate_score, $reason, $created_at
+            );
+            """;
+
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        command.Parameters.AddWithValue("$action", decision.Action);
+        command.Parameters.AddWithValue("$symbol", string.IsNullOrWhiteSpace(decision.Symbol) ? DBNull.Value : decision.Symbol);
+        command.Parameters.AddWithValue("$candidate_symbol", string.IsNullOrWhiteSpace(decision.CandidateSymbol) ? DBNull.Value : decision.CandidateSymbol);
+        command.Parameters.AddWithValue("$slot_index", decision.SlotIndex is null ? DBNull.Value : decision.SlotIndex.Value);
+        command.Parameters.AddWithValue("$current_score", FormatDecimal(decision.CurrentScore));
+        command.Parameters.AddWithValue("$candidate_score", FormatDecimal(decision.CandidateScore));
+        command.Parameters.AddWithValue("$reason", decision.Reason);
+        command.Parameters.AddWithValue("$created_at", decision.CreatedAt.ToString("O", CultureInfo.InvariantCulture));
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    public async Task<IReadOnlyList<RotationDecisionRecord>> GetRotationDecisionsAsync(int limit, CancellationToken cancellationToken)
+    {
+        const string sql = """
+            SELECT rotation_decision_id, action, symbol, candidate_symbol, slot_index, current_score, candidate_score, reason, created_at
+            FROM rotation_decisions
+            ORDER BY rotation_decision_id DESC
+            LIMIT $limit;
+            """;
+
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        command.Parameters.AddWithValue("$limit", Math.Max(1, limit));
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        var result = new List<RotationDecisionRecord>();
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            result.Add(ReadRotationDecision(reader));
+        }
+
+        return result;
     }
 
     public async Task<FuturesBotSettings?> GetFuturesSettingsAsync(string symbol, CancellationToken cancellationToken)
@@ -1648,6 +2023,71 @@ public sealed class SqliteGridRepository : IGridRepository
         };
     }
 
+    private static RotationStateRecord ReadRotationState(SqliteDataReader reader) => new()
+    {
+        RotationEnabled = reader.GetBoolean(0),
+        ActivePairPoolSize = reader.GetInt32(1),
+        ScanIntervalMinutes = reader.GetInt32(2),
+        MinPairLifetimeMinutes = reader.GetInt32(3),
+        ReplacementScoreGap = ParseDecimal(reader.GetString(4)),
+        AllowReplaceOnlyWhenFlat = reader.GetBoolean(5),
+        MaxActivePositions = reader.GetInt32(6),
+        RotationMode = ParseEnum(reader.GetString(7), RotationMode.PaperOnly),
+        StartedAt = reader.IsDBNull(8) ? null : DateTimeOffset.Parse(reader.GetString(8), CultureInfo.InvariantCulture),
+        StoppedAt = reader.IsDBNull(9) ? null : DateTimeOffset.Parse(reader.GetString(9), CultureInfo.InvariantCulture),
+        LastScanAt = reader.IsDBNull(10) ? null : DateTimeOffset.Parse(reader.GetString(10), CultureInfo.InvariantCulture),
+        UpdatedAt = DateTimeOffset.Parse(reader.GetString(11), CultureInfo.InvariantCulture)
+    };
+
+    private static ActivePairSlotRecord ReadActivePairSlot(SqliteDataReader reader) => new()
+    {
+        SlotIndex = reader.GetInt32(0),
+        Symbol = reader.IsDBNull(1) ? null : reader.GetString(1),
+        Category = reader.GetString(2),
+        Status = ParseEnum(reader.GetString(3), RotationPairStatus.Waiting),
+        Score = ParseDecimal(reader.GetString(4)),
+        Reason = reader.GetString(5),
+        ActivatedAt = DateTimeOffset.Parse(reader.GetString(6), CultureInfo.InvariantCulture),
+        CooldownUntil = reader.IsDBNull(7) ? null : DateTimeOffset.Parse(reader.GetString(7), CultureInfo.InvariantCulture),
+        UpdatedAt = DateTimeOffset.Parse(reader.GetString(8), CultureInfo.InvariantCulture)
+    };
+
+    private static StrategyPerformanceScoreRecord ReadStrategyPerformanceScore(SqliteDataReader reader) => new()
+    {
+        Symbol = reader.GetString(0),
+        StrategyType = reader.GetString(1),
+        Score = ParseDecimal(reader.GetString(2)),
+        NetPnl = ParseDecimal(reader.GetString(3)),
+        WinRate = ParseDecimal(reader.GetString(4)),
+        TradesCount = reader.GetInt32(5),
+        MetricsJson = reader.GetString(6),
+        UpdatedAt = DateTimeOffset.Parse(reader.GetString(7), CultureInfo.InvariantCulture)
+    };
+
+    private static PairStrategyScoreRecord ReadPairStrategyScore(SqliteDataReader reader) => new()
+    {
+        Symbol = reader.GetString(0),
+        Category = reader.GetString(1),
+        StrategyType = reader.GetString(2),
+        Score = ParseDecimal(reader.GetString(3)),
+        Reason = reader.GetString(4),
+        MetricsJson = reader.GetString(5),
+        UpdatedAt = DateTimeOffset.Parse(reader.GetString(6), CultureInfo.InvariantCulture)
+    };
+
+    private static RotationDecisionRecord ReadRotationDecision(SqliteDataReader reader) => new()
+    {
+        RotationDecisionId = reader.GetInt64(0),
+        Action = reader.GetString(1),
+        Symbol = reader.IsDBNull(2) ? null : reader.GetString(2),
+        CandidateSymbol = reader.IsDBNull(3) ? null : reader.GetString(3),
+        SlotIndex = reader.IsDBNull(4) ? null : reader.GetInt32(4),
+        CurrentScore = ParseDecimal(reader.GetString(5)),
+        CandidateScore = ParseDecimal(reader.GetString(6)),
+        Reason = reader.GetString(7),
+        CreatedAt = DateTimeOffset.Parse(reader.GetString(8), CultureInfo.InvariantCulture)
+    };
+
     private static FuturesBotSettings ReadFuturesSettings(SqliteDataReader reader)
     {
         return new FuturesBotSettings
@@ -2018,6 +2458,9 @@ public sealed class SqliteGridRepository : IGridRepository
             """;
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
+
+    private static void AddNullableDateTimeParameter(SqliteCommand command, string name, DateTimeOffset? value) =>
+        command.Parameters.AddWithValue(name, value?.ToString("O", CultureInfo.InvariantCulture) ?? (object)DBNull.Value);
 
     private static string FormatDecimal(decimal value) => value.ToString(CultureInfo.InvariantCulture);
 
