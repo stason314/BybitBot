@@ -522,6 +522,10 @@ public sealed class FuturesMarketScanItem
 
     public decimal Score { get; init; }
 
+    public decimal RotationScore { get; init; }
+
+    public required string RotationLabel { get; init; }
+
     public decimal MarketFitScore { get; init; }
 
     public decimal ActionabilityScore { get; init; }

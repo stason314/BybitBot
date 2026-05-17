@@ -103,7 +103,8 @@ public sealed class FuturesMarketScannerService : IFuturesMarketScannerService
             FailedCount = failures,
             GeneratedAt = DateTimeOffset.UtcNow,
             Items = results
-                .OrderByDescending(item => item.ActionabilityScore)
+                .OrderByDescending(item => item.RotationScore)
+                .ThenByDescending(item => item.ActionabilityScore)
                 .ThenByDescending(item => item.MarketFitScore)
                 .ThenByDescending(item => item.Volume6hUsdt)
                 .ToArray()
@@ -230,12 +231,24 @@ public sealed class FuturesMarketScannerService : IFuturesMarketScannerService
         {
             reasons.Add(reason);
         }
+        var rotation = RotationCandidateScorer.Score(new RotationCandidateScoreInput(
+            score,
+            actionability.Score,
+            immediateTrade.Score,
+            strategyPerformance.Score,
+            pairEfficiency.Score));
+        foreach (var reason in rotation.Reasons)
+        {
+            reasons.Add(reason);
+        }
 
         return new FuturesMarketScanItem
         {
             Symbol = instrument.Symbol,
             Category = "linear",
             Score = score,
+            RotationScore = rotation.Score,
+            RotationLabel = rotation.Label,
             MarketFitScore = score,
             ActionabilityScore = actionability.Score,
             ActionabilityLabel = actionability.Label,
@@ -541,6 +554,8 @@ public sealed class FuturesMarketScannerService : IFuturesMarketScannerService
         Symbol = instrument.Symbol,
         Category = "linear",
         Score = 0m,
+        RotationScore = 0m,
+        RotationLabel = "REJECT",
         MarketFitScore = 0m,
         ActionabilityScore = 0m,
         ActionabilityLabel = "NO_TRADE",

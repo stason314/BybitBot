@@ -1217,7 +1217,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         <table>
           <thead>
             <tr>
-              <th>Symbol</th><th>Actionability</th><th>Immediate</th><th>Performance</th><th>Pair Eff.</th><th>Market</th><th>Strategy</th><th>Fit</th><th>Entry</th><th>Price</th><th>ATR</th><th>6h Volume</th><th>Support / Resistance</th><th>Reasons</th><th>Action</th>
+              <th>Symbol</th><th>Rotation</th><th>Actionability</th><th>Immediate</th><th>Performance</th><th>Pair Eff.</th><th>Market</th><th>Strategy</th><th>Fit</th><th>Entry</th><th>Price</th><th>ATR</th><th>6h Volume</th><th>Support / Resistance</th><th>Reasons</th><th>Action</th>
             </tr>
           </thead>
           <tbody id="futuresMarketScanRows"></tbody>
@@ -1476,13 +1476,14 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
     };
     const renderFuturesMarketScanRows = (items) => {
       byId('futuresMarketScanRows').innerHTML = !items || items.length === 0
-        ? '<tr><td colspan="15">No futures scan results yet.</td></tr>'
+        ? '<tr><td colspan="16">No futures scan results yet.</td></tr>'
         : items.map(item => {
-            const actionabilityScore = Number(item.actionabilityScore ?? item.score ?? 0);
-            const canApply = item.settings && actionabilityScore >= 15;
+            const rotationScore = Number(item.rotationScore ?? item.actionabilityScore ?? item.score ?? 0);
+            const canApply = item.settings && rotationScore >= 35;
             return `
               <tr>
                 <td><strong>${escapeHtml(item.symbol)}</strong><br><span class="subtle">${escapeHtml(item.category)}</span></td>
+                <td><strong>${formatNumber(item.rotationScore)}</strong><br><span class="subtle">${escapeHtml(item.rotationLabel || '-')}</span></td>
                 <td><strong>${formatNumber(item.actionabilityScore)}</strong><br><span class="subtle">${escapeHtml(item.actionabilityLabel || item.label)}</span></td>
                 <td><strong>${formatNumber(item.immediateTradeProbabilityScore)}</strong><br><span class="subtle">${escapeHtml(item.immediateTradeProbabilityLabel || '-')}</span></td>
                 <td><strong>${formatNumber(item.strategyPerformanceScore)}</strong><br><span class="subtle">${escapeHtml(item.strategyPerformanceLabel || '-')}</span></td>
