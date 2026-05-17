@@ -112,6 +112,7 @@ if (ShouldRunSpotWorker(builder.Configuration))
 {
     builder.Services.AddHostedService<GridBotWorker>();
     builder.Services.AddHostedService<SpotUserStreamWorker>();
+    builder.Services.AddHostedService<MarketRotationWorker>();
 }
 
 builder.Services.AddHostedService<FuturesBotWorker>();
