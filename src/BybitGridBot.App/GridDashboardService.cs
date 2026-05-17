@@ -1130,7 +1130,8 @@ public sealed class GridDashboardService : IGridDashboardService
         string.Equals(profile.Category, "spot", StringComparison.OrdinalIgnoreCase) &&
         profile.StrategyType is not TradingStrategyType.NoTrade and
             not TradingStrategyType.Pause and
-            not TradingStrategyType.ReduceOnly;
+            not TradingStrategyType.ReduceOnly and
+            not TradingStrategyType.Detached;
 
     private static DashboardPairScoreItem CopyDashboardPairScoreItem(
         DashboardPairScoreItem item,
@@ -2243,11 +2244,14 @@ public sealed class GridDashboardService : IGridDashboardService
       white-space: nowrap;
     }
     .rotation-status-pill.waiting,
+    .rotation-status-pill.waiting-order,
+    .rotation-status-pill.dormant,
     .rotation-status-pill.candidate,
     .rotation-status-pill.cooldown {
       background: rgba(198,103,47,0.12);
       color: var(--accent);
     }
+    .rotation-status-pill.in-position,
     .rotation-status-pill.locked-position,
     .rotation-status-pill.disabled {
       background: rgba(177,54,34,0.1);
@@ -3922,6 +3926,7 @@ public sealed class GridDashboardService : IGridDashboardService
             "trend" or "trend_follow" or "trendfollow" or "trend following" => TradingStrategyType.TrendFollowing,
             "breakout" or "breakout_trend" => TradingStrategyType.Breakout,
             "hybrid" or "multi" or "all" or "combo_signal" or "combo signal" or "hybrid_signal" or "grid_dca_btd_signal" => TradingStrategyType.Hybrid,
+            "detached" or "orderwatch" or "order_watch" or "order watch" => TradingStrategyType.Detached,
             "reduceonly" or "reduce_only" or "reduce only" or "sellonly" or "sell_only" or "sell only" => TradingStrategyType.ReduceOnly,
             "notrade" or "no_trade" or "no trade" => TradingStrategyType.NoTrade,
             "pause" => TradingStrategyType.Pause,

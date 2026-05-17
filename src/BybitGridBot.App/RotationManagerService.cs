@@ -22,6 +22,7 @@ public sealed class RotationManagerService : IRotationManagerService
     private const string DecisionSkip = "skip";
     private const string DecisionActivate = "activate";
     private const string DecisionDisable = "disable";
+    private const string DecisionDetach = "detach";
     private const string DecisionKeep = "keep";
 
     private readonly IGridRepository _repository;
@@ -115,10 +116,13 @@ public sealed class RotationManagerService : IRotationManagerService
 
         await SaveCandidateScoresAsync(candidates, now, cancellationToken);
 
-        var profiles = (await _repository.GetRuntimeSettingsProfilesAsync(cancellationToken))
+        var profileList = (await _repository.GetRuntimeSettingsProfilesAsync(cancellationToken)).ToList();
+        var closedDetachedSymbols = await CleanupClosedDetachedProfilesAsync(profileList, now, cancellationToken);
+        var profiles = profileList
+            .Where(profile => !closedDetachedSymbols.Contains(profile.Symbol))
             .ToDictionary(profile => profile.Symbol, StringComparer.OrdinalIgnoreCase);
         var activeSymbols = profiles.Values
-            .Where(IsBuyCapableProfile)
+            .Where(IsActiveRotationProfile)
             .Select(profile => profile.Symbol)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
         var slots = (await _repository.GetActivePairSlotsAsync(cancellationToken))
@@ -174,8 +178,17 @@ public sealed class RotationManagerService : IRotationManagerService
                     continue;
                 }
 
-                await DisableProfileAsync(currentProfile, $"Rotation replacement: {replacement.Reason}", now, cancellationToken);
-                await AddDecisionAsync(DecisionDisable, slot.Symbol, null, slotIndex, replacement.CurrentScore, replacementCandidate.Score, replacement.Reason, now, cancellationToken);
+                if (ShouldDetachOnReplace(replacement.Status))
+                {
+                    await DetachProfileAsync(currentProfile, $"Rotation detached pair: {replacement.Reason}", now, cancellationToken);
+                    await AddDecisionAsync(DecisionDetach, slot.Symbol, null, slotIndex, replacement.CurrentScore, replacementCandidate.Score, replacement.Reason, now, cancellationToken);
+                }
+                else
+                {
+                    await DisableProfileAsync(currentProfile, $"Rotation replacement: {replacement.Reason}", now, cancellationToken);
+                    await AddDecisionAsync(DecisionDisable, slot.Symbol, null, slotIndex, replacement.CurrentScore, replacementCandidate.Score, replacement.Reason, now, cancellationToken);
+                }
+
                 activeSymbols.Remove(slot.Symbol);
                 await ActivateCandidateAsync(slotIndex, slot, replacementCandidate, activeSymbols, $"Replacement: {replacement.Reason}", now, cancellationToken);
                 replaced++;
@@ -384,6 +397,64 @@ public sealed class RotationManagerService : IRotationManagerService
         _logger.LogInformation("Rotation disabled {Symbol}. Reason: {Reason}", profile.Symbol, reason);
     }
 
+    private async Task DetachProfileAsync(
+        GridBotSettings profile,
+        string reason,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        await _repository.SaveRuntimeSettingsAsync(new GridBotSettings
+        {
+            Symbol = profile.Symbol,
+            Category = profile.Category,
+            StrategySelectionMode = StrategySelectionMode.Auto,
+            StrategyType = TradingStrategyType.Detached,
+            StrategyConfigJson = profile.StrategyConfigJson,
+            LowerPrice = profile.LowerPrice,
+            UpperPrice = profile.UpperPrice,
+            Step = profile.Step,
+            OrderSizeUsdt = profile.OrderSizeUsdt,
+            StopLowerPrice = profile.StopLowerPrice,
+            StopUpperPrice = profile.StopUpperPrice,
+            UpdatedAt = now
+        }, cancellationToken);
+        _logger.LogInformation("Rotation detached {Symbol}. Reason: {Reason}", profile.Symbol, reason);
+    }
+
+    private async Task<HashSet<string>> CleanupClosedDetachedProfilesAsync(
+        IReadOnlyCollection<GridBotSettings> profiles,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        var closedSymbols = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var profile in profiles.Where(static profile => profile.StrategyType == TradingStrategyType.Detached))
+        {
+            if (await HasOpenLifecycleAsync(profile.Symbol, cancellationToken))
+            {
+                continue;
+            }
+
+            await _repository.DeleteRuntimeSettingsAsync(profile.Symbol, cancellationToken);
+            await AddDecisionAsync(DecisionDisable, profile.Symbol, null, null, 0m, 0m, "Detached profile closed; no active orders or position remain.", now, cancellationToken);
+            closedSymbols.Add(profile.Symbol);
+            _logger.LogInformation("Rotation removed closed detached profile {Symbol}.", profile.Symbol);
+        }
+
+        return closedSymbols;
+    }
+
+    private async Task<bool> HasOpenLifecycleAsync(string symbol, CancellationToken cancellationToken)
+    {
+        var activeOrders = await _repository.GetActiveOrdersAsync(symbol, cancellationToken);
+        if (activeOrders.Count > 0)
+        {
+            return true;
+        }
+
+        var state = await _repository.GetBotStateAsync(symbol, cancellationToken);
+        return state?.BaseAssetQuantity > 0m;
+    }
+
     private async Task<ReplacementEvaluation> EvaluateReplacementAsync(
         RotationStateRecord state,
         ActivePairSlotRecord slot,
@@ -400,10 +471,25 @@ public sealed class RotationManagerService : IRotationManagerService
         var candidateScore = bestReplacement?.Score ?? 0m;
         var lifetimeElapsed = now - slot.ActivatedAt >= TimeSpan.FromMinutes(Math.Max(0, state.MinPairLifetimeMinutes));
 
-        var lockReason = await ResolvePositionLockReasonAsync(profile, cancellationToken);
-        if (lockReason is not null)
+        var lifecycle = await ResolveOpenLifecycleAsync(profile, cancellationToken);
+        if (lifecycle is not null)
         {
-            return new ReplacementEvaluation(false, RotationPairStatus.LockedPosition, currentScore, candidateScore, lockReason);
+            if (!lifetimeElapsed)
+            {
+                return new ReplacementEvaluation(false, lifecycle.Value.Status, currentScore, candidateScore, $"{lifecycle.Value.Reason} Minimum lifetime not reached for {symbol}.");
+            }
+
+            if (bestReplacement is not null && candidateScore >= currentScore + state.ReplacementScoreGap)
+            {
+                return new ReplacementEvaluation(
+                    true,
+                    lifecycle.Value.Status,
+                    currentScore,
+                    candidateScore,
+                    $"{lifecycle.Value.Reason} Detaching old pair and freeing rotation slot for {bestReplacement.Symbol}.");
+            }
+
+            return new ReplacementEvaluation(false, lifecycle.Value.Status, currentScore, candidateScore, lifecycle.Value.Reason);
         }
 
         if (!lifetimeElapsed)
@@ -451,27 +537,29 @@ public sealed class RotationManagerService : IRotationManagerService
         return new ReplacementEvaluation(false, RotationPairStatus.Active, currentScore, candidateScore, "Active pair remains competitive.");
     }
 
-    private async Task<string?> ResolvePositionLockReasonAsync(GridBotSettings profile, CancellationToken cancellationToken)
+    private async Task<OpenLifecycleEvaluation?> ResolveOpenLifecycleAsync(GridBotSettings profile, CancellationToken cancellationToken)
     {
         var activeOrders = await _repository.GetActiveOrdersAsync(profile.Symbol, cancellationToken);
-        if (activeOrders.Count > 0)
+        var state = await _repository.GetBotStateAsync(profile.Symbol, cancellationToken);
+
+        if (state is not null && state.BaseAssetQuantity > 0m)
         {
-            return $"{profile.Symbol} has {activeOrders.Count} active order(s); replacement waits for flat state.";
+            var currentPrice = state.LastObservedPrice ?? 0m;
+            var positiveExit = currentPrice > 0m && state.AverageEntryPrice > 0m && currentPrice > state.AverageEntryPrice;
+            var reason = positiveExit
+                ? $"{profile.Symbol} has an open position with possible net-positive exit."
+                : $"{profile.Symbol} has an open position without net-positive exit.";
+            return new OpenLifecycleEvaluation(RotationPairStatus.InPosition, reason);
         }
 
-        var state = await _repository.GetBotStateAsync(profile.Symbol, cancellationToken);
-        if (state is null || state.BaseAssetQuantity <= 0m)
+        if (activeOrders.Count == 0)
         {
             return null;
         }
 
-        var currentPrice = state.LastObservedPrice ?? 0m;
-        if (currentPrice <= 0m || state.AverageEntryPrice <= 0m || currentPrice <= state.AverageEntryPrice)
-        {
-            return $"{profile.Symbol} has an open position without net-positive exit.";
-        }
-
-        return $"{profile.Symbol} has an open position; replacement waits until it is flat.";
+        var hasEntryOrders = activeOrders.Any(order => order.Side == TradeSide.Buy);
+        var status = hasEntryOrders ? RotationPairStatus.WaitingOrder : RotationPairStatus.InPosition;
+        return new OpenLifecycleEvaluation(status, $"{profile.Symbol} has {activeOrders.Count} active order(s).");
     }
 
     private async Task AddDecisionAsync(
@@ -519,15 +607,23 @@ public sealed class RotationManagerService : IRotationManagerService
     private static bool IsBuyCapableProfile(GridBotSettings profile) =>
         profile.StrategyType is not TradingStrategyType.NoTrade and
             not TradingStrategyType.Pause and
-            not TradingStrategyType.ReduceOnly;
+            not TradingStrategyType.ReduceOnly and
+            not TradingStrategyType.Detached;
+
+    private static bool IsActiveRotationProfile(GridBotSettings profile) =>
+        IsBuyCapableProfile(profile);
 
     private static bool IsCandidateStrategyEnabled(MarketScanItem item)
     {
         var strategyType = ParseTradingStrategyType(item.RecommendedStrategy);
         return strategyType is not TradingStrategyType.NoTrade and
             not TradingStrategyType.Pause and
-            not TradingStrategyType.ReduceOnly;
+            not TradingStrategyType.ReduceOnly and
+            not TradingStrategyType.Detached;
     }
+
+    private static bool ShouldDetachOnReplace(RotationPairStatus status) =>
+        status is RotationPairStatus.WaitingOrder or RotationPairStatus.InPosition;
 
     private static MarketScanItem? FindNextCandidate(
         IReadOnlyList<MarketScanItem> candidates,
@@ -572,6 +668,7 @@ public sealed class RotationManagerService : IRotationManagerService
             "trend" or "trendfollow" or "trend_follow" or "trendfollowing" or "trend_following" => TradingStrategyType.TrendFollowing,
             "breakout" => TradingStrategyType.Breakout,
             "hybrid" => TradingStrategyType.Hybrid,
+            "detached" or "orderwatch" or "order_watch" => TradingStrategyType.Detached,
             "reduceonly" or "reduce_only" => TradingStrategyType.ReduceOnly,
             "notrade" or "no_trade" => TradingStrategyType.NoTrade,
             "pause" => TradingStrategyType.Pause,
@@ -629,6 +726,10 @@ public sealed class RotationManagerService : IRotationManagerService
         RotationPairStatus Status,
         decimal CurrentScore,
         decimal CandidateScore,
+        string Reason);
+
+    private readonly record struct OpenLifecycleEvaluation(
+        RotationPairStatus Status,
         string Reason);
 }
 

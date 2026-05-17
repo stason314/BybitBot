@@ -306,6 +306,13 @@ public sealed class GridBotWorker : BackgroundService
             return;
         }
 
+        if (profile.StrategyType == TradingStrategyType.Detached)
+        {
+            var detachedLevels = await EnsureGridLevelsAsync(cancellationToken);
+            await RunDetachedOrderWatchCycleAsync(profile, state, detachedLevels, instrument, cancellationToken);
+            return;
+        }
+
         if (profile.StrategyType is TradingStrategyType.NoTrade or TradingStrategyType.Pause)
         {
             await _repository.SaveGridLevelsAsync(_gridOptions.Symbol, [], cancellationToken);
@@ -362,6 +369,12 @@ public sealed class GridBotWorker : BackgroundService
         CancellationToken cancellationToken)
     {
         var activeOrders = await _repository.GetActiveOrdersAsync(_gridOptions.Symbol, cancellationToken);
+        if (newProfile.StrategyType == TradingStrategyType.Detached)
+        {
+            _logger.LogInformation("Preserved active orders during detached order-watch switch for {Symbol}.", _gridOptions.Symbol);
+            return;
+        }
+
         if (!ShouldPreserveProfitableSellOrdersOnAutoSwitch(newProfile))
         {
             foreach (var order in activeOrders)
@@ -425,6 +438,7 @@ public sealed class GridBotWorker : BackgroundService
     {
         var gridOptions = RuntimeGridOptionsFactory.ToGridOptions(profile, _defaultGridOptions);
         if (profile.StrategySelectionMode != StrategySelectionMode.Auto ||
+            profile.StrategyType == TradingStrategyType.Detached ||
             !ShouldRunTimedAutoApplyCheck(profile, gridOptions, DateTimeOffset.UtcNow))
         {
             return profile;
@@ -623,6 +637,47 @@ public sealed class GridBotWorker : BackgroundService
         else
         {
             await SynchronizeLiveOrdersAsync(state, [], null, cancellationToken);
+        }
+
+        state.IsInitialized = true;
+        state.UpdatedAt = DateTimeOffset.UtcNow;
+        await _repository.SaveBotStateAsync(state, cancellationToken);
+        return state;
+    }
+
+    private async Task<BotState> RunDetachedOrderWatchCycleAsync(
+        GridBotSettings profile,
+        BotState state,
+        IReadOnlyList<GridLevel> levels,
+        BybitInstrumentInfo instrument,
+        CancellationToken cancellationToken)
+    {
+        ResetDailyPnlIfNeeded(state);
+
+        var ticker = await _bybitRestClient.GetTickerAsync(_gridOptions.Category, _gridOptions.Symbol, cancellationToken);
+        var currentPrice = ticker.LastPrice;
+        state.LastObservedPrice = currentPrice;
+        state.UpdatedAt = DateTimeOffset.UtcNow;
+
+        _logger.LogInformation(
+            "Detached order-watch mode active for {Symbol}. Current price: {Price}. New buy entries are blocked.",
+            _gridOptions.Symbol,
+            currentPrice);
+        await RecordNoTradeReasonAsync(
+            profile,
+            NoTradeReason.StrategyCooldown,
+            "Detached order-watch mode active. Existing orders are monitored; new spot buy entries are blocked.",
+            cancellationToken);
+
+        if (_appOptions.TradingMode == TradingMode.Paper)
+        {
+            await SimulatePaperFillsAsync(state, levels, profile, currentPrice, cancellationToken);
+            await EnsureProtectiveSellLifecycleAsync(profile, state, levels, instrument, currentPrice, cancellationToken);
+        }
+        else
+        {
+            await SynchronizeLiveOrdersAsync(state, levels, profile, cancellationToken);
+            await EnsureProtectiveSellLifecycleAsync(profile, state, levels, instrument, currentPrice, cancellationToken);
         }
 
         state.IsInitialized = true;
@@ -4572,6 +4627,11 @@ public sealed class GridBotWorker : BackgroundService
             return "ReduceOnly mode allows exits only";
         }
 
+        if (profile?.StrategyType == TradingStrategyType.Detached)
+        {
+            return "Detached order-watch mode allows exits only";
+        }
+
         if (state.IsPaused)
         {
             return string.IsNullOrWhiteSpace(state.PauseReason)
@@ -5135,7 +5195,8 @@ public sealed class GridBotWorker : BackgroundService
         string.Equals(profile.Category, "spot", StringComparison.OrdinalIgnoreCase) &&
         profile.StrategyType is not TradingStrategyType.NoTrade and
             not TradingStrategyType.Pause and
-            not TradingStrategyType.ReduceOnly;
+            not TradingStrategyType.ReduceOnly and
+            not TradingStrategyType.Detached;
 
     private static bool IsTopPairRankedAhead(
         decimal candidateScore,
@@ -5927,6 +5988,11 @@ public sealed class GridBotWorker : BackgroundService
 
     private static bool ShouldSkipGridFollowUp(GridBotSettings? profile, GridOrder order)
     {
+        if (profile?.StrategyType == TradingStrategyType.Detached)
+        {
+            return order.Side == TradeSide.Sell;
+        }
+
         if (profile?.StrategyType is TradingStrategyType.ReduceOnly
                 or TradingStrategyType.NoTrade
                 or TradingStrategyType.Pause)

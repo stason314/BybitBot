@@ -4,6 +4,10 @@ public enum RotationPairStatus
 {
     Active,
     Waiting,
+    WaitingOrder,
+    InPosition,
+    Dormant,
+    Closed,
     LockedPosition,
     Candidate,
     Cooldown,

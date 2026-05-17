@@ -11,6 +11,7 @@ public enum TradingStrategyType
     TrendFollowing,
     Breakout,
     Hybrid,
+    Detached,
     ReduceOnly,
     Pause,
     NoTrade
