@@ -572,6 +572,16 @@ public sealed class FuturesMarketScanItem
 
     public required string StrategyFitName { get; init; }
 
+    public decimal RangeQualityScore { get; init; }
+
+    public decimal BreakoutQualityScore { get; init; }
+
+    public decimal DumpRiskScore { get; init; }
+
+    public decimal FeeEfficiencyScore { get; init; }
+
+    public decimal LiquidityScore { get; init; }
+
     public decimal GridFitScore { get; init; }
 
     public decimal TrendFitScore { get; init; }
