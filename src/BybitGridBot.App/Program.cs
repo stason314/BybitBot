@@ -39,6 +39,7 @@ builder.Services.AddOptions<FuturesRiskOptions>().Bind(builder.Configuration);
 builder.Services.AddOptions<FuturesStrategyQualityOptions>().Bind(builder.Configuration);
 builder.Services.AddOptions<FuturesMainnetChecklistOptions>().Bind(builder.Configuration);
 builder.Services.AddOptions<TelegramOptions>().Bind(builder.Configuration);
+builder.Services.AddOptions<RotationOptions>().Bind(builder.Configuration);
 
 builder.Services.AddSingleton<BybitSigner>();
 builder.Services.AddSingleton<BybitUserStreamTelemetry>();
