@@ -182,6 +182,8 @@ public sealed class FuturesMarketScannerService : IFuturesMarketScannerService
             lastPrice);
         var position = await _repository.GetFuturesPositionAsync(instrument.Symbol, cancellationToken);
         var recentRiskDecisions = await _repository.GetFuturesRiskDecisionsAsync(instrument.Symbol, 20, cancellationToken);
+        var recentFills = await _repository.GetFuturesFillsAsync(instrument.Symbol, 1000, cancellationToken);
+        var strategyPerformance = StrategyPerformanceScorer.ScoreFutures(strategy, recentFills);
         var minNetProfit = ResolveMinNetProfitThreshold(entryNotional);
         var immediateTrade = FuturesImmediateTradeProbabilityAnalyzer.Analyze(new FuturesImmediateTradeProbabilityInput(
             strategy,
@@ -219,6 +221,10 @@ public sealed class FuturesMarketScannerService : IFuturesMarketScannerService
         {
             reasons.Add(reason);
         }
+        foreach (var reason in strategyPerformance.Reasons)
+        {
+            reasons.Add(reason);
+        }
 
         return new FuturesMarketScanItem
         {
@@ -230,6 +236,8 @@ public sealed class FuturesMarketScannerService : IFuturesMarketScannerService
             ActionabilityLabel = actionability.Label,
             ImmediateTradeProbabilityScore = immediateTrade.Score,
             ImmediateTradeProbabilityLabel = immediateTrade.Label,
+            StrategyPerformanceScore = strategyPerformance.Score,
+            StrategyPerformanceLabel = strategyPerformance.Label,
             Label = label,
             RecommendedStrategy = FormatEnum(strategy),
             RecommendedDirection = FormatEnum(direction),
@@ -531,6 +539,8 @@ public sealed class FuturesMarketScannerService : IFuturesMarketScannerService
         ActionabilityLabel = "NO_TRADE",
         ImmediateTradeProbabilityScore = 0m,
         ImmediateTradeProbabilityLabel = "BLOCKED",
+        StrategyPerformanceScore = 50m,
+        StrategyPerformanceLabel = "NO_HISTORY",
         Label = "NO_TRADE",
         RecommendedStrategy = "pause",
         RecommendedDirection = "long-only",
