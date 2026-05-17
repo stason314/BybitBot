@@ -82,7 +82,7 @@ public sealed class FuturesTrendFollowLongOnly : IFuturesStrategy
 
         if (context.Position.Size > 0m && !context.Settings.AggressiveModeEnabled)
         {
-            return FuturesStrategyDecision.Empty("Existing futures long remains open.");
+            return FuturesStrategyDecision.Empty(FuturesLongOnlySignals.OpenLongHoldReason(context, signal));
         }
 
         return signal.MovePercent >= 0.8m
@@ -124,7 +124,7 @@ public sealed class FuturesBreakoutLongOnly : IFuturesStrategy
 
         if (context.Position.Size > 0m && !context.Settings.AggressiveModeEnabled)
         {
-            return FuturesStrategyDecision.Empty("Existing futures long remains open.");
+            return FuturesStrategyDecision.Empty(FuturesLongOnlySignals.OpenLongHoldReason(context, signal));
         }
 
         return context.CurrentPrice >= signal.Resistance
@@ -166,7 +166,7 @@ public sealed class FuturesGridLongOnly : IFuturesStrategy
 
         if (context.Position.Size > 0m && !context.Settings.AggressiveModeEnabled)
         {
-            return FuturesStrategyDecision.Empty("Existing futures long remains open.");
+            return FuturesStrategyDecision.Empty(FuturesLongOnlySignals.OpenLongHoldReason(context, signal));
         }
 
         var entryBand = signal.Support + (signal.Range * 0.35m);
@@ -209,7 +209,7 @@ public sealed class FuturesTrendFollowShortOnly : IFuturesStrategy
 
         if (context.Position.Size > 0m && !context.Settings.AggressiveModeEnabled)
         {
-            return FuturesStrategyDecision.Empty("Existing futures short remains open.");
+            return FuturesStrategyDecision.Empty(FuturesShortOnlySignals.OpenShortHoldReason(context, signal));
         }
 
         return signal.MovePercent <= -0.8m
@@ -251,7 +251,7 @@ public sealed class FuturesBreakdownShortOnly : IFuturesStrategy
 
         if (context.Position.Size > 0m && !context.Settings.AggressiveModeEnabled)
         {
-            return FuturesStrategyDecision.Empty("Existing futures short remains open.");
+            return FuturesStrategyDecision.Empty(FuturesShortOnlySignals.OpenShortHoldReason(context, signal));
         }
 
         return context.CurrentPrice <= signal.Support
@@ -293,7 +293,7 @@ public sealed class FuturesGridShortOnly : IFuturesStrategy
 
         if (context.Position.Size > 0m && !context.Settings.AggressiveModeEnabled)
         {
-            return FuturesStrategyDecision.Empty("Existing futures short remains open.");
+            return FuturesStrategyDecision.Empty(FuturesShortOnlySignals.OpenShortHoldReason(context, signal));
         }
 
         var entryBand = signal.Resistance - (signal.Range * 0.35m);
@@ -346,6 +346,12 @@ internal static class FuturesLongOnlySignals
         if (context.CurrentPrice >= takeProfitPrice)
         {
             reason = "final-tp";
+            return true;
+        }
+
+        if (IsGridLongInvalidated(context, signal))
+        {
+            reason = "grid-invalidation";
             return true;
         }
 
@@ -480,6 +486,47 @@ internal static class FuturesLongOnlySignals
                 reason)
         ]
     };
+
+    public static string OpenLongHoldReason(FuturesStrategyContext context, FuturesLongOnlySignal signal)
+    {
+        var currentR = CalculateCurrentR(context, isShort: false);
+        return $"Existing futures long remains open; waiting 1R profit, grid continuation, or protective exit. CurrentR={currentR:F2}, support={signal.Support:F8}, resistance={signal.Resistance:F8}.";
+    }
+
+    private static bool IsGridLongInvalidated(FuturesStrategyContext context, FuturesLongOnlySignal signal)
+    {
+        if (context.Settings.StrategyType != FuturesStrategyType.GridLongOnly ||
+            context.Position.Size <= 0m ||
+            !IsLong(context.Position.Side) ||
+            context.Position.EntryPrice <= 0m ||
+            context.Settings.StopLossPercent <= 0m)
+        {
+            return false;
+        }
+
+        var lossPercent = (context.Position.EntryPrice - context.CurrentPrice) / context.Position.EntryPrice * 100m;
+        if (lossPercent / context.Settings.StopLossPercent < 0.35m)
+        {
+            return false;
+        }
+
+        var range = signal.Range <= 0m ? context.Instrument.TickSize : signal.Range;
+        var midpoint = signal.Support + range * 0.5m;
+        return context.CurrentPrice <= midpoint && signal.Resistance < context.Position.EntryPrice;
+    }
+
+    public static decimal CalculateCurrentR(FuturesStrategyContext context, bool isShort)
+    {
+        if (context.Position.EntryPrice <= 0m || context.CurrentPrice <= 0m || context.Settings.StopLossPercent <= 0m)
+        {
+            return 0m;
+        }
+
+        var profitPercent = isShort
+            ? (context.Position.EntryPrice - context.CurrentPrice) / context.Position.EntryPrice * 100m
+            : (context.CurrentPrice - context.Position.EntryPrice) / context.Position.EntryPrice * 100m;
+        return profitPercent / context.Settings.StopLossPercent;
+    }
 
     private static bool IsLongScaleInAfterRejection(FuturesStrategyContext context, FuturesLongOnlySignal signal)
     {
@@ -646,6 +693,12 @@ internal static class FuturesShortOnlySignals
             return true;
         }
 
+        if (IsGridShortInvalidated(context, signal))
+        {
+            reason = "grid-invalidation";
+            return true;
+        }
+
         if (signal.MovePercent > 1m)
         {
             reason = "exit-signal";
@@ -758,6 +811,34 @@ internal static class FuturesShortOnlySignals
                 reason)
         ]
     };
+
+    public static string OpenShortHoldReason(FuturesStrategyContext context, FuturesLongOnlySignal signal)
+    {
+        var currentR = FuturesLongOnlySignals.CalculateCurrentR(context, isShort: true);
+        return $"Existing futures short remains open; waiting 1R profit, grid continuation, or protective exit. CurrentR={currentR:F2}, support={signal.Support:F8}, resistance={signal.Resistance:F8}.";
+    }
+
+    private static bool IsGridShortInvalidated(FuturesStrategyContext context, FuturesLongOnlySignal signal)
+    {
+        if (context.Settings.StrategyType != FuturesStrategyType.GridShortOnly ||
+            context.Position.Size <= 0m ||
+            !IsShort(context.Position.Side) ||
+            context.Position.EntryPrice <= 0m ||
+            context.Settings.StopLossPercent <= 0m)
+        {
+            return false;
+        }
+
+        var lossPercent = (context.CurrentPrice - context.Position.EntryPrice) / context.Position.EntryPrice * 100m;
+        if (lossPercent / context.Settings.StopLossPercent < 0.35m)
+        {
+            return false;
+        }
+
+        var range = signal.Range <= 0m ? context.Instrument.TickSize : signal.Range;
+        var midpoint = signal.Support + range * 0.5m;
+        return context.CurrentPrice >= midpoint && signal.Support > context.Position.EntryPrice;
+    }
 
     private static bool IsShortScaleInAfterRebound(FuturesStrategyContext context, FuturesLongOnlySignal signal)
     {

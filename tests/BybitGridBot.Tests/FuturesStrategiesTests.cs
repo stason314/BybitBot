@@ -61,6 +61,27 @@ public sealed class FuturesStrategiesTests
     }
 
     [Fact]
+    public void FuturesGridLongOnly_ClosesLongWhenGridMigratesAgainstPosition()
+    {
+        var decision = new FuturesGridLongOnly().Decide(Context(
+            currentPrice: 85.60m,
+            positionSize: 0.2m,
+            entryPrice: 86.25m,
+            positionSide: "Buy",
+            strategyType: FuturesStrategyType.GridLongOnly,
+            stopLossPercent: 2m,
+            direction: FuturesDirection.LongOnly,
+            tickSize: 0.01m,
+            qtyStep: 0.1m,
+            minOrderQty: 0.1m,
+            candles: GridMigratedDownCandles()));
+
+        var intent = Assert.Single(decision.TradeIntents);
+        Assert.Equal(FuturesTradeAction.CloseLong, intent.Action);
+        Assert.Equal("grid-invalidation", intent.Reason);
+    }
+
+    [Fact]
     public void FuturesGridLongOnly_AllowsScaleInInAggressiveMode()
     {
         var decision = new FuturesGridLongOnly().Decide(Context(
@@ -210,6 +231,27 @@ public sealed class FuturesStrategiesTests
     }
 
     [Fact]
+    public void FuturesGridShortOnly_ClosesShortWhenGridMigratesAgainstPosition()
+    {
+        var decision = new FuturesGridShortOnly().Decide(Context(
+            currentPrice: 86.91m,
+            positionSize: 0.2m,
+            entryPrice: 86.248125m,
+            positionSide: "Sell",
+            strategyType: FuturesStrategyType.GridShortOnly,
+            stopLossPercent: 2m,
+            direction: FuturesDirection.ShortOnly,
+            tickSize: 0.01m,
+            qtyStep: 0.1m,
+            minOrderQty: 0.1m,
+            candles: GridMigratedUpCandles()));
+
+        var intent = Assert.Single(decision.TradeIntents);
+        Assert.Equal(FuturesTradeAction.CloseShort, intent.Action);
+        Assert.Equal("grid-invalidation", intent.Reason);
+    }
+
+    [Fact]
     public void FuturesTrendFollowShortOnly_BlocksScaleInAfterReboundFromSupport()
     {
         var decision = new FuturesTrendFollowShortOnly().Decide(Context(
@@ -248,12 +290,14 @@ public sealed class FuturesStrategiesTests
         decimal positionSize = 0m,
         decimal entryPrice = 0m,
         string? positionSide = null,
+        FuturesStrategyType strategyType = FuturesStrategyType.TrendFollow,
         FuturesDirection direction = FuturesDirection.LongOnly,
         string strategyConfigJson = "{}",
         decimal tickSize = 0.1m,
         decimal qtyStep = 0.001m,
         decimal minOrderQty = 0.001m,
         decimal minOrderAmount = 5m,
+        decimal stopLossPercent = 1m,
         bool aggressiveModeEnabled = false,
         FuturesAggressiveModeKind aggressiveModeKind = FuturesAggressiveModeKind.Normal,
         IReadOnlyList<Candle>? candles = null) => new()
@@ -262,7 +306,7 @@ public sealed class FuturesStrategiesTests
         {
             Symbol = "BTCUSDT",
             Category = "linear",
-            StrategyType = FuturesStrategyType.TrendFollow,
+            StrategyType = strategyType,
             StrategyConfigJson = strategyConfigJson,
             Leverage = 2m,
             MarginMode = FuturesMarginMode.Isolated,
@@ -270,7 +314,7 @@ public sealed class FuturesStrategiesTests
             Direction = direction,
             MaxNotionalUsdt = 100m,
             MaxMarginUsdt = 50m,
-            StopLossPercent = 1m,
+            StopLossPercent = stopLossPercent,
             TakeProfitPercent = 3m,
             AggressiveModeEnabled = aggressiveModeEnabled,
             AggressiveModeKind = aggressiveModeKind
@@ -329,6 +373,30 @@ public sealed class FuturesStrategiesTests
                 var open = 88.28m - index * 0.01m;
                 var close = index == 59 ? 87.44m : open - 0.01m;
                 return new Candle(start.AddMinutes(index), open, 88.43m, 86.65m, close, 1m, close);
+            })
+            .ToArray();
+    }
+
+    private static IReadOnlyList<Candle> GridMigratedUpCandles()
+    {
+        var start = DateTimeOffset.UtcNow.AddMinutes(-60);
+        return Enumerable.Range(0, 60)
+            .Select(index =>
+            {
+                var close = index == 59 ? 86.91m : 86.82m + index * 0.001m;
+                return new Candle(start.AddMinutes(index), 86.82m, 87.08m, 86.74m, close, 1m, close);
+            })
+            .ToArray();
+    }
+
+    private static IReadOnlyList<Candle> GridMigratedDownCandles()
+    {
+        var start = DateTimeOffset.UtcNow.AddMinutes(-60);
+        return Enumerable.Range(0, 60)
+            .Select(index =>
+            {
+                var close = index == 59 ? 85.60m : 85.92m - index * 0.001m;
+                return new Candle(start.AddMinutes(index), 85.92m, 86.00m, 85.55m, close, 1m, close);
             })
             .ToArray();
     }
