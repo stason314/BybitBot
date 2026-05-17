@@ -22,6 +22,7 @@ public sealed class RotationManagerService : IRotationManagerService
     private const string DecisionSkip = "skip";
     private const string DecisionActivate = "activate";
     private const string DecisionDisable = "disable";
+    private const string DecisionKeep = "keep";
 
     private readonly IGridRepository _repository;
     private readonly IMarketScannerService _marketScannerService;
@@ -104,6 +105,8 @@ public sealed class RotationManagerService : IRotationManagerService
 
         var scanLimit = Math.Clamp(state.ActivePairPoolSize * 8, 20, 80);
         var scan = await _marketScannerService.ScanAsync(SpotCategory, scanLimit, cancellationToken);
+        var allScanItems = scan.Items
+            .ToDictionary(item => item.Symbol, StringComparer.OrdinalIgnoreCase);
         var candidates = scan.Items
             .Where(IsCandidateStrategyEnabled)
             .OrderByDescending(item => item.Score)
@@ -121,24 +124,82 @@ public sealed class RotationManagerService : IRotationManagerService
         var slots = (await _repository.GetActivePairSlotsAsync(cancellationToken))
             .ToDictionary(slot => slot.SlotIndex);
 
+        var targetSlotCount = state.MaxActivePositions > 0
+            ? Math.Min(state.ActivePairPoolSize, state.MaxActivePositions)
+            : state.ActivePairPoolSize;
         var activated = 0;
-        for (var slotIndex = 1; slotIndex <= state.ActivePairPoolSize; slotIndex++)
+        var replaced = 0;
+        for (var slotIndex = 1; slotIndex <= targetSlotCount; slotIndex++)
         {
             slots.TryGetValue(slotIndex, out var slot);
+            var currentProfile = slot?.Symbol is { Length: > 0 } symbol && profiles.TryGetValue(symbol, out var profile)
+                ? profile
+                : null;
+            if (slot is not null &&
+                !string.IsNullOrWhiteSpace(slot.Symbol) &&
+                currentProfile is not null)
+            {
+                var replacement = await EvaluateReplacementAsync(
+                    state,
+                    slot,
+                    currentProfile,
+                    allScanItems,
+                    candidates,
+                    now,
+                    cancellationToken);
+                if (!replacement.ShouldReplace)
+                {
+                    await UpsertSlotAsync(slot with
+                    {
+                        Status = replacement.Status,
+                        Score = replacement.CurrentScore,
+                        Reason = replacement.Reason,
+                        UpdatedAt = now
+                    }, cancellationToken);
+                    await AddDecisionAsync(DecisionKeep, slot.Symbol, null, slotIndex, replacement.CurrentScore, replacement.CandidateScore, replacement.Reason, now, cancellationToken);
+                    continue;
+                }
+
+                var replacementCandidate = FindNextCandidate(candidates, activeSymbols, slot.Symbol);
+                if (replacementCandidate is null)
+                {
+                    await UpsertSlotAsync(slot with
+                    {
+                        Status = RotationPairStatus.Waiting,
+                        Score = replacement.CurrentScore,
+                        Reason = $"{replacement.Reason} No eligible replacement candidate found.",
+                        UpdatedAt = now
+                    }, cancellationToken);
+                    await AddDecisionAsync(DecisionSkip, slot.Symbol, null, slotIndex, replacement.CurrentScore, 0m, "Replacement skipped: no eligible candidate.", now, cancellationToken);
+                    continue;
+                }
+
+                await DisableProfileAsync(currentProfile, $"Rotation replacement: {replacement.Reason}", now, cancellationToken);
+                await AddDecisionAsync(DecisionDisable, slot.Symbol, null, slotIndex, replacement.CurrentScore, replacementCandidate.Score, replacement.Reason, now, cancellationToken);
+                activeSymbols.Remove(slot.Symbol);
+                await ActivateCandidateAsync(slotIndex, slot, replacementCandidate, activeSymbols, $"Replacement: {replacement.Reason}", now, cancellationToken);
+                replaced++;
+                continue;
+            }
+
             if (slot is not null &&
                 !string.IsNullOrWhiteSpace(slot.Symbol) &&
                 activeSymbols.Contains(slot.Symbol))
             {
+                var currentScore = allScanItems.TryGetValue(slot.Symbol, out var currentScan)
+                    ? currentScan.Score
+                    : slot.Score;
                 await UpsertSlotAsync(slot with
                 {
                     Status = RotationPairStatus.Active,
+                    Score = currentScore,
                     Reason = "Active profile kept by rotation.",
                     UpdatedAt = now
                 }, cancellationToken);
                 continue;
             }
 
-            var candidate = candidates.FirstOrDefault(item => !activeSymbols.Contains(item.Symbol));
+            var candidate = FindNextCandidate(candidates, activeSymbols, null);
             if (candidate is null)
             {
                 await UpsertSlotAsync(new ActivePairSlotRecord
@@ -153,35 +214,8 @@ public sealed class RotationManagerService : IRotationManagerService
                 continue;
             }
 
-            var previousSymbol = slot?.Symbol;
-            var settings = BuildSettings(candidate, now);
-            await _repository.SaveRuntimeSettingsAsync(settings, cancellationToken);
-            activeSymbols.Add(candidate.Symbol);
+            await ActivateCandidateAsync(slotIndex, slot, candidate, activeSymbols, "Activated into empty rotation slot.", now, cancellationToken);
             activated++;
-
-            await UpsertSlotAsync(new ActivePairSlotRecord
-            {
-                SlotIndex = slotIndex,
-                Symbol = candidate.Symbol,
-                Category = candidate.Category,
-                Status = RotationPairStatus.Active,
-                Score = candidate.Score,
-                Reason = $"Activated by scanner rank. {string.Join("; ", candidate.Reasons.Take(3))}",
-                ActivatedAt = now,
-                UpdatedAt = now
-            }, cancellationToken);
-
-            await _repository.AddPairRotationHistoryAsync(new PairRotationHistoryRecord
-            {
-                SlotIndex = slotIndex,
-                PreviousSymbol = previousSymbol,
-                NewSymbol = candidate.Symbol,
-                Reason = "Activated into empty rotation slot.",
-                PreviousScore = slot?.Score ?? 0m,
-                NewScore = candidate.Score,
-                CreatedAt = now
-            }, cancellationToken);
-            await AddDecisionAsync(DecisionActivate, previousSymbol, candidate.Symbol, slotIndex, slot?.Score ?? 0m, candidate.Score, "Activated into empty rotation slot.", now, cancellationToken);
         }
 
         var updatedState = state with
@@ -191,10 +225,10 @@ public sealed class RotationManagerService : IRotationManagerService
         };
         await _repository.SaveRotationStateAsync(updatedState, cancellationToken);
 
-        var message = activated == 0
-            ? "Rotation scan completed; no empty slot activation needed."
-            : $"Rotation scan completed; activated {activated} pair(s).";
-        return new RotationRunResult(true, scan.ScannedCount, activated, message);
+        var message = activated == 0 && replaced == 0
+            ? "Rotation scan completed; no changes needed."
+            : $"Rotation scan completed; activated {activated} pair(s), replaced {replaced} pair(s).";
+        return new RotationRunResult(true, scan.ScannedCount, activated + replaced, message);
     }
 
     private async Task<RotationStateRecord> GetOrCreateStateAsync(CancellationToken cancellationToken)
@@ -287,6 +321,159 @@ public sealed class RotationManagerService : IRotationManagerService
     private async Task UpsertSlotAsync(ActivePairSlotRecord slot, CancellationToken cancellationToken) =>
         await _repository.UpsertActivePairSlotAsync(slot, cancellationToken);
 
+    private async Task ActivateCandidateAsync(
+        int slotIndex,
+        ActivePairSlotRecord? previousSlot,
+        MarketScanItem candidate,
+        HashSet<string> activeSymbols,
+        string reason,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        var previousSymbol = previousSlot?.Symbol;
+        var settings = BuildSettings(candidate, now);
+        await _repository.SaveRuntimeSettingsAsync(settings, cancellationToken);
+        activeSymbols.Add(candidate.Symbol);
+
+        await UpsertSlotAsync(new ActivePairSlotRecord
+        {
+            SlotIndex = slotIndex,
+            Symbol = candidate.Symbol,
+            Category = candidate.Category,
+            Status = RotationPairStatus.Active,
+            Score = candidate.Score,
+            Reason = $"{reason} {string.Join("; ", candidate.Reasons.Take(3))}",
+            ActivatedAt = now,
+            UpdatedAt = now
+        }, cancellationToken);
+
+        await _repository.AddPairRotationHistoryAsync(new PairRotationHistoryRecord
+        {
+            SlotIndex = slotIndex,
+            PreviousSymbol = previousSymbol,
+            NewSymbol = candidate.Symbol,
+            Reason = reason,
+            PreviousScore = previousSlot?.Score ?? 0m,
+            NewScore = candidate.Score,
+            CreatedAt = now
+        }, cancellationToken);
+        await AddDecisionAsync(DecisionActivate, previousSymbol, candidate.Symbol, slotIndex, previousSlot?.Score ?? 0m, candidate.Score, reason, now, cancellationToken);
+    }
+
+    private async Task DisableProfileAsync(
+        GridBotSettings profile,
+        string reason,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        await _repository.SaveRuntimeSettingsAsync(new GridBotSettings
+        {
+            Symbol = profile.Symbol,
+            Category = profile.Category,
+            StrategySelectionMode = StrategySelectionMode.Auto,
+            StrategyType = TradingStrategyType.NoTrade,
+            StrategyConfigJson = "{}",
+            LowerPrice = profile.LowerPrice,
+            UpperPrice = profile.UpperPrice,
+            Step = profile.Step,
+            OrderSizeUsdt = profile.OrderSizeUsdt,
+            StopLowerPrice = profile.StopLowerPrice,
+            StopUpperPrice = profile.StopUpperPrice,
+            UpdatedAt = now
+        }, cancellationToken);
+        _logger.LogInformation("Rotation disabled {Symbol}. Reason: {Reason}", profile.Symbol, reason);
+    }
+
+    private async Task<ReplacementEvaluation> EvaluateReplacementAsync(
+        RotationStateRecord state,
+        ActivePairSlotRecord slot,
+        GridBotSettings profile,
+        IReadOnlyDictionary<string, MarketScanItem> allScanItems,
+        IReadOnlyList<MarketScanItem> candidates,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        var symbol = profile.Symbol;
+        var currentScan = allScanItems.TryGetValue(symbol, out var scanItem) ? scanItem : null;
+        var currentScore = currentScan?.Score ?? slot.Score;
+        var bestReplacement = candidates.FirstOrDefault(item => !string.Equals(item.Symbol, symbol, StringComparison.OrdinalIgnoreCase));
+        var candidateScore = bestReplacement?.Score ?? 0m;
+        var lifetimeElapsed = now - slot.ActivatedAt >= TimeSpan.FromMinutes(Math.Max(0, state.MinPairLifetimeMinutes));
+
+        var lockReason = await ResolvePositionLockReasonAsync(profile, cancellationToken);
+        if (lockReason is not null)
+        {
+            return new ReplacementEvaluation(false, RotationPairStatus.LockedPosition, currentScore, candidateScore, lockReason);
+        }
+
+        if (!lifetimeElapsed)
+        {
+            return new ReplacementEvaluation(false, RotationPairStatus.Active, currentScore, candidateScore, $"Minimum lifetime not reached for {symbol}.");
+        }
+
+        if (!IsBuyCapableProfile(profile))
+        {
+            return new ReplacementEvaluation(true, RotationPairStatus.Disabled, currentScore, candidateScore, $"{profile.StrategyType} profile can be replaced.");
+        }
+
+        var latestReason = await _repository.GetLatestNoTradeReasonAsync(symbol, cancellationToken);
+        if (latestReason?.ReasonCode is NoTradeReason.StrategyCooldown or NoTradeReason.AggressiveStopLoss or NoTradeReason.DailyLossLimitReached)
+        {
+            return new ReplacementEvaluation(true, RotationPairStatus.Cooldown, currentScore, candidateScore, $"Latest no-trade reason is {latestReason.ReasonCode}.");
+        }
+
+        var orders = await _repository.GetOrdersAsync(symbol, cancellationToken);
+        var latestClosedSell = orders
+            .Where(order => order.Side == TradeSide.Sell && order.Status == OrderStatus.Filled)
+            .OrderByDescending(order => order.FilledAt ?? order.UpdatedAt)
+            .FirstOrDefault();
+        if (latestClosedSell?.RealizedPnl < 0m)
+        {
+            return new ReplacementEvaluation(true, RotationPairStatus.Cooldown, currentScore, candidateScore, "Latest closed sell was a loss.");
+        }
+
+        var filledOrders = orders.Where(order => order.Status == OrderStatus.Filled).ToArray();
+        if (filledOrders.Length == 0)
+        {
+            return new ReplacementEvaluation(true, RotationPairStatus.Candidate, currentScore, candidateScore, $"No filled trades after {state.MinPairLifetimeMinutes}m lifetime.");
+        }
+
+        if (currentScan is null || !IsCandidateStrategyEnabled(currentScan))
+        {
+            return new ReplacementEvaluation(true, RotationPairStatus.Candidate, currentScore, candidateScore, "Scanner no longer recommends an entry-capable strategy.");
+        }
+
+        if (bestReplacement is not null && candidateScore >= currentScore + state.ReplacementScoreGap)
+        {
+            return new ReplacementEvaluation(true, RotationPairStatus.Candidate, currentScore, candidateScore, $"Candidate {bestReplacement.Symbol} beats {symbol} by {candidateScore - currentScore:0.##} score points.");
+        }
+
+        return new ReplacementEvaluation(false, RotationPairStatus.Active, currentScore, candidateScore, "Active pair remains competitive.");
+    }
+
+    private async Task<string?> ResolvePositionLockReasonAsync(GridBotSettings profile, CancellationToken cancellationToken)
+    {
+        var activeOrders = await _repository.GetActiveOrdersAsync(profile.Symbol, cancellationToken);
+        if (activeOrders.Count > 0)
+        {
+            return $"{profile.Symbol} has {activeOrders.Count} active order(s); replacement waits for flat state.";
+        }
+
+        var state = await _repository.GetBotStateAsync(profile.Symbol, cancellationToken);
+        if (state is null || state.BaseAssetQuantity <= 0m)
+        {
+            return null;
+        }
+
+        var currentPrice = state.LastObservedPrice ?? 0m;
+        if (currentPrice <= 0m || state.AverageEntryPrice <= 0m || currentPrice <= state.AverageEntryPrice)
+        {
+            return $"{profile.Symbol} has an open position without net-positive exit.";
+        }
+
+        return $"{profile.Symbol} has an open position; replacement waits until it is flat.";
+    }
+
     private async Task AddDecisionAsync(
         string action,
         string? symbol,
@@ -340,6 +527,16 @@ public sealed class RotationManagerService : IRotationManagerService
         return strategyType is not TradingStrategyType.NoTrade and
             not TradingStrategyType.Pause and
             not TradingStrategyType.ReduceOnly;
+    }
+
+    private static MarketScanItem? FindNextCandidate(
+        IReadOnlyList<MarketScanItem> candidates,
+        HashSet<string> activeSymbols,
+        string? currentSymbol)
+    {
+        return candidates.FirstOrDefault(item =>
+            !activeSymbols.Contains(item.Symbol) &&
+            !string.Equals(item.Symbol, currentSymbol, StringComparison.OrdinalIgnoreCase));
     }
 
     private static GridBotSettings BuildSettings(MarketScanItem candidate, DateTimeOffset now)
@@ -411,6 +608,13 @@ public sealed class RotationManagerService : IRotationManagerService
     private static string FormatEnum<T>(T value)
         where T : struct, Enum =>
         value.ToString().ToLower(CultureInfo.InvariantCulture);
+
+    private readonly record struct ReplacementEvaluation(
+        bool ShouldReplace,
+        RotationPairStatus Status,
+        decimal CurrentScore,
+        decimal CandidateScore,
+        string Reason);
 }
 
 public sealed class RotationStartRequest
