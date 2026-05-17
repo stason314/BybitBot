@@ -1208,7 +1208,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
           <div class="subtle">Ranks linear USDT futures by candle fit for futures strategies and prepares a config.</div>
         </div>
         <div class="actions">
-          <input class="hours-input" id="futuresMarketScanLimit" type="number" min="10" max="500" step="10" value="120" aria-label="Max futures pairs" />
+          <input class="hours-input" id="futuresMarketScanLimit" type="number" min="10" max="1000" step="10" value="500" aria-label="Max futures pairs" />
           <button type="button" id="runFuturesMarketScan">Scan Market</button>
         </div>
       </div>
@@ -1486,7 +1486,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
                 <td><strong>${formatNumber(item.actionabilityScore)}</strong><br><span class="subtle">${escapeHtml(item.actionabilityLabel || item.label)}</span></td>
                 <td><strong>${formatNumber(item.marketFitScore || item.score)}</strong><br><span class="subtle">${escapeHtml(item.label)}</span></td>
                 <td>${escapeHtml(item.recommendedStrategy)}<br><span class="subtle">${escapeHtml(item.recommendedDirection)}</span></td>
-                <td title="Grid L/S ${formatNumber(item.gridLongFitScore)} / ${formatNumber(item.gridShortFitScore)}; Trend L/S ${formatNumber(item.trendLongFitScore)} / ${formatNumber(item.trendShortFitScore)}; BO/BD ${formatNumber(item.breakoutFitScore)} / ${formatNumber(item.breakdownFitScore)}">
+                <td title="Grid L/S ${formatNumber(item.gridLongFitScore)} / ${formatNumber(item.gridShortFitScore)}; Trend L/S ${formatNumber(item.trendLongFitScore)} / ${formatNumber(item.trendShortFitScore)}; BO/BD ${formatNumber(item.breakoutFitScore)} / ${formatNumber(item.breakdownFitScore)}; Range ${formatNumber(item.rangeQualityScore)}; Breakout ${formatNumber(item.breakoutQualityScore)}; Risk ${formatNumber(item.dumpRiskScore)}; Fee ${formatNumber(item.feeEfficiencyScore)}; Liquidity ${formatNumber(item.liquidityScore)}">
                   <strong>${formatNumber(item.strategyFitScore)}</strong><br><span class="subtle">${escapeHtml(item.strategyFitName || 'Fit')}</span>
                 </td>
                 <td>${formatNumber(item.entryNotionalUsdt)} USDT</td>
