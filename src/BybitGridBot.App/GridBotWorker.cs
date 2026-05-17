@@ -87,6 +87,12 @@ public sealed class GridBotWorker : BackgroundService
         decimal VolumeRatio,
         decimal PullbackPercent);
 
+    private readonly record struct PairScoreMarketMetrics(
+        decimal LastPrice,
+        decimal SpreadPercent,
+        decimal VolatilityPercent,
+        decimal VolumeRatio);
+
     public GridBotWorker(
         IOptions<AppOptions> appOptions,
         IOptions<BybitOptions> bybitOptions,
@@ -4442,7 +4448,13 @@ public sealed class GridBotWorker : BackgroundService
             return PairScoreSizingDecision.Blocked;
         }
 
-        var score = CalculateCapitalPairScore(state, orders, lastNoTradeReason);
+        var score = await CalculateExecutionPairScoreAsync(
+            _gridOptions.Category,
+            _gridOptions.Symbol,
+            state,
+            orders,
+            lastNoTradeReason,
+            cancellationToken);
         if (score < _gridOptions.PairScoreMinBuyScore)
         {
             await RecordNoTradeReasonAsync(
@@ -4593,6 +4605,7 @@ public sealed class GridBotWorker : BackgroundService
         }
 
         if (lastNoTradeReason is not null &&
+            !IsTopPairGateCapitalRejected(lastNoTradeReason) &&
             now - lastNoTradeReason.CreatedAt <= TimeSpan.FromMinutes(30) &&
             IsHardExecutionBlockReason(lastNoTradeReason.ReasonCode))
         {
@@ -4795,7 +4808,13 @@ public sealed class GridBotWorker : BackgroundService
 
         var orders = await _repository.GetOrdersAsync(_gridOptions.Symbol, cancellationToken);
         var lastNoTradeReason = (await _repository.GetNoTradeReasonsAsync(_gridOptions.Symbol, 1, cancellationToken)).FirstOrDefault();
-        var score = CalculateCapitalPairScore(state, orders, lastNoTradeReason);
+        var score = await CalculateExecutionPairScoreAsync(
+            _gridOptions.Category,
+            _gridOptions.Symbol,
+            state,
+            orders,
+            lastNoTradeReason,
+            cancellationToken);
         var profitStats = CalculatePairProfitStats(orders);
         var topPairGate = await ResolveTopPairGateAsync(state, score, profitStats, cancellationToken);
         return topPairGate.IsAllowed;
@@ -5009,7 +5028,13 @@ public sealed class GridBotWorker : BackgroundService
 
             var orders = await _repository.GetOrdersAsync(profile.Symbol, cancellationToken);
             var lastNoTradeReason = (await _repository.GetNoTradeReasonsAsync(profile.Symbol, 1, cancellationToken)).FirstOrDefault();
-            var score = CalculateCapitalPairScore(state, orders, lastNoTradeReason);
+            var score = await CalculateExecutionPairScoreAsync(
+                profile.Category,
+                profile.Symbol,
+                state,
+                orders,
+                lastNoTradeReason,
+                cancellationToken);
             if (score > currentScore ||
                 (score == currentScore && string.Compare(profile.Symbol, _gridOptions.Symbol, StringComparison.OrdinalIgnoreCase) < 0))
             {
@@ -5040,7 +5065,13 @@ public sealed class GridBotWorker : BackgroundService
 
             var orders = await _repository.GetOrdersAsync(profile.Symbol, cancellationToken);
             var lastNoTradeReason = (await _repository.GetNoTradeReasonsAsync(profile.Symbol, 1, cancellationToken)).FirstOrDefault();
-            var score = CalculateCapitalPairScore(state, orders, lastNoTradeReason);
+            var score = await CalculateExecutionPairScoreAsync(
+                profile.Category,
+                profile.Symbol,
+                state,
+                orders,
+                lastNoTradeReason,
+                cancellationToken);
             var profitStats = CalculatePairProfitStats(orders);
             if (!IsTopPairCandidate(score, state.DailyRealizedPnl, profitStats, out _))
             {
@@ -5113,6 +5144,102 @@ public sealed class GridBotWorker : BackgroundService
         return activeBuyNotional;
     }
 
+    private async Task<decimal> CalculateExecutionPairScoreAsync(
+        string category,
+        string symbol,
+        BotState state,
+        IReadOnlyCollection<GridOrder> orders,
+        NoTradeReasonRecord? lastNoTradeReason,
+        CancellationToken cancellationToken)
+    {
+        var score = CalculateCapitalPairScore(state, orders, lastNoTradeReason);
+        var market = await GetPairScoreMarketMetricsAsync(category, symbol, cancellationToken);
+
+        if (market.VolatilityPercent >= 0.8m && market.VolatilityPercent <= 8m)
+        {
+            score += 15m;
+        }
+        else if (market.VolatilityPercent is > 0m and < 0.8m)
+        {
+            score -= 15m;
+        }
+        else if (market.VolatilityPercent > 8m)
+        {
+            score -= 10m;
+        }
+
+        if (market.SpreadPercent > 0m && market.SpreadPercent <= 0.2m)
+        {
+            score += 15m;
+        }
+        else if (market.SpreadPercent > 0.5m)
+        {
+            score -= 20m;
+        }
+
+        if (market.VolumeRatio >= 0.7m)
+        {
+            score += 10m;
+        }
+        else if (market.VolumeRatio is > 0m and < 0.35m)
+        {
+            score -= 10m;
+        }
+
+        return ClampPairScore(score);
+    }
+
+    private async Task<PairScoreMarketMetrics> GetPairScoreMarketMetricsAsync(
+        string category,
+        string symbol,
+        CancellationToken cancellationToken)
+    {
+        decimal spreadPercent = 0m;
+        decimal lastPrice = 0m;
+        try
+        {
+            var ticker = await _bybitRestClient.GetTickerAsync(category, symbol, cancellationToken);
+            lastPrice = ticker.LastPrice;
+            var middle = (ticker.Bid1Price + ticker.Ask1Price) / 2m;
+            spreadPercent = middle > 0m
+                ? decimal.Max(0m, (ticker.Ask1Price - ticker.Bid1Price) / middle * 100m)
+                : 0m;
+        }
+        catch
+        {
+            spreadPercent = 0m;
+        }
+
+        try
+        {
+            var candles = await _bybitRestClient.GetKlinesAsync(
+                category,
+                symbol,
+                AnalysisDefaults.AutoRecommendationCandleInterval,
+                60,
+                cancellationToken);
+            var ordered = candles.OrderBy(candle => candle.OpenTime).ToArray();
+            if (ordered.Length == 0)
+            {
+                return new PairScoreMarketMetrics(lastPrice, spreadPercent, 0m, 0m);
+            }
+
+            var close = ordered[^1].Close;
+            var volatilityPercent = close > 0m
+                ? (ordered.Max(candle => candle.High) - ordered.Min(candle => candle.Low)) / close * 100m
+                : 0m;
+            var recentVolume = ordered.TakeLast(10).Average(candle => candle.Volume);
+            var baselineVolume = ordered.Take(Math.Max(1, ordered.Length - 10)).DefaultIfEmpty(ordered[0]).Average(candle => candle.Volume);
+            var volumeRatio = baselineVolume > 0m ? recentVolume / baselineVolume : 0m;
+
+            return new PairScoreMarketMetrics(close, spreadPercent, volatilityPercent, volumeRatio);
+        }
+        catch
+        {
+            return new PairScoreMarketMetrics(lastPrice, spreadPercent, 0m, 0m);
+        }
+    }
+
     private static decimal CalculateCapitalPairScore(
         BotState state,
         IReadOnlyCollection<GridOrder> orders,
@@ -5163,7 +5290,7 @@ public sealed class GridBotWorker : BackgroundService
             score -= drawdownPercent >= 3m ? 25m : drawdownPercent >= 1m ? 10m : 0m;
         }
 
-        if (lastNoTradeReason is not null)
+        if (lastNoTradeReason is not null && !IsTopPairGateCapitalRejected(lastNoTradeReason))
         {
             score -= GetPairScoreNoTradePenalty(lastNoTradeReason.ReasonCode);
             if (now - lastNoTradeReason.CreatedAt >= TimeSpan.FromHours(1))
@@ -5172,8 +5299,15 @@ public sealed class GridBotWorker : BackgroundService
             }
         }
 
-        return decimal.Max(0m, decimal.Min(100m, decimal.Round(score, 2, MidpointRounding.AwayFromZero)));
+        return ClampPairScore(score);
     }
+
+    private static bool IsTopPairGateCapitalRejected(NoTradeReasonRecord reason) =>
+        reason.ReasonCode == NoTradeReason.CapitalRejected &&
+        reason.Reason.Contains("Top-pair capital gate", StringComparison.OrdinalIgnoreCase);
+
+    private static decimal ClampPairScore(decimal score) =>
+        decimal.Max(0m, decimal.Min(100m, decimal.Round(score, 2, MidpointRounding.AwayFromZero)));
 
     private static decimal GetPairScoreNoTradePenalty(NoTradeReason reason) => reason switch
     {
