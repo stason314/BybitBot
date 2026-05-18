@@ -24,6 +24,7 @@ public sealed class RotationManagerService : IRotationManagerService
     private const string DecisionDisable = "disable";
     private const string DecisionDetach = "detach";
     private const string DecisionKeep = "keep";
+    private const string DecisionPrune = "prune";
 
     private readonly IGridRepository _repository;
     private readonly IMarketScannerService _marketScannerService;
@@ -138,6 +139,7 @@ public sealed class RotationManagerService : IRotationManagerService
             : state.ActivePairPoolSize;
         var activated = 0;
         var replaced = 0;
+        var poolSymbols = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         for (var slotIndex = 1; slotIndex <= targetSlotCount; slotIndex++)
         {
             slots.TryGetValue(slotIndex, out var slot);
@@ -158,6 +160,7 @@ public sealed class RotationManagerService : IRotationManagerService
                     cancellationToken);
                 if (!replacement.ShouldReplace)
                 {
+                    poolSymbols.Add(slot.Symbol);
                     await UpsertSlotAsync(slot with
                     {
                         Status = replacement.Status,
@@ -183,6 +186,7 @@ public sealed class RotationManagerService : IRotationManagerService
                     continue;
                 }
 
+                activeSymbols.Remove(slot.Symbol);
                 if (ShouldDetachOnReplace(replacement.Status))
                 {
                     await DetachProfileAsync(currentProfile, $"Rotation detached pair: {replacement.Reason}", now, cancellationToken);
@@ -190,12 +194,11 @@ public sealed class RotationManagerService : IRotationManagerService
                 }
                 else
                 {
-                    await DisableProfileAsync(currentProfile, $"Rotation replacement: {replacement.Reason}", now, cancellationToken);
+                    await RemoveOrDetachProfileAsync(currentProfile, poolSymbols, $"Rotation replacement: {replacement.Reason}", now, cancellationToken);
                     await AddDecisionAsync(DecisionDisable, slot.Symbol, null, slotIndex, replacement.CurrentScore, replacementCandidate.Score, replacement.Reason, now, cancellationToken);
                 }
 
-                activeSymbols.Remove(slot.Symbol);
-                await ActivateCandidateAsync(slotIndex, slot, replacementCandidate, activeSymbols, $"Replacement: {replacement.Reason}", now, cancellationToken);
+                await ActivateCandidateAsync(slotIndex, slot, replacementCandidate, activeSymbols, poolSymbols, $"Replacement: {replacement.Reason}", now, cancellationToken);
                 replaced++;
                 continue;
             }
@@ -207,6 +210,7 @@ public sealed class RotationManagerService : IRotationManagerService
                 var currentScore = allScanItems.TryGetValue(slot.Symbol, out var currentScan)
                     ? currentScan.Score
                     : slot.Score;
+                poolSymbols.Add(slot.Symbol);
                 await UpsertSlotAsync(slot with
                 {
                     Status = RotationPairStatus.Active,
@@ -232,9 +236,12 @@ public sealed class RotationManagerService : IRotationManagerService
                 continue;
             }
 
-            await ActivateCandidateAsync(slotIndex, slot, candidate, activeSymbols, "Activated into empty rotation slot.", now, cancellationToken);
+            await ActivateCandidateAsync(slotIndex, slot, candidate, activeSymbols, poolSymbols, "Activated into empty rotation slot.", now, cancellationToken);
             activated++;
         }
+
+        await DisableSlotsOutsidePoolAsync(slots.Values, targetSlotCount, now, cancellationToken);
+        var pruned = await PruneProfilesOutsidePoolAsync(poolSymbols, now, cancellationToken);
 
         var updatedState = state with
         {
@@ -243,10 +250,10 @@ public sealed class RotationManagerService : IRotationManagerService
         };
         await _repository.SaveRotationStateAsync(updatedState, cancellationToken);
 
-        var message = activated == 0 && replaced == 0
+        var message = activated == 0 && replaced == 0 && pruned == 0
             ? "Rotation scan completed; no changes needed."
-            : $"Rotation scan completed; activated {activated} pair(s), replaced {replaced} pair(s).";
-        return new RotationRunResult(true, scan.ScannedCount, activated + replaced, message);
+            : $"Rotation scan completed; activated {activated} pair(s), replaced {replaced} pair(s), pruned {pruned} profile(s).";
+        return new RotationRunResult(true, scan.ScannedCount, activated + replaced + pruned, message);
     }
 
     private async Task<RotationStateRecord> GetOrCreateStateAsync(CancellationToken cancellationToken)
@@ -344,6 +351,7 @@ public sealed class RotationManagerService : IRotationManagerService
         ActivePairSlotRecord? previousSlot,
         MarketScanItem candidate,
         HashSet<string> activeSymbols,
+        HashSet<string> poolSymbols,
         string reason,
         DateTimeOffset now,
         CancellationToken cancellationToken)
@@ -352,6 +360,7 @@ public sealed class RotationManagerService : IRotationManagerService
         var settings = BuildSettings(candidate, now);
         await _repository.SaveRuntimeSettingsAsync(settings, cancellationToken);
         activeSymbols.Add(candidate.Symbol);
+        poolSymbols.Add(candidate.Symbol);
 
         await UpsertSlotAsync(new ActivePairSlotRecord
         {
@@ -378,28 +387,89 @@ public sealed class RotationManagerService : IRotationManagerService
         await AddDecisionAsync(DecisionActivate, previousSymbol, candidate.Symbol, slotIndex, previousSlot?.Score ?? 0m, candidate.Score, reason, now, cancellationToken);
     }
 
-    private async Task DisableProfileAsync(
+    private async Task RemoveOrDetachProfileAsync(
         GridBotSettings profile,
+        HashSet<string> poolSymbols,
         string reason,
         DateTimeOffset now,
         CancellationToken cancellationToken)
     {
-        await _repository.SaveRuntimeSettingsAsync(new GridBotSettings
+        if (poolSymbols.Contains(profile.Symbol))
         {
-            Symbol = profile.Symbol,
-            Category = profile.Category,
-            StrategySelectionMode = StrategySelectionMode.Auto,
-            StrategyType = TradingStrategyType.NoTrade,
-            StrategyConfigJson = "{}",
-            LowerPrice = profile.LowerPrice,
-            UpperPrice = profile.UpperPrice,
-            Step = profile.Step,
-            OrderSizeUsdt = profile.OrderSizeUsdt,
-            StopLowerPrice = profile.StopLowerPrice,
-            StopUpperPrice = profile.StopUpperPrice,
-            UpdatedAt = now
-        }, cancellationToken);
-        _logger.LogInformation("Rotation disabled {Symbol}. Reason: {Reason}", profile.Symbol, reason);
+            return;
+        }
+
+        if (await CanDeleteProfileAsync(profile.Symbol, cancellationToken))
+        {
+            await _repository.DeleteRuntimeSettingsAsync(profile.Symbol, cancellationToken);
+            await AddDecisionAsync(DecisionPrune, profile.Symbol, null, null, 0m, 0m, $"{reason}. Flat profile removed from rotation pool.", now, cancellationToken);
+            _logger.LogInformation("Rotation removed flat profile {Symbol}. Reason: {Reason}", profile.Symbol, reason);
+            return;
+        }
+
+        await DetachProfileAsync(profile, reason, now, cancellationToken);
+    }
+
+    private async Task<int> PruneProfilesOutsidePoolAsync(
+        HashSet<string> poolSymbols,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        if (poolSymbols.Count == 0)
+        {
+            await AddDecisionAsync(DecisionSkip, null, null, null, 0m, 0m, "Rotation pruning skipped because no active pool symbols were resolved.", now, cancellationToken);
+            return 0;
+        }
+
+        var pruned = 0;
+        var profiles = await _repository.GetRuntimeSettingsProfilesAsync(cancellationToken);
+        foreach (var profile in profiles)
+        {
+            if (poolSymbols.Contains(profile.Symbol))
+            {
+                continue;
+            }
+
+            if (await CanDeleteProfileAsync(profile.Symbol, cancellationToken))
+            {
+                await _repository.DeleteRuntimeSettingsAsync(profile.Symbol, cancellationToken);
+                await AddDecisionAsync(DecisionPrune, profile.Symbol, null, null, 0m, 0m, "Flat profile outside rotation pool removed.", now, cancellationToken);
+                pruned++;
+                continue;
+            }
+
+            if (IsBuyCapableProfile(profile))
+            {
+                await DetachProfileAsync(profile, "Profile outside rotation pool is not flat.", now, cancellationToken);
+                await AddDecisionAsync(DecisionDetach, profile.Symbol, null, null, 0m, 0m, "Profile outside rotation pool detached until flat.", now, cancellationToken);
+            }
+        }
+
+        return pruned;
+    }
+
+    private async Task DisableSlotsOutsidePoolAsync(
+        IEnumerable<ActivePairSlotRecord> slots,
+        int targetSlotCount,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        foreach (var slot in slots.Where(slot => slot.SlotIndex > targetSlotCount))
+        {
+            await UpsertSlotAsync(slot with
+            {
+                Symbol = null,
+                Status = RotationPairStatus.Disabled,
+                Score = 0m,
+                Reason = "Slot disabled because it is outside the active pair pool size.",
+                UpdatedAt = now
+            }, cancellationToken);
+        }
+    }
+
+    private async Task<bool> CanDeleteProfileAsync(string symbol, CancellationToken cancellationToken)
+    {
+        return !await HasOpenLifecycleAsync(symbol, cancellationToken);
     }
 
     private async Task DetachProfileAsync(
