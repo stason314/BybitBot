@@ -2477,7 +2477,6 @@ public sealed class GridDashboardService : IGridDashboardService
         </div>
       </section>
       <section class="panel section">
-        <div class="profile-tabs" id="profileTabs"></div>
         <h2>Runtime Settings</h2>
         <div class="preset-box">
           <label for="settingsPreset">Paste Settings Preset</label>
@@ -2754,7 +2753,6 @@ public sealed class GridDashboardService : IGridDashboardService
     };
     let selectedSymbol = new URLSearchParams(window.location.search).get('symbol')?.toUpperCase() || null;
     let isCreatingNewProfile = false;
-    let profileCache = [];
     let latestDashboardData = null;
     let latestFullDashboardData = null;
     let settingsFormDirty = false;
@@ -2812,17 +2810,6 @@ public sealed class GridDashboardService : IGridDashboardService
         byId('formStatus').className = 'status error';
         byId('formStatus').textContent = error.message;
       });
-    };
-    const renderProfileTabs = (profiles) => {
-      profileCache = profiles;
-      byId('profileTabs').innerHTML = [
-        ...profiles.map(profile => `
-          <button type="button" class="profile-tab ${profile.isSelected && !isCreatingNewProfile ? 'active' : ''}" data-action="select-profile" data-symbol="${escapeHtml(profile.symbol)}">
-            ${escapeHtml(profile.symbol)}
-            <span class="close-tab" data-action="delete-profile" data-symbol="${escapeHtml(profile.symbol)}">x</span>
-          </button>`),
-        `<button type="button" class="profile-tab new ${isCreatingNewProfile ? 'active' : ''}" data-action="new-profile">+ New Config</button>`
-      ].join('');
     };
     const formatStatus = (status) => status === 'paused' ? 'Paused' : 'In progress';
     const formatEnumLabel = (value) => String(value || 'Unknown')
@@ -3505,7 +3492,6 @@ public sealed class GridDashboardService : IGridDashboardService
         selectedSymbol = data.settings.symbol;
         updateSelectedSymbolUrl();
       }
-      renderProfileTabs(data.profiles);
       if (data.isPartial && latestFullDashboardData?.configSummaries?.length) {
         renderConfigSummaries(updateSelectedConfigSummaries(latestFullDashboardData.configSummaries, data.settings.symbol));
       } else {
@@ -3769,36 +3755,6 @@ public sealed class GridDashboardService : IGridDashboardService
     });
     byId('applySelectedStrategyRecommendation').addEventListener('click', async () => {
       await applySelectedStrategyRecommendation('Refreshing market data and applying it to the selected strategy...');
-    });
-    byId('profileTabs').addEventListener('click', async (event) => {
-      const actionTarget = event.target.closest('[data-action]');
-      if (!actionTarget) {
-        return;
-      }
-
-      const action = actionTarget.dataset.action;
-      const symbol = actionTarget.dataset.symbol;
-      if (action === 'select-profile' && symbol) {
-        await loadSelectedProfile(symbol);
-        return;
-      }
-
-      if (action === 'delete-profile' && symbol) {
-        event.stopPropagation();
-        await deleteProfile(symbol);
-        return;
-      }
-
-      if (action === 'new-profile') {
-        selectedSymbol = null;
-        isCreatingNewProfile = true;
-        updateSettingsForm(defaultNewSettings);
-        setSettingsFormDirty(true);
-        updateSelectedSymbolUrl();
-        renderProfileTabs(profileCache);
-        byId('formStatus').className = 'status';
-        byId('formStatus').textContent = 'Fill the new config and press Apply Settings to create a profile.';
-      }
     });
     byId('configSummaryRows').addEventListener('click', async (event) => {
       const actionTarget = event.target.closest('[data-action]');
