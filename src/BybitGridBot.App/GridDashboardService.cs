@@ -3204,7 +3204,7 @@ public sealed class GridDashboardService : IGridDashboardService
         case 'btd-entry': return 'BTD';
         case 'signal-entry':
         case 'signal-exit': return 'Signal';
-        case 'reduce-only-exit': return 'ReduceOnly';
+        case 'reduce-only-exit': return fallback || 'ReduceOnly';
         default: return fallback || 'Grid';
       }
     };
@@ -4306,6 +4306,11 @@ public sealed class GridDashboardService : IGridDashboardService
             return cachedLabel;
         }
 
+        if (IsReduceOnlyPerformanceExit(order))
+        {
+            return ResolveReduceOnlyExitSource(order, orderByLinkId, context);
+        }
+
         var directLabel = ResolveDirectOrderSource(order);
         if (directLabel is not null)
         {
@@ -4325,6 +4330,119 @@ public sealed class GridDashboardService : IGridDashboardService
         var parentLabel = ResolveOrderSource(parentOrder, context, orderByLinkId, labels);
         return parentLabel == context.DefaultLabel ? context.DefaultLabel : parentLabel;
     }
+
+    private static string ResolveReduceOnlyExitSource(
+        GridOrder exitOrder,
+        IReadOnlyDictionary<string, GridOrder> orderByLinkId,
+        OrderSourceContext context)
+    {
+        var exitTime = GetOrderAttributionTime(exitOrder);
+        var exposureBySource = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var order in orderByLinkId.Values
+                     .Where(order => !string.Equals(order.OrderLinkId, exitOrder.OrderLinkId, StringComparison.Ordinal) &&
+                         order.FilledQuantity > 0m &&
+                         GetOrderAttributionTime(order) <= exitTime)
+                     .OrderBy(GetOrderAttributionTime))
+        {
+            if (order.Side == TradeSide.Buy)
+            {
+                var source = ResolveEntryExposureSource(order, context);
+                exposureBySource[source] = exposureBySource.GetValueOrDefault(source) + order.FilledQuantity;
+                continue;
+            }
+
+            var sellSource = ResolveSellExposureSource(order, orderByLinkId, context, exposureBySource);
+            SubtractExposure(exposureBySource, sellSource, order.FilledQuantity);
+        }
+
+        return SelectLargestExposureSource(exposureBySource) ?? context.DefaultLabel;
+    }
+
+    private static string ResolveEntryExposureSource(GridOrder order, OrderSourceContext context)
+    {
+        var source = ResolveDirectOrderSource(order) ?? context.DefaultLabel;
+        return string.Equals(source, "ReduceOnly", StringComparison.OrdinalIgnoreCase)
+            ? context.DefaultLabel
+            : source;
+    }
+
+    private static string? ResolveSellExposureSource(
+        GridOrder order,
+        IReadOnlyDictionary<string, GridOrder> orderByLinkId,
+        OrderSourceContext context,
+        IReadOnlyDictionary<string, decimal> exposureBySource)
+    {
+        if (IsReduceOnlyPerformanceExit(order))
+        {
+            return SelectLargestExposureSource(exposureBySource);
+        }
+
+        if (!string.IsNullOrWhiteSpace(order.ParentOrderLinkId) &&
+            orderByLinkId.TryGetValue(order.ParentOrderLinkId, out var parentOrder) &&
+            parentOrder.Side == TradeSide.Buy)
+        {
+            return ResolveEntryExposureSource(parentOrder, context);
+        }
+
+        return ResolveDirectOrderSource(order) ?? context.DefaultLabel;
+    }
+
+    private static void SubtractExposure(
+        IDictionary<string, decimal> exposureBySource,
+        string? source,
+        decimal quantity)
+    {
+        if (quantity <= 0m || exposureBySource.Count == 0)
+        {
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(source) &&
+            exposureBySource.TryGetValue(source, out var sourceExposure) &&
+            sourceExposure > 0m)
+        {
+            var consumed = decimal.Min(sourceExposure, quantity);
+            exposureBySource[source] = sourceExposure - consumed;
+            quantity -= consumed;
+        }
+
+        while (quantity > 0m)
+        {
+            var largest = exposureBySource
+                .Where(item => item.Value > 0m)
+                .OrderByDescending(item => item.Value)
+                .FirstOrDefault();
+            if (string.IsNullOrWhiteSpace(largest.Key) || largest.Value <= 0m)
+            {
+                return;
+            }
+
+            var consumed = decimal.Min(largest.Value, quantity);
+            exposureBySource[largest.Key] = largest.Value - consumed;
+            quantity -= consumed;
+        }
+    }
+
+    private static string? SelectLargestExposureSource(IReadOnlyDictionary<string, decimal> exposureBySource)
+    {
+        var largest = exposureBySource
+            .Where(item => item.Value > 0m)
+            .OrderByDescending(item => item.Value)
+            .FirstOrDefault();
+
+        return string.IsNullOrWhiteSpace(largest.Key) || largest.Value <= 0m
+            ? null
+            : largest.Key;
+    }
+
+    private static bool IsReduceOnlyPerformanceExit(GridOrder order) =>
+        string.Equals(order.ParentOrderLinkId, "reduce-only-exit", StringComparison.OrdinalIgnoreCase) ||
+        (!string.IsNullOrWhiteSpace(order.StrategySource) &&
+         order.StrategySource.Contains("ReduceOnly", StringComparison.OrdinalIgnoreCase));
+
+    private static DateTimeOffset GetOrderAttributionTime(GridOrder order) =>
+        order.FilledAt ?? order.UpdatedAt;
 
     private sealed record OrderSourceContext(
         string DefaultLabel,

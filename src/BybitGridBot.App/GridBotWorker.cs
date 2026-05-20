@@ -2659,6 +2659,19 @@ public sealed class GridBotWorker : BackgroundService
                 continue;
             }
 
+            if (forceExit &&
+                !await CanForceReduceOnlyExitWithoutTurningDailyPnlNegativeAsync(state, price, quantity, cancellationToken))
+            {
+                _logger.LogWarning(
+                    "ReduceOnly force-exit sell skipped for {Symbol} at {Price}; projected daily PnL would turn negative. DailyPnL={DailyPnl}, AverageEntry={AverageEntry}, Quantity={Quantity}.",
+                    _gridOptions.Symbol,
+                    price,
+                    state.DailyRealizedPnl,
+                    state.AverageEntryPrice,
+                    quantity);
+                continue;
+            }
+
             var expectedProfitPercent = ExpectedProfitFilter.CalculateLongRoundTripPercent(state.AverageEntryPrice, price);
 
             var createdOrders = await ExecuteStrategyDecisionAsync(
@@ -2679,6 +2692,28 @@ public sealed class GridBotWorker : BackgroundService
         }
 
         return createdSellCount;
+    }
+
+    private async Task<bool> CanForceReduceOnlyExitWithoutTurningDailyPnlNegativeAsync(
+        BotState state,
+        decimal exitPrice,
+        decimal quantity,
+        CancellationToken cancellationToken)
+    {
+        if (quantity <= 0m || state.AverageEntryPrice <= 0m)
+        {
+            return true;
+        }
+
+        var projectedNetPnl = await CalculateNetPnlAsync(
+            TradeSide.Sell,
+            state.AverageEntryPrice,
+            exitPrice,
+            quantity,
+            0m,
+            cancellationToken);
+
+        return projectedNetPnl >= 0m || state.DailyRealizedPnl + projectedNetPnl >= 0m;
     }
 
     private bool ShouldForceReduceOnlyExitOnDrawdown(BotState state, decimal currentPrice) =>

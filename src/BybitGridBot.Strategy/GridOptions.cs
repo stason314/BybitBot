@@ -483,7 +483,7 @@ public sealed class GridOptions
     public decimal FastProtectiveExitFloorPercent { get; init; } = 0.1m;
 
     [ConfigurationKeyName("REDUCE_ONLY_FORCE_EXIT_ON_DRAWDOWN")]
-    public bool ReduceOnlyForceExitOnDrawdown { get; init; } = true;
+    public bool ReduceOnlyForceExitOnDrawdown { get; init; } = false;
 
     [ConfigurationKeyName("REDUCE_ONLY_FORCE_EXIT_DRAWDOWN_PERCENT")]
     [Range(typeof(decimal), "0", "1000")]
