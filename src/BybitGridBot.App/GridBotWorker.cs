@@ -316,7 +316,7 @@ public sealed class GridBotWorker : BackgroundService
         if (profile.StrategyType is TradingStrategyType.NoTrade or TradingStrategyType.Pause)
         {
             await _repository.SaveGridLevelsAsync(_gridOptions.Symbol, [], cancellationToken);
-            await RunNoTradeCycleAsync(profile, state, cancellationToken);
+            await RunNoTradeCycleAsync(profile, state, instrument, cancellationToken);
             return;
         }
 
@@ -614,6 +614,7 @@ public sealed class GridBotWorker : BackgroundService
     private async Task<BotState> RunNoTradeCycleAsync(
         GridBotSettings profile,
         BotState state,
+        BybitInstrumentInfo instrument,
         CancellationToken cancellationToken)
     {
         ResetDailyPnlIfNeeded(state);
@@ -633,10 +634,12 @@ public sealed class GridBotWorker : BackgroundService
         if (_appOptions.TradingMode == TradingMode.Paper)
         {
             await SimulatePaperFillsAsync(state, [], null, currentPrice, cancellationToken);
+            await EnsurePositionExitFallbackAsync(profile, state, [], instrument, currentPrice, cancellationToken);
         }
         else
         {
             await SynchronizeLiveOrdersAsync(state, [], null, cancellationToken);
+            await EnsurePositionExitFallbackAsync(profile, state, [], instrument, currentPrice, cancellationToken);
         }
 
         state.IsInitialized = true;
@@ -3671,6 +3674,80 @@ public sealed class GridBotWorker : BackgroundService
 
             await EnsureOppositeGridOrderAsync(state, levels, remainingBuy, cancellationToken);
         }
+
+        await EnsurePositionExitFallbackAsync(profile, state, levels, instrument, currentPrice, cancellationToken);
+    }
+
+    private async Task EnsurePositionExitFallbackAsync(
+        GridBotSettings? profile,
+        BotState state,
+        IReadOnlyList<GridLevel> levels,
+        BybitInstrumentInfo instrument,
+        decimal currentPrice,
+        CancellationToken cancellationToken)
+    {
+        if (state.BaseAssetQuantity <= 0m)
+        {
+            return;
+        }
+
+        var activeOrders = await _repository.GetActiveOrdersAsync(_gridOptions.Symbol, cancellationToken);
+        var activeSellQuantity = activeOrders
+            .Where(order => order.IsActive && order.Side == TradeSide.Sell)
+            .Sum(order => Math.Max(0m, order.Quantity - order.FilledQuantity));
+        if (activeSellQuantity >= state.BaseAssetQuantity * 0.995m)
+        {
+            return;
+        }
+
+        var wallet = _appOptions.TradingMode == TradingMode.Paper
+            ? null
+            : await _bybitRestClient.GetWalletBalanceAsync(cancellationToken, _quoteAsset, _baseAsset);
+        var availableBase = GetAvailableBaseBalance(state, activeOrders, wallet);
+        var uncoveredQuantity = instrument.RoundQuantity(decimal.Min(
+            availableBase,
+            Math.Max(0m, state.BaseAssetQuantity - activeSellQuantity)));
+        if (uncoveredQuantity <= 0m)
+        {
+            return;
+        }
+
+        var forceExitAttempt = await VerifyReduceOnlyForceExitProgressAsync(profile, state, cancellationToken);
+        var immediateExitPrice = instrument.RoundPrice(currentPrice * (1m - GetReduceOnlyForceExitOffsetPercent(forceExitAttempt) / 100m));
+        var canExitNowWithProfit = immediateExitPrice > 0m &&
+            await HasMinimumNetProfitAsync(TradeSide.Sell, state.AverageEntryPrice, immediateExitPrice, uncoveredQuantity, 0m, cancellationToken);
+
+        var createdSellCount = await EnsureReduceOnlySellOrdersAsync(
+            profile,
+            state,
+            levels,
+            instrument,
+            activeOrders,
+            wallet,
+            currentPrice,
+            uncoveredQuantity,
+            canExitNowWithProfit,
+            forceExitAttempt,
+            cancellationToken);
+        if (createdSellCount <= 0)
+        {
+            return;
+        }
+
+        if (canExitNowWithProfit)
+        {
+            _reduceOnlyExitVerifications[_gridOptions.Symbol] = new ReduceOnlyExitVerification(
+                state.BaseAssetQuantity,
+                DateTimeOffset.UtcNow,
+                forceExitAttempt);
+        }
+
+        _logger.LogInformation(
+            "Position exit fallback created {SellCount} reduce-only sell order(s) for {Symbol}. Uncovered quantity: {UncoveredQuantity}. ForceExit={ForceExit}.",
+            createdSellCount,
+            _gridOptions.Symbol,
+            uncoveredQuantity,
+            canExitNowWithProfit);
     }
 
     private static GridOrder? BuildUnprotectedBuySlice(GridOrder buy, IReadOnlyCollection<GridOrder> allOrders)
