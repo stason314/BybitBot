@@ -158,7 +158,7 @@ SQLite initializes tables for:
 - `BOT_TYPE=auto`
 - API keys are blank in `.env.example`
 - `mainnet` requires explicit `TRADING_MODE=mainnet` and API keys
-- Docker Compose does not publish inbound ports
+- Docker Compose publishes `WEB_PORT` on `WEB_BIND_IP` (`0.0.0.0` by default); set `WEB_BIND_IP=127.0.0.1` to allow only SSH-tunnel/local access
 - `.env` should stay untracked and must not contain committed secrets
 
 ## Example: TON Grid

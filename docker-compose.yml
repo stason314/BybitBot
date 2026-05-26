@@ -9,7 +9,7 @@ services:
     env_file:
       - .env
     ports:
-      - "127.0.0.1:${WEB_PORT:-8080}:${WEB_PORT:-8080}"
+      - "${WEB_BIND_IP:-0.0.0.0}:${WEB_PORT:-8080}:${WEB_PORT:-8080}"
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
