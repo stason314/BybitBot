@@ -34,6 +34,7 @@ public interface IGridRepository
     Task AddFuturesFillAsync(FuturesFillRecord fill, CancellationToken cancellationToken);
     Task<bool> FuturesFillExistsAsync(string execId, CancellationToken cancellationToken);
     Task<IReadOnlyList<FuturesFillRecord>> GetFuturesFillsAsync(string symbol, int limit, CancellationToken cancellationToken);
+    Task<ExecutionTurnoverStats> GetFuturesFillTurnoverAsync(string symbol, DateOnly today, CancellationToken cancellationToken);
     Task<IReadOnlyList<FuturesRiskDecisionRecord>> GetFuturesRiskDecisionsAsync(string symbol, int limit, CancellationToken cancellationToken);
     Task AddFuturesRiskDecisionAsync(FuturesRiskDecisionRecord decision, CancellationToken cancellationToken);
     Task ClearFuturesPaperHistoryAsync(string symbol, CancellationToken cancellationToken);
@@ -46,6 +47,7 @@ public interface IGridRepository
     Task UpsertOrderAsync(GridOrder order, CancellationToken cancellationToken);
     Task<bool> SpotExecutionExistsAsync(string execId, CancellationToken cancellationToken);
     Task<bool> AddSpotExecutionAsync(SpotExecutionRecord execution, CancellationToken cancellationToken);
+    Task<ExecutionTurnoverStats> GetSpotExecutionTurnoverAsync(string symbol, DateOnly today, CancellationToken cancellationToken);
     Task<StrategyCooldownRecord?> GetActiveStrategyCooldownAsync(string symbol, string strategyType, DateTimeOffset now, CancellationToken cancellationToken);
     Task UpsertStrategyCooldownAsync(StrategyCooldownRecord cooldown, CancellationToken cancellationToken);
     Task<int> ResetSpotStatisticsAsync(CancellationToken cancellationToken);

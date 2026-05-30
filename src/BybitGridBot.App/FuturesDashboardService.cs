@@ -1455,9 +1455,13 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
     const renderConfigs = (configs) => {
       const dailyTotal = configs.reduce((sum, config) => sum + Number(config.dailyRealizedPnl || 0), 0);
       const total = configs.reduce((sum, config) => sum + Number(config.totalRealizedPnl || 0), 0);
+      const dailyTurnover = configs.reduce((sum, config) => sum + Number(config.dailyTurnoverUsdt || 0), 0);
+      const totalTurnover = configs.reduce((sum, config) => sum + Number(config.totalTurnoverUsdt || 0), 0);
       byId('futuresProfilesProfitStats').innerHTML = [
         ['All Daily Profit', formatPnl(dailyTotal)],
-        ['All Total Profit', formatPnl(total)]
+        ['All Total Profit', formatPnl(total)],
+        ['All Daily Turnover', formatNumber(dailyTurnover)],
+        ['All Total Turnover', formatNumber(totalTurnover)]
       ].map(([label, value]) => `<div class="stat"><div class="label">${label}</div><div class="value">${value}</div></div>`).join('');
       byId('configRows').innerHTML = configs.length === 0
         ? '<tr><td colspan="9">No futures configs yet.</td></tr>'
@@ -2192,6 +2196,7 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         foreach (var profile in profiles)
         {
             var state = await _repository.GetBotStateAsync(FuturesStateKeys.ForSymbol(profile.Symbol), cancellationToken);
+            var turnover = await _repository.GetFuturesFillTurnoverAsync(profile.Symbol, today, cancellationToken);
             var dailyRealizedPnl = state?.DailyRealizedPnl ?? 0m;
             var totalRealizedPnl = state?.TotalRealizedPnl ?? 0m;
 
@@ -2215,6 +2220,8 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
                 MaxMarginUsdt = profile.MaxMarginUsdt,
                 DailyRealizedPnl = dailyRealizedPnl,
                 TotalRealizedPnl = totalRealizedPnl,
+                DailyTurnoverUsdt = turnover.DailyTurnoverUsdt,
+                TotalTurnoverUsdt = turnover.TotalTurnoverUsdt,
                 IsSelected = string.Equals(profile.Symbol, selectedSymbol, StringComparison.OrdinalIgnoreCase),
                 UpdatedAt = profile.UpdatedAt
             });

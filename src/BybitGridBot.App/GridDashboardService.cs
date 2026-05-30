@@ -311,6 +311,7 @@ public sealed class GridDashboardService : IGridDashboardService
         IReadOnlyList<DashboardPairScoreItem> pairScores,
         CancellationToken cancellationToken)
     {
+        var today = DateOnly.FromDateTime(DateTime.UtcNow);
         var summaries = new List<DashboardConfigSummaryItem>(profiles.Count);
         var scoreBySymbol = pairScores.ToDictionary(score => score.Symbol, StringComparer.OrdinalIgnoreCase);
 
@@ -319,12 +320,14 @@ public sealed class GridDashboardService : IGridDashboardService
             var stateTask = _repository.GetBotStateAsync(profile.Symbol, cancellationToken);
             var ordersTask = _repository.GetOrdersAsync(profile.Symbol, cancellationToken);
             var noTradeReasonsTask = _repository.GetNoTradeReasonsAsync(profile.Symbol, 1, cancellationToken);
+            var turnoverTask = _repository.GetSpotExecutionTurnoverAsync(profile.Symbol, today, cancellationToken);
 
-            await Task.WhenAll(new Task[] { stateTask, ordersTask, noTradeReasonsTask });
+            await Task.WhenAll(new Task[] { stateTask, ordersTask, noTradeReasonsTask, turnoverTask });
 
             var state = await stateTask;
             var orders = await ordersTask;
             var lastNoTradeReason = (await noTradeReasonsTask).FirstOrDefault();
+            var turnover = await turnoverTask;
             var isPaused = state?.IsPaused == true || profile.StrategyType is TradingStrategyType.Pause or TradingStrategyType.NoTrade;
             var execution = BuildExecutionReadiness(profile, state, orders, lastNoTradeReason);
             scoreBySymbol.TryGetValue(profile.Symbol, out var pairScore);
@@ -337,6 +340,8 @@ public sealed class GridDashboardService : IGridDashboardService
                 Status = isPaused ? "paused" : "in_progress",
                 DailyRealizedPnl = state?.DailyRealizedPnl ?? 0m,
                 TotalRealizedPnl = state?.TotalRealizedPnl ?? 0m,
+                DailyTurnoverUsdt = turnover.DailyTurnoverUsdt,
+                TotalTurnoverUsdt = turnover.TotalTurnoverUsdt,
                 PairScore = pairScore?.Score ?? 0m,
                 PairScoreLabel = pairScore?.Label ?? "Unknown",
                 SuggestedOrderSizeMultiplier = pairScore?.SuggestedOrderSizeMultiplier ?? 1m,
@@ -2539,6 +2544,8 @@ public sealed class GridDashboardService : IGridDashboardService
         <div class="config-profit-totals">
           <div class="config-profit-total"><span>All Daily</span><strong id="allConfigsDailyProfit">-</strong></div>
           <div class="config-profit-total"><span>All Total</span><strong id="allConfigsTotalProfit">-</strong></div>
+          <div class="config-profit-total"><span>All Daily Turnover</span><strong id="allConfigsDailyTurnover">-</strong></div>
+          <div class="config-profit-total"><span>All Total Turnover</span><strong id="allConfigsTotalTurnover">-</strong></div>
           <button type="button" class="danger-button compact-button" id="resetSpotStats">Reset Spot Stats</button>
         </div>
       </div>
@@ -2820,8 +2827,12 @@ public sealed class GridDashboardService : IGridDashboardService
     const renderConfigTotals = (configs) => {
       const dailyTotal = configs.reduce((sum, config) => sum + Number(config.dailyRealizedPnl || 0), 0);
       const total = configs.reduce((sum, config) => sum + Number(config.totalRealizedPnl || 0), 0);
+      const dailyTurnover = configs.reduce((sum, config) => sum + Number(config.dailyTurnoverUsdt || 0), 0);
+      const totalTurnover = configs.reduce((sum, config) => sum + Number(config.totalTurnoverUsdt || 0), 0);
       byId('allConfigsDailyProfit').innerHTML = formatPnl(dailyTotal);
       byId('allConfigsTotalProfit').innerHTML = formatPnl(total);
+      byId('allConfigsDailyTurnover').innerHTML = formatNumber(dailyTurnover);
+      byId('allConfigsTotalTurnover').innerHTML = formatNumber(totalTurnover);
     };
     const renderConfigSummaries = (configs) => {
       renderConfigTotals(configs);

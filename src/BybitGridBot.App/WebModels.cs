@@ -75,6 +75,10 @@ public sealed class DashboardConfigSummaryItem
 
     public decimal TotalRealizedPnl { get; init; }
 
+    public decimal DailyTurnoverUsdt { get; init; }
+
+    public decimal TotalTurnoverUsdt { get; init; }
+
     public decimal PairScore { get; init; }
 
     public required string PairScoreLabel { get; init; }
@@ -682,6 +686,10 @@ public sealed class FuturesConfigSummaryItem
     public decimal DailyRealizedPnl { get; init; }
 
     public decimal TotalRealizedPnl { get; init; }
+
+    public decimal DailyTurnoverUsdt { get; init; }
+
+    public decimal TotalTurnoverUsdt { get; init; }
 
     public bool IsSelected { get; init; }
 

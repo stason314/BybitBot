@@ -1318,6 +1318,25 @@ public sealed class SqliteGridRepository : IGridRepository
         return result;
     }
 
+    public async Task<ExecutionTurnoverStats> GetFuturesFillTurnoverAsync(string symbol, DateOnly today, CancellationToken cancellationToken)
+    {
+        const string sql = """
+            SELECT quantity, price, created_at
+            FROM futures_fills
+            WHERE symbol = $symbol
+              AND exec_type = 'Trade'
+              AND action <> 'Funding'
+              AND CAST(quantity AS REAL) > 0;
+            """;
+
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        command.Parameters.AddWithValue("$symbol", symbol);
+
+        return await ReadTurnoverStatsAsync(command, today, cancellationToken);
+    }
+
     public async Task<IReadOnlyList<FuturesRiskDecisionRecord>> GetFuturesRiskDecisionsAsync(string symbol, int limit, CancellationToken cancellationToken)
     {
         const string sql = """
@@ -1660,6 +1679,25 @@ public sealed class SqliteGridRepository : IGridRepository
         command.Parameters.AddWithValue("$executed_at", execution.ExecutedAt.ToString("O", CultureInfo.InvariantCulture));
         command.Parameters.AddWithValue("$created_at", execution.CreatedAt.ToString("O", CultureInfo.InvariantCulture));
         return await command.ExecuteNonQueryAsync(cancellationToken) > 0;
+    }
+
+    public async Task<ExecutionTurnoverStats> GetSpotExecutionTurnoverAsync(string symbol, DateOnly today, CancellationToken cancellationToken)
+    {
+        const string sql = """
+            SELECT quantity, price, executed_at
+            FROM spot_executions
+            WHERE symbol = $symbol
+              AND exec_type = 'Trade'
+              AND is_applied = 1
+              AND CAST(quantity AS REAL) > 0;
+            """;
+
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        command.Parameters.AddWithValue("$symbol", symbol);
+
+        return await ReadTurnoverStatsAsync(command, today, cancellationToken);
     }
 
     public async Task<StrategyCooldownRecord?> GetActiveStrategyCooldownAsync(
@@ -2283,6 +2321,32 @@ public sealed class SqliteGridRepository : IGridRepository
         }
 
         return result;
+    }
+
+    private static async Task<ExecutionTurnoverStats> ReadTurnoverStatsAsync(
+        SqliteCommand command,
+        DateOnly today,
+        CancellationToken cancellationToken)
+    {
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        var total = 0m;
+        var daily = 0m;
+
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var quantity = ParseDecimal(reader.GetString(0));
+            var price = ParseDecimal(reader.GetString(1));
+            var notional = quantity * price;
+            total += notional;
+
+            var timestamp = DateTimeOffset.Parse(reader.GetString(2), CultureInfo.InvariantCulture);
+            if (DateOnly.FromDateTime(timestamp.UtcDateTime) == today)
+            {
+                daily += notional;
+            }
+        }
+
+        return new ExecutionTurnoverStats(daily, total);
     }
 
     private async Task<SqliteConnection> OpenConnectionAsync(CancellationToken cancellationToken)
