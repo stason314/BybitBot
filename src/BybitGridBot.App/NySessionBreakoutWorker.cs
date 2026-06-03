@@ -529,6 +529,13 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
                 continue;
             }
 
+            if (!IsLiveHourAllowed(signal.SignalCandleOpenTime))
+            {
+                MarkSignalHandled(item.Symbol, signal.SignalCandleOpenTime);
+                AddEvent(item.Symbol, "warning", $"{signal.Pattern}:{item.Symbol}:{signal.Side} skipped by NY hour gate.");
+                continue;
+            }
+
             if (!_backtestService.IsStrategySymbolDirectionAllowedForTrading(
                     signal.Pattern,
                     item.Symbol,
@@ -582,8 +589,29 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
         string.Equals(signal.Pattern, BreakoutRetestStrategy.Name, StringComparison.OrdinalIgnoreCase);
 
     private bool IsLiveStrategyEnabled(string strategyName) =>
-        !string.Equals(strategyName, NYSweepReversalStrategy.Name, StringComparison.OrdinalIgnoreCase) ||
-        _strategyRoutingOptions.NySweepLiveTradingEnabled;
+        string.Equals(strategyName, TurtleTrendStrategy.Name, StringComparison.OrdinalIgnoreCase) ||
+        (string.Equals(strategyName, NYSweepReversalStrategy.Name, StringComparison.OrdinalIgnoreCase) &&
+            _strategyRoutingOptions.NySweepLiveTradingEnabled);
+
+    private bool IsLiveHourAllowed(DateTimeOffset signalTime)
+    {
+        var allowedHours = ParseAllowedHours(_strategyRoutingOptions.LiveAllowedHours);
+        if (allowedHours.Count == 0)
+        {
+            return true;
+        }
+
+        var nyHour = TimeZoneInfo.ConvertTime(signalTime, ResolveNewYorkTimeZone()).Hour;
+        return allowedHours.Contains(nyHour);
+    }
+
+    private static IReadOnlySet<int> ParseAllowedHours(string value) =>
+        string.IsNullOrWhiteSpace(value)
+            ? new HashSet<int>()
+            : value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Select(part => int.TryParse(part, out var hour) ? hour : -1)
+                .Where(hour => hour is >= 0 and <= 23)
+                .ToHashSet();
 
     private async Task<NySessionSignal?> TryResolveScoreBasedSignalAsync(
         NySessionPoolItem item,
@@ -784,11 +812,12 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
         IReadOnlyList<Candle> candles,
         Candle candle)
     {
+        var protectedStop = ResolvePaperProtectedStop(position, entryOrder, candles, candle);
         if (IsShort(position.Side))
         {
-            if (candle.High >= entryOrder.StopLossPrice)
+            if (candle.High >= protectedStop)
             {
-                return entryOrder.StopLossPrice;
+                return protectedStop;
             }
 
             if (entryOrder.TakeProfitPrice > 0m && candle.Low <= entryOrder.TakeProfitPrice)
@@ -803,9 +832,9 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
         }
         else
         {
-            if (candle.Low <= entryOrder.StopLossPrice)
+            if (candle.Low <= protectedStop)
             {
-                return entryOrder.StopLossPrice;
+                return protectedStop;
             }
 
             if (entryOrder.TakeProfitPrice > 0m && candle.High >= entryOrder.TakeProfitPrice)
@@ -822,8 +851,79 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
         return null;
     }
 
+    private decimal ResolvePaperProtectedStop(
+        FuturesPositionSnapshot position,
+        FuturesOrderRecord entryOrder,
+        IReadOnlyList<Candle> candles,
+        Candle current)
+    {
+        if (!_turtleOptions.UseProfitLock || entryOrder.TakeProfitPrice > 0m || position.EntryPrice <= 0m)
+        {
+            return entryOrder.StopLossPrice;
+        }
+
+        var ordered = candles
+            .Where(candle => candle.OpenTime < current.OpenTime)
+            .OrderBy(candle => candle.OpenTime)
+            .ToArray();
+        if (ordered.Length == 0)
+        {
+            return entryOrder.StopLossPrice;
+        }
+
+        var isShort = IsShort(position.Side);
+        var riskPerUnit = Math.Abs(position.EntryPrice - entryOrder.StopLossPrice);
+        if (riskPerUnit <= 0m)
+        {
+            return entryOrder.StopLossPrice;
+        }
+
+        var last = ordered[^1];
+        var rMultiple = isShort
+            ? (position.EntryPrice - last.Close) / riskPerUnit
+            : (last.Close - position.EntryPrice) / riskPerUnit;
+        var protectedStop = entryOrder.StopLossPrice;
+        if (rMultiple >= _turtleOptions.BreakevenTriggerR)
+        {
+            protectedStop = isShort
+                ? decimal.Min(protectedStop, position.EntryPrice)
+                : decimal.Max(protectedStop, position.EntryPrice);
+        }
+
+        if (rMultiple >= _turtleOptions.LockTriggerR)
+        {
+            var lockStop = isShort
+                ? position.EntryPrice - riskPerUnit * _turtleOptions.LockProfitR
+                : position.EntryPrice + riskPerUnit * _turtleOptions.LockProfitR;
+            protectedStop = isShort
+                ? decimal.Min(protectedStop, lockStop)
+                : decimal.Max(protectedStop, lockStop);
+        }
+
+        if (_turtleOptions.UseTrailingAtrStop && rMultiple >= _turtleOptions.AtrTrailTriggerR)
+        {
+            var atr = TradingIndicatorMath.Atr(ordered, _turtleOptions.AtrPeriod);
+            if (atr > 0m)
+            {
+                var atrStop = isShort
+                    ? last.Close + atr * _turtleOptions.AtrTrailMultiplier
+                    : last.Close - atr * _turtleOptions.AtrTrailMultiplier;
+                protectedStop = isShort
+                    ? decimal.Min(protectedStop, atrStop)
+                    : decimal.Max(protectedStop, atrStop);
+            }
+        }
+
+        return protectedStop;
+    }
+
     private bool IsTurtleChannelExit(IReadOnlyList<Candle> candles, Candle current, StrategySide side)
     {
+        if (!_turtleOptions.UseChannelExit)
+        {
+            return false;
+        }
+
         var closed = candles
             .Where(candle => candle.OpenTime <= current.OpenTime)
             .OrderBy(candle => candle.OpenTime)

@@ -32,6 +32,9 @@ public sealed class StrategyRoutingOptions
     [ConfigurationKeyName("NYSWEEP_LIVE_TRADING_ENABLED")]
     public bool NySweepLiveTradingEnabled { get; init; } = false;
 
+    [ConfigurationKeyName("NY_LIVE_ALLOWED_HOURS")]
+    public string LiveAllowedHours { get; init; } = "10,11";
+
     [ConfigurationKeyName("MIN_TRADES_FOR_STRATEGY_SYMBOL_GATING")]
     [Range(1, 10000)]
     public int MinTradesForStrategySymbolGating { get; init; } = 3;
@@ -139,6 +142,29 @@ public sealed class TurtleTrendOptions
 
     [ConfigurationKeyName("TURTLE_USE_TRAILING_ATR_STOP")]
     public bool UseTrailingAtrStop { get; init; } = true;
+
+    [ConfigurationKeyName("TURTLE_USE_PROFIT_LOCK")]
+    public bool UseProfitLock { get; init; } = true;
+
+    [ConfigurationKeyName("TURTLE_BREAKEVEN_TRIGGER_R")]
+    [Range(typeof(decimal), "0", "100")]
+    public decimal BreakevenTriggerR { get; init; } = 1m;
+
+    [ConfigurationKeyName("TURTLE_LOCK_TRIGGER_R")]
+    [Range(typeof(decimal), "0", "100")]
+    public decimal LockTriggerR { get; init; } = 2m;
+
+    [ConfigurationKeyName("TURTLE_LOCK_PROFIT_R")]
+    [Range(typeof(decimal), "0", "100")]
+    public decimal LockProfitR { get; init; } = 0.8m;
+
+    [ConfigurationKeyName("TURTLE_ATR_TRAIL_TRIGGER_R")]
+    [Range(typeof(decimal), "0", "100")]
+    public decimal AtrTrailTriggerR { get; init; } = 3m;
+
+    [ConfigurationKeyName("TURTLE_ATR_TRAIL_MULTIPLIER")]
+    [Range(typeof(decimal), "0.00000001", "100")]
+    public decimal AtrTrailMultiplier { get; init; } = 2m;
 
     [ConfigurationKeyName("TURTLE_USE_PYRAMIDING")]
     public bool UsePyramiding { get; init; } = false;

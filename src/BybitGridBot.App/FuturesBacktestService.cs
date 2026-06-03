@@ -386,6 +386,11 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                     i + 1 < session.Count &&
                     !HasOpenBacktestTrade(trades, session[i].OpenTime))
                 {
+                    if (!IsBacktestLiveEntryAllowed(decision.SelectedCandidate, session[i].OpenTime, nyZone))
+                    {
+                        continue;
+                    }
+
                     var signalKey = BuildScoreSignalKey(decision.SelectedCandidate);
                     if (!processedScoreSignals.Add(signalKey))
                     {
@@ -1703,15 +1708,16 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         var exitTime = candles[startIndex].OpenTime;
         var exitReason = "BacktestEnd";
         var exitIndex = ResolveSessionExitIndex(session, exitTime);
+        var protectedStop = signal.StopLoss;
 
         for (var i = startIndex; i < candles.Length; i++)
         {
             var candle = candles[i];
             if (isShort)
             {
-                if (candle.High >= signal.StopLoss)
+                if (candle.High >= protectedStop)
                 {
-                    exitPrice = signal.StopLoss;
+                    exitPrice = protectedStop;
                     exitTime = candle.OpenTime;
                     exitReason = "StopLoss";
                     exitIndex = ResolveSessionExitIndex(session, exitTime);
@@ -1729,9 +1735,9 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             }
             else
             {
-                if (candle.Low <= signal.StopLoss)
+                if (candle.Low <= protectedStop)
                 {
-                    exitPrice = signal.StopLoss;
+                    exitPrice = protectedStop;
                     exitTime = candle.OpenTime;
                     exitReason = "StopLoss";
                     exitIndex = ResolveSessionExitIndex(session, exitTime);
@@ -1751,6 +1757,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             exitPrice = candle.Close;
             exitTime = candle.OpenTime;
             exitIndex = ResolveSessionExitIndex(session, exitTime);
+            protectedStop = UpdateTurtleProtectedStop(candles, i, isShort, entryPrice, riskPerUnit, protectedStop);
         }
 
         var isOpenAtBacktestEnd = exitReason == "BacktestEnd";
@@ -1794,6 +1801,11 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
 
     private bool IsBacktestTurtleChannelExit(IReadOnlyList<Candle> candles, int index, StrategySide side)
     {
+        if (!_turtleOptions.UseChannelExit)
+        {
+            return false;
+        }
+
         var exitBars = Math.Max(
             _turtleOptions.ExitFastPeriod,
             _turtleOptions.ExitFastPeriod * ParseIntervalMinutes(_turtleOptions.Timeframe, 60) / 5);
@@ -1809,6 +1821,59 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         return side == StrategySide.Long
             ? exitLow > 0m && current.Close < exitLow
             : exitHigh > 0m && current.Close > exitHigh;
+    }
+
+    private decimal UpdateTurtleProtectedStop(
+        IReadOnlyList<Candle> candles,
+        int index,
+        bool isShort,
+        decimal entryPrice,
+        decimal riskPerUnit,
+        decimal currentStop)
+    {
+        if (!_turtleOptions.UseProfitLock || riskPerUnit <= 0m || index < 0 || index >= candles.Count)
+        {
+            return currentStop;
+        }
+
+        var current = candles[index];
+        var rMultiple = isShort
+            ? (entryPrice - current.Close) / riskPerUnit
+            : (current.Close - entryPrice) / riskPerUnit;
+        var nextStop = currentStop;
+        if (rMultiple >= _turtleOptions.BreakevenTriggerR)
+        {
+            nextStop = isShort
+                ? decimal.Min(nextStop, entryPrice)
+                : decimal.Max(nextStop, entryPrice);
+        }
+
+        if (rMultiple >= _turtleOptions.LockTriggerR)
+        {
+            var lockStop = isShort
+                ? entryPrice - riskPerUnit * _turtleOptions.LockProfitR
+                : entryPrice + riskPerUnit * _turtleOptions.LockProfitR;
+            nextStop = isShort
+                ? decimal.Min(nextStop, lockStop)
+                : decimal.Max(nextStop, lockStop);
+        }
+
+        if (_turtleOptions.UseTrailingAtrStop && rMultiple >= _turtleOptions.AtrTrailTriggerR)
+        {
+            var lookback = candles.Take(index + 1).ToArray();
+            var atr = TradingIndicatorMath.Atr(lookback, _turtleOptions.AtrPeriod);
+            if (atr > 0m)
+            {
+                var atrStop = isShort
+                    ? current.Close + atr * _turtleOptions.AtrTrailMultiplier
+                    : current.Close - atr * _turtleOptions.AtrTrailMultiplier;
+                nextStop = isShort
+                    ? decimal.Min(nextStop, atrStop)
+                    : decimal.Max(nextStop, atrStop);
+            }
+        }
+
+        return nextStop;
     }
 
     private static int ResolveSessionExitIndex(IReadOnlyList<Candle> session, DateTimeOffset exitTime)
@@ -1958,6 +2023,21 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
     private static bool IsOpenAtBacktestEnd(BacktestTradeInternal trade) =>
         string.Equals(trade.ExitReason, "BacktestEnd", StringComparison.OrdinalIgnoreCase);
 
+    private bool IsBacktestLiveEntryAllowed(StrategyCandidate candidate, DateTimeOffset signalTime, TimeZoneInfo nyZone) =>
+        IsLiveGateStrategyEnabled(candidate.StrategyName) &&
+        IsLiveHourAllowed(signalTime, nyZone);
+
+    private bool IsLiveHourAllowed(DateTimeOffset signalTime, TimeZoneInfo nyZone)
+    {
+        var allowedHours = ParseAllowedHours(_strategyRoutingOptions.LiveAllowedHours);
+        if (allowedHours.Count == 0)
+        {
+            return true;
+        }
+
+        return allowedHours.Contains(TimeZoneInfo.ConvertTime(signalTime, nyZone).Hour);
+    }
+
     private bool IsOosGateConfirmed(
         StrategyGatePerformance optimizationGate,
         IReadOnlyDictionary<string, StrategyGatePerformance> outOfSampleGates)
@@ -1971,8 +2051,17 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
     }
 
     private bool IsLiveGateStrategyEnabled(string strategyName) =>
-        !string.Equals(strategyName, NYSweepReversalStrategy.Name, StringComparison.OrdinalIgnoreCase) ||
-        _strategyRoutingOptions.NySweepLiveTradingEnabled;
+        string.Equals(strategyName, TurtleTrendStrategy.Name, StringComparison.OrdinalIgnoreCase) ||
+        (string.Equals(strategyName, NYSweepReversalStrategy.Name, StringComparison.OrdinalIgnoreCase) &&
+            _strategyRoutingOptions.NySweepLiveTradingEnabled);
+
+    private static IReadOnlySet<int> ParseAllowedHours(string value) =>
+        string.IsNullOrWhiteSpace(value)
+            ? new HashSet<int>()
+            : value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Select(part => int.TryParse(part, out var hour) ? hour : -1)
+                .Where(hour => hour is >= 0 and <= 23)
+                .ToHashSet();
 
     private static string BuildStrategyGateKey(string strategyName, string symbol, string direction) =>
         $"{NormalizeStrategyGateText(strategyName)}:{NormalizeStrategyGateSymbol(symbol)}:{NormalizeStrategyGateText(direction)}";
