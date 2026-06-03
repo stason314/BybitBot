@@ -28,7 +28,11 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
     private readonly IBybitRestClient _bybitRestClient;
     private readonly FuturesBacktestOptions _backtestOptions;
     private readonly ILogger<FuturesBacktestService> _logger;
+    private readonly ScoreBasedSignalEngine _scoreBasedSignalEngine;
+    private readonly StrategyPerformanceTracker _strategyPerformanceTracker;
     private readonly NySessionBreakoutOptions _strategyOptions;
+    private readonly StrategyRoutingOptions _strategyRoutingOptions;
+    private readonly TurtleTrendOptions _turtleOptions;
     private readonly object _sync = new();
     private CancellationTokenSource? _runCancellation;
     private FuturesBacktestStatusResponse _status = new();
@@ -37,11 +41,19 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         IBybitRestClient bybitRestClient,
         IOptions<FuturesBacktestOptions> backtestOptions,
         IOptions<NySessionBreakoutOptions> strategyOptions,
+        IOptions<StrategyRoutingOptions> strategyRoutingOptions,
+        IOptions<TurtleTrendOptions> turtleOptions,
+        ScoreBasedSignalEngine scoreBasedSignalEngine,
+        StrategyPerformanceTracker strategyPerformanceTracker,
         ILogger<FuturesBacktestService> logger)
     {
         _bybitRestClient = bybitRestClient;
         _backtestOptions = backtestOptions.Value;
         _strategyOptions = strategyOptions.Value;
+        _strategyRoutingOptions = strategyRoutingOptions.Value;
+        _turtleOptions = turtleOptions.Value;
+        _scoreBasedSignalEngine = scoreBasedSignalEngine;
+        _strategyPerformanceTracker = strategyPerformanceTracker;
         _logger = logger;
     }
 
@@ -237,6 +249,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
     {
         var fiveMinuteCandles = await FetchHistoricalCandlesAsync(symbol, FiveMinuteInterval, periodStart, periodEnd, cancellationToken);
         var fifteenMinuteCandles = await FetchHistoricalCandlesAsync(symbol, FifteenMinuteInterval, periodStart, periodEnd, cancellationToken);
+        var turtleCandles = await FetchHistoricalCandlesAsync(symbol, _turtleOptions.Timeframe, periodStart.AddDays(-10), periodEnd, cancellationToken);
         _ = await FetchHistoricalCandlesAsync(symbol, FourHourInterval, periodStart, periodEnd, cancellationToken);
         if (fiveMinuteCandles.Count < 500 || fifteenMinuteCandles.Count < 200)
         {
@@ -271,7 +284,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                 continue;
             }
 
-            BacktestDay(symbol, session, fifteenMinuteCandles, btc15m, settings, nyZone, trades, ref falseBreakoutCount, ref trueBreakoutBlockedCount);
+            BacktestDay(symbol, session, fiveMinuteCandles, fifteenMinuteCandles, turtleCandles, btc15m, settings, nyZone, trades, ref falseBreakoutCount, ref trueBreakoutBlockedCount);
         }
 
         return new SymbolBacktestOutput(symbol, trades, falseBreakoutCount, trueBreakoutBlockedCount);
@@ -288,7 +301,9 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
     private void BacktestDay(
         string symbol,
         IReadOnlyList<Candle> session,
+        IReadOnlyList<Candle> allFiveMinuteCandles,
         IReadOnlyList<Candle> fifteenMinuteCandles,
+        IReadOnlyList<Candle> turtleCandles,
         IReadOnlyList<Candle> btc15m,
         BacktestRunSettings settings,
         TimeZoneInfo nyZone,
@@ -310,6 +325,27 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             var candle = session[i];
             var ny = TimeZoneInfo.ConvertTime(candle.OpenTime, nyZone);
             var isRangeBuilding = ny.TimeOfDay < TimeSpan.FromHours(12);
+            if (_strategyRoutingOptions.SignalSelectionMode == SignalSelectionMode.ScoreBased)
+            {
+                var decision = BuildScoreBasedBacktestDecision(symbol, session, allFiveMinuteCandles, i, fifteenMinuteCandles, turtleCandles, btc15m, settings);
+                if (decision.IsTradeAllowed && decision.SelectedCandidate is not null)
+                {
+                    var scoreSignal = ToBacktestSignal(decision.SelectedCandidate, session, i);
+                    var trade = SimulateTrade(symbol, scoreSignal, session, i + 1, settings);
+                    trades.Add(trade);
+                    i = trade.ExitIndex;
+                    continue;
+                }
+
+                if (isRangeBuilding)
+                {
+                    upperBoundary = decimal.Max(upperBoundary, candle.High);
+                    lowerBoundary = decimal.Min(lowerBoundary, candle.Low);
+                }
+
+                continue;
+            }
+
             var signal = TryBuildSignal(
                 session,
                 i,
@@ -376,6 +412,116 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                 lowerBoundary = decimal.Min(lowerBoundary, candle.Low);
             }
         }
+    }
+
+    private StrategyDecision BuildScoreBasedBacktestDecision(
+        string symbol,
+        IReadOnlyList<Candle> session,
+        IReadOnlyList<Candle> allFiveMinuteCandles,
+        int index,
+        IReadOnlyList<Candle> fifteenMinuteCandles,
+        IReadOnlyList<Candle> turtleCandles,
+        IReadOnlyList<Candle> btc15m,
+        BacktestRunSettings settings)
+    {
+        var current = session[index];
+        var currentCloseTime = current.OpenTime.AddMinutes(5);
+        var fiveMinuteCandles = session.Take(index + 1).ToArray();
+        var range = BuildBacktestRange(session, allFiveMinuteCandles, index);
+        var turtleInterval = ParseIntervalMinutes(_turtleOptions.Timeframe, 60);
+        var context = new NyStrategyContext
+        {
+            Symbol = symbol,
+            FiveMinuteCandles = fiveMinuteCandles,
+            FifteenMinuteCandles = fifteenMinuteCandles
+                .Where(candle => candle.OpenTime.AddMinutes(15) <= currentCloseTime)
+                .OrderBy(candle => candle.OpenTime)
+                .ToArray(),
+            TurtleCandles = turtleCandles
+                .Where(candle => candle.OpenTime.AddMinutes(turtleInterval) <= currentCloseTime)
+                .OrderBy(candle => candle.OpenTime)
+                .ToArray(),
+            BtcFifteenMinuteCandles = btc15m
+                .Where(candle => candle.OpenTime.AddMinutes(15) <= currentCloseTime)
+                .OrderBy(candle => candle.OpenTime)
+                .ToArray(),
+            Range = range,
+            Now = currentCloseTime,
+            EntryNotionalUsdt = settings.EntryNotionalUsdt,
+            RewardRisk = _strategyOptions.RewardRisk
+        };
+
+        return _scoreBasedSignalEngine.Decide(context);
+    }
+
+    private NySessionRange BuildBacktestRange(
+        IReadOnlyList<Candle> session,
+        IReadOnlyList<Candle> allFiveMinuteCandles,
+        int index)
+    {
+        var sessionStart = session[0].OpenTime;
+        var rangeStart = sessionStart;
+        var rangeEnd = sessionStart.AddHours(4);
+        var currentTime = session[index].OpenTime.AddMinutes(5);
+        var currentCandles = session.Take(index + 1).ToArray();
+        var allClosed = allFiveMinuteCandles
+            .Where(candle => candle.OpenTime.AddMinutes(5) <= currentTime)
+            .OrderBy(candle => candle.OpenTime)
+            .ToArray();
+        var rangeCandles = _strategyRoutingOptions.NyRangeMode switch
+        {
+            NyRangeMode.LockedSessionRange => currentCandles
+                .Where(candle => candle.OpenTime < rangeEnd)
+                .DefaultIfEmpty(currentCandles[0])
+                .ToArray(),
+            NyRangeMode.PreSessionReferenceRange => allClosed
+                .Where(candle => candle.OpenTime >= rangeStart.AddHours(-4) && candle.OpenTime < rangeStart)
+                .DefaultIfEmpty(currentCandles[0])
+                .ToArray(),
+            _ => currentCandles.Where(candle => candle.OpenTime < rangeEnd).DefaultIfEmpty(currentCandles[0]).ToArray()
+        };
+
+        return new NySessionRange
+        {
+            Upper = rangeCandles.Max(candle => candle.High),
+            Lower = rangeCandles.Min(candle => candle.Low),
+            Mode = _strategyRoutingOptions.NyRangeMode,
+            RangeStartUtc = _strategyRoutingOptions.NyRangeMode == NyRangeMode.PreSessionReferenceRange ? rangeStart.AddHours(-4) : rangeStart,
+            RangeEndUtc = _strategyRoutingOptions.NyRangeMode == NyRangeMode.PreSessionReferenceRange ? rangeStart : rangeEnd
+        };
+    }
+
+    private static NySessionSignal ToBacktestSignal(StrategyCandidate candidate, IReadOnlyList<Candle> session, int index)
+    {
+        var intent = candidate.TradeIntent ?? throw new InvalidOperationException("Strategy candidate has no trade intent.");
+        var current = session[index];
+        var takeProfit = intent.TakeProfit ?? 0m;
+        var boundary = candidate.Side == StrategySide.Short
+            ? session.Take(index + 1).Max(candle => candle.High)
+            : session.Take(index + 1).Min(candle => candle.Low);
+        var stopDistancePercent = intent.EntryPrice > 0m
+            ? Math.Abs(intent.EntryPrice - intent.StopLoss) / intent.EntryPrice * 100m
+            : 0m;
+
+        return new NySessionSignal
+        {
+            Side = intent.Side.ToString(),
+            EntryPrice = intent.EntryPrice,
+            StopLoss = intent.StopLoss,
+            TakeProfit = takeProfit,
+            Boundary = boundary,
+            StopDistancePercent = stopDistancePercent,
+            Pattern = candidate.StrategyName,
+            BreakoutCandleOpenTime = current.OpenTime,
+            SignalCandleOpenTime = current.OpenTime,
+            BreakoutVolumeRatio = 1m,
+            Reason = $"{candidate.StrategyName}: score={candidate.Score:F0}, confidence={candidate.Confidence:F2}, {candidate.Reason}"
+        };
+    }
+
+    private static int ParseIntervalMinutes(string interval, int fallback)
+    {
+        return int.TryParse(interval, out var minutes) && minutes > 0 ? minutes : fallback;
     }
 
     private NySessionSignal? TryBuildSignal(
@@ -1329,10 +1475,13 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         var exitTime = session[^1].OpenTime;
         var exitReason = "SessionClose";
         var exitIndex = session.Count - 1;
+        var useTurtleChannelExit = string.Equals(signal.Pattern, TurtleTrendStrategy.Name, StringComparison.OrdinalIgnoreCase) &&
+            signal.TakeProfit <= 0m;
 
         for (var i = startIndex; i < session.Count; i++)
         {
             var candle = session[i];
+            var candlesSoFar = useTurtleChannelExit ? session.Take(i + 1).ToArray() : Array.Empty<Candle>();
             if (isShort)
             {
                 if (candle.High >= signal.StopLoss)
@@ -1344,11 +1493,20 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                     break;
                 }
 
-                if (candle.Low <= signal.TakeProfit)
+                if (signal.TakeProfit > 0m && candle.Low <= signal.TakeProfit)
                 {
                     exitPrice = signal.TakeProfit;
                     exitTime = candle.OpenTime;
                     exitReason = "TakeProfit";
+                    exitIndex = i;
+                    break;
+                }
+
+                if (useTurtleChannelExit && IsBacktestTurtleChannelExit(candlesSoFar, candle, StrategySide.Short))
+                {
+                    exitPrice = candle.Close;
+                    exitTime = candle.OpenTime;
+                    exitReason = "ChannelExit";
                     exitIndex = i;
                     break;
                 }
@@ -1364,11 +1522,20 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                     break;
                 }
 
-                if (candle.High >= signal.TakeProfit)
+                if (signal.TakeProfit > 0m && candle.High >= signal.TakeProfit)
                 {
                     exitPrice = signal.TakeProfit;
                     exitTime = candle.OpenTime;
                     exitReason = "TakeProfit";
+                    exitIndex = i;
+                    break;
+                }
+
+                if (useTurtleChannelExit && IsBacktestTurtleChannelExit(candlesSoFar, candle, StrategySide.Long))
+                {
+                    exitPrice = candle.Close;
+                    exitTime = candle.OpenTime;
+                    exitReason = "ChannelExit";
                     exitIndex = i;
                     break;
                 }
@@ -1408,6 +1575,20 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             rMultiple,
             exitReason,
             exitIndex);
+    }
+
+    private static bool IsBacktestTurtleChannelExit(IReadOnlyList<Candle> candles, Candle current, StrategySide side)
+    {
+        if (candles.Count < 12)
+        {
+            return false;
+        }
+
+        var exitLow = TradingIndicatorMath.DonchianLow(candles, 10);
+        var exitHigh = TradingIndicatorMath.DonchianHigh(candles, 10);
+        return side == StrategySide.Long
+            ? exitLow > 0m && current.Close < exitLow
+            : exitHigh > 0m && current.Close > exitHigh;
     }
 
     private FuturesBacktestResult BuildResult(
@@ -1457,7 +1638,9 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         var publicTrades = outOfSampleTrades.Select(ToPublicTrade).ToArray();
         return new FuturesBacktestResult
         {
-            StrategyName = "NY 08:00 4H Sweep Reversal + Engulfing + Pinbar + 3-Bar Continuation + 3-Bar Reversal + Breakout Candle + Shrinking Candles",
+            StrategyName = _strategyRoutingOptions.SignalSelectionMode == SignalSelectionMode.ScoreBased
+                ? "NY 08:00 Regime Router: Sweep Reversal + Turtle Trend + Breakout Retest with candle confirmations"
+                : "NY 08:00 4H Sweep Reversal + Engulfing + Pinbar + 3-Bar Continuation + 3-Bar Reversal + Breakout Candle + Shrinking Candles",
             PeriodStart = periodStart,
             PeriodEnd = periodEnd,
             SymbolsRequested = symbolsRequested,
@@ -1475,6 +1658,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             WorstSymbols = BuildSymbolPerformance(outOfSampleTrades).OrderBy(item => item.NetPnl).Take(10).ToArray(),
             LongShort = BuildSidePerformance(outOfSampleTrades),
             PatternPerformance = BuildBucketPerformance(outOfSampleTrades, trade => trade.Pattern),
+            StrategyPerformance = _strategyPerformanceTracker.Build(publicTrades),
             WeekdayPerformance = BuildBucketPerformance(outOfSampleTrades, trade => trade.EntryTime.DayOfWeek.ToString()),
             HourPerformance = BuildBucketPerformance(outOfSampleTrades, trade => TimeZoneInfo.ConvertTime(trade.EntryTime, ResolveNewYorkTimeZone()).Hour.ToString("00")),
             RecentTrades = publicTrades.OrderByDescending(trade => trade.EntryTime).Take(100).ToArray()
@@ -1577,6 +1761,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
     private static FuturesBacktestTrade ToPublicTrade(BacktestTradeInternal trade) => new()
     {
         Symbol = trade.Symbol,
+        StrategyName = trade.Pattern,
         Side = trade.Side,
         Pattern = trade.Pattern,
         EntryTime = trade.EntryTime,

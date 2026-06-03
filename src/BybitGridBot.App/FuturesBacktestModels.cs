@@ -72,6 +72,8 @@ public sealed class FuturesBacktestResult
 
     public IReadOnlyList<FuturesBacktestBucketPerformance> PatternPerformance { get; init; } = [];
 
+    public IReadOnlyList<StrategyPerformanceSnapshot> StrategyPerformance { get; init; } = [];
+
     public IReadOnlyList<FuturesBacktestBucketPerformance> WeekdayPerformance { get; init; } = [];
 
     public IReadOnlyList<FuturesBacktestBucketPerformance> HourPerformance { get; init; } = [];
@@ -144,6 +146,8 @@ public sealed class FuturesBacktestBucketPerformance
 public sealed class FuturesBacktestTrade
 {
     public string Symbol { get; init; } = string.Empty;
+
+    public string StrategyName { get; init; } = string.Empty;
 
     public string Side { get; init; } = string.Empty;
 

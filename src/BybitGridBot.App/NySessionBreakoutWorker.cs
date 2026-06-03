@@ -33,6 +33,9 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
     private readonly ILogger<NySessionBreakoutWorker> _logger;
     private readonly ITelegramNotifier _notifier;
     private readonly NySessionBreakoutOptions _options;
+    private readonly ScoreBasedSignalEngine _scoreBasedSignalEngine;
+    private readonly StrategyRoutingOptions _strategyRoutingOptions;
+    private readonly TurtleTrendOptions _turtleOptions;
     private readonly object _sync = new();
     private readonly Dictionary<string, NySessionPoolItem> _pool = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<int, string> _manualSlotSymbols = new();
@@ -49,9 +52,12 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
         IOptions<AppOptions> appOptions,
         IOptions<FuturesOptions> futuresOptions,
         IOptions<NySessionBreakoutOptions> options,
+        IOptions<StrategyRoutingOptions> strategyRoutingOptions,
+        IOptions<TurtleTrendOptions> turtleOptions,
         IFuturesBacktestService backtestService,
         IBybitRestClient bybitRestClient,
         FuturesExecutionService executionService,
+        ScoreBasedSignalEngine scoreBasedSignalEngine,
         IGridRepository repository,
         ITelegramNotifier notifier,
         ILogger<NySessionBreakoutWorker> logger)
@@ -60,8 +66,11 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
         _backtestService = backtestService;
         _futuresOptions = futuresOptions.Value;
         _options = options.Value;
+        _strategyRoutingOptions = strategyRoutingOptions.Value;
+        _turtleOptions = turtleOptions.Value;
         _bybitRestClient = bybitRestClient;
         _executionService = executionService;
+        _scoreBasedSignalEngine = scoreBasedSignalEngine;
         _repository = repository;
         _notifier = notifier;
         _logger = logger;
@@ -495,7 +504,9 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
             }
 
             var candles = await _bybitRestClient.GetKlinesAsync(Category, item.Symbol, FiveMinuteInterval, FiveMinuteLookback, cancellationToken);
-            var signal = TryFindSignal(candles, ResolveSessionAnchors(DateTimeOffset.UtcNow));
+            var signal = _strategyRoutingOptions.SignalSelectionMode == SignalSelectionMode.ScoreBased
+                ? await TryResolveScoreBasedSignalAsync(item, candles, cancellationToken)
+                : TryFindSignal(candles, ResolveSessionAnchors(DateTimeOffset.UtcNow));
             if (signal is null ||
                 IsSignalAlreadyHandled(item.Symbol, signal.SignalCandleOpenTime) ||
                 await HasOpeningOrderAfterSignalAsync(item.Symbol, signal.SignalCandleOpenTime, cancellationToken))
@@ -518,7 +529,14 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
                 continue;
             }
 
-            var filter = await EvaluateEntryFiltersAsync(item.Symbol, signal, candles, cancellationToken);
+            var filter = IsScoreBasedStrategySignal(signal)
+                ? new NySessionEntryFilterResult
+                {
+                    IsAllowed = true,
+                    Mode = signal.Pattern,
+                    Reason = signal.Reason
+                }
+                : await EvaluateEntryFiltersAsync(item.Symbol, signal, candles, cancellationToken);
             if (!filter.IsAllowed)
             {
                 MarkSignalHandled(item.Symbol, signal.SignalCandleOpenTime);
@@ -547,6 +565,125 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
         }
     }
 
+    private static bool IsScoreBasedStrategySignal(NySessionSignal signal) =>
+        string.Equals(signal.Pattern, NYSweepReversalStrategy.Name, StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(signal.Pattern, TurtleTrendStrategy.Name, StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(signal.Pattern, BreakoutRetestStrategy.Name, StringComparison.OrdinalIgnoreCase);
+
+    private async Task<NySessionSignal?> TryResolveScoreBasedSignalAsync(
+        NySessionPoolItem item,
+        IReadOnlyList<Candle> fiveMinuteCandles,
+        CancellationToken cancellationToken)
+    {
+        var anchors = ResolveSessionAnchors(DateTimeOffset.UtcNow);
+        var closedAll5m = fiveMinuteCandles
+            .Where(candle => candle.OpenTime.AddMinutes(5) <= DateTimeOffset.UtcNow)
+            .OrderBy(candle => candle.OpenTime)
+            .ToArray();
+        var closed5m = closedAll5m
+            .Where(candle => candle.OpenTime >= anchors.SessionStartUtc)
+            .ToArray();
+        if (closed5m.Length < 2)
+        {
+            return null;
+        }
+
+        var range = ResolveNySessionRange(closedAll5m, anchors, _strategyRoutingOptions.NyRangeMode);
+        var fifteenMinuteCandles = await _bybitRestClient.GetKlinesAsync(Category, item.Symbol, FifteenMinuteInterval, FifteenMinuteLookback, cancellationToken);
+        var turtleCandles = await _bybitRestClient.GetKlinesAsync(Category, item.Symbol, _turtleOptions.Timeframe, 140, cancellationToken);
+        var btcCandles = await _bybitRestClient.GetKlinesAsync(Category, "BTCUSDT", FifteenMinuteInterval, FifteenMinuteLookback, cancellationToken);
+        var decision = _scoreBasedSignalEngine.Decide(new NyStrategyContext
+        {
+            Symbol = item.Symbol,
+            FiveMinuteCandles = closed5m,
+            FifteenMinuteCandles = fifteenMinuteCandles
+                .Where(candle => candle.OpenTime.AddMinutes(15) <= DateTimeOffset.UtcNow)
+                .OrderBy(candle => candle.OpenTime)
+                .ToArray(),
+            TurtleCandles = turtleCandles
+                .Where(candle => candle.OpenTime.AddMinutes(ParseIntervalMinutes(_turtleOptions.Timeframe)) <= DateTimeOffset.UtcNow)
+                .OrderBy(candle => candle.OpenTime)
+                .ToArray(),
+            BtcFifteenMinuteCandles = btcCandles
+                .Where(candle => candle.OpenTime.AddMinutes(15) <= DateTimeOffset.UtcNow)
+                .OrderBy(candle => candle.OpenTime)
+                .ToArray(),
+            Range = range,
+            EntryNotionalUsdt = _options.EntryNotionalUsdt,
+            RewardRisk = _options.RewardRisk
+        });
+
+        if (!decision.IsTradeAllowed || decision.SelectedCandidate?.TradeIntent is null)
+        {
+            AddEvent(item.Symbol, "info", $"{decision.SelectedStrategy}: {decision.Reason}");
+            return null;
+        }
+
+        AddEvent(
+            item.Symbol,
+            "info",
+            $"{decision.SelectedStrategy} selected. Score={decision.SelectedCandidate.Score:F2}, confidence={decision.SelectedCandidate.Confidence:F2}. {decision.Reason}");
+        return ToNySessionSignal(decision.SelectedCandidate, range);
+    }
+
+    private NySessionRange ResolveNySessionRange(
+        IReadOnlyList<Candle> closed5m,
+        SessionAnchors anchors,
+        NyRangeMode mode)
+    {
+        var rangeCandles = mode switch
+        {
+            NyRangeMode.PreSessionReferenceRange => closed5m
+                .Where(candle => candle.OpenTime >= anchors.RangeStartUtc.AddHours(-4) && candle.OpenTime < anchors.RangeStartUtc)
+                .ToArray(),
+            NyRangeMode.LockedSessionRange => closed5m
+                .Where(candle => candle.OpenTime >= anchors.RangeStartUtc && candle.OpenTime < anchors.RangeEndUtc)
+                .ToArray(),
+            _ => closed5m
+                .Where(candle => candle.OpenTime >= anchors.RangeStartUtc && candle.OpenTime < DateTimeOffset.UtcNow)
+                .ToArray()
+        };
+
+        if (rangeCandles.Length == 0)
+        {
+            rangeCandles = closed5m.Take(1).ToArray();
+        }
+
+        return new NySessionRange
+        {
+            Upper = rangeCandles.Max(candle => candle.High),
+            Lower = rangeCandles.Min(candle => candle.Low),
+            Mode = mode,
+            RangeStartUtc = mode == NyRangeMode.PreSessionReferenceRange ? anchors.RangeStartUtc.AddHours(-4) : anchors.RangeStartUtc,
+            RangeEndUtc = mode == NyRangeMode.PreSessionReferenceRange ? anchors.RangeStartUtc : anchors.RangeEndUtc
+        };
+    }
+
+    private static int ParseIntervalMinutes(string interval) =>
+        int.TryParse(interval, out var minutes) ? minutes : 60;
+
+    private static NySessionSignal ToNySessionSignal(StrategyCandidate candidate, NySessionRange range)
+    {
+        var intent = candidate.TradeIntent ?? throw new InvalidOperationException("Selected candidate has no trade intent.");
+        var risk = Math.Abs(intent.EntryPrice - intent.StopLoss);
+        return new NySessionSignal
+        {
+            Pattern = candidate.StrategyName,
+            Side = candidate.Side == StrategySide.Short ? "Short" : "Long",
+            SignalCandleOpenTime = candidate.CreatedAt,
+            BreakoutCandleOpenTime = candidate.CreatedAt,
+            Boundary = candidate.Side == StrategySide.Short ? range.Upper : range.Lower,
+            RangeHigh = range.Upper,
+            RangeLow = range.Lower,
+            EntryPrice = intent.EntryPrice,
+            SweepExtreme = intent.StopLoss,
+            StopLoss = intent.StopLoss,
+            TakeProfit = intent.TakeProfit ?? 0m,
+            StopDistancePercent = intent.EntryPrice > 0m ? risk / intent.EntryPrice * 100m : 0m,
+            Reason = candidate.Reason
+        };
+    }
+
     private async Task ProcessPaperStopsAsync(
         IReadOnlyCollection<NySessionPoolItem> pool,
         IReadOnlyDictionary<string, BybitInstrumentInfo> instruments,
@@ -570,12 +707,12 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
                 .Where(order => order.Action is FuturesTradeAction.OpenLong or FuturesTradeAction.OpenShort)
                 .OrderByDescending(order => order.CreatedAt)
                 .FirstOrDefault();
-            if (entryOrder is null || entryOrder.StopLossPrice <= 0m || entryOrder.TakeProfitPrice <= 0m)
+            if (entryOrder is null || entryOrder.StopLossPrice <= 0m)
             {
                 continue;
             }
 
-            var candles = await _bybitRestClient.GetKlinesAsync(Category, item.Symbol, FiveMinuteInterval, 3, cancellationToken);
+            var candles = await _bybitRestClient.GetKlinesAsync(Category, item.Symbol, FiveMinuteInterval, 80, cancellationToken);
             var lastClosed = candles
                 .Where(candle => candle.OpenTime.AddMinutes(5) <= DateTimeOffset.UtcNow)
                 .OrderBy(candle => candle.OpenTime)
@@ -585,7 +722,7 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
                 continue;
             }
 
-            var exitPrice = ResolvePaperExitPrice(position, entryOrder, lastClosed);
+            var exitPrice = ResolvePaperExitPrice(position, entryOrder, candles, lastClosed);
             if (exitPrice is null)
             {
                 continue;
@@ -622,11 +759,15 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
                 MarkPrice = intent.Price,
                 Instrument = instrument
             }, cancellationToken);
-            AddEvent(item.Symbol, "trade", $"Paper position closed at {intent.Price} by SL/TP.");
+            AddEvent(item.Symbol, "trade", $"Paper position closed at {intent.Price} by SL/TP/channel.");
         }
     }
 
-    private static decimal? ResolvePaperExitPrice(FuturesPositionSnapshot position, FuturesOrderRecord entryOrder, Candle candle)
+    private static decimal? ResolvePaperExitPrice(
+        FuturesPositionSnapshot position,
+        FuturesOrderRecord entryOrder,
+        IReadOnlyList<Candle> candles,
+        Candle candle)
     {
         if (IsShort(position.Side))
         {
@@ -635,9 +776,14 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
                 return entryOrder.StopLossPrice;
             }
 
-            if (candle.Low <= entryOrder.TakeProfitPrice)
+            if (entryOrder.TakeProfitPrice > 0m && candle.Low <= entryOrder.TakeProfitPrice)
             {
                 return entryOrder.TakeProfitPrice;
+            }
+
+            if (entryOrder.TakeProfitPrice <= 0m && IsTurtleChannelExit(candles, candle, StrategySide.Short))
+            {
+                return candle.Close;
             }
         }
         else
@@ -647,13 +793,36 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
                 return entryOrder.StopLossPrice;
             }
 
-            if (candle.High >= entryOrder.TakeProfitPrice)
+            if (entryOrder.TakeProfitPrice > 0m && candle.High >= entryOrder.TakeProfitPrice)
             {
                 return entryOrder.TakeProfitPrice;
+            }
+
+            if (entryOrder.TakeProfitPrice <= 0m && IsTurtleChannelExit(candles, candle, StrategySide.Long))
+            {
+                return candle.Close;
             }
         }
 
         return null;
+    }
+
+    private static bool IsTurtleChannelExit(IReadOnlyList<Candle> candles, Candle current, StrategySide side)
+    {
+        var closed = candles
+            .Where(candle => candle.OpenTime <= current.OpenTime)
+            .OrderBy(candle => candle.OpenTime)
+            .ToArray();
+        if (closed.Length < 12)
+        {
+            return false;
+        }
+
+        var exitLow = TradingIndicatorMath.DonchianLow(closed, 10);
+        var exitHigh = TradingIndicatorMath.DonchianHigh(closed, 10);
+        return side == StrategySide.Long
+            ? exitLow > 0m && current.Close < exitLow
+            : exitHigh > 0m && current.Close > exitHigh;
     }
 
     private async Task<NySessionEntryFilterResult> EvaluateEntryFiltersAsync(
@@ -2301,7 +2470,7 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
         var quantity = ResolveEntryQuantity(_options.EntryNotionalUsdt, price, instrument);
         var action = signal.Side == "Short" ? FuturesTradeAction.OpenShort : FuturesTradeAction.OpenLong;
         var stopLoss = instrument.RoundPrice(signal.StopLoss);
-        var takeProfit = instrument.RoundPrice(signal.TakeProfit);
+        var takeProfit = signal.TakeProfit > 0m ? instrument.RoundPrice(signal.TakeProfit) : (decimal?)null;
 
         return new FuturesTradeIntent
         {
@@ -2327,6 +2496,9 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
                 "3-Bar Reversal" => "ny-session-3-bar-reversal",
                 "Breakout Candle" => "ny-session-breakout-candle",
                 "Shrinking Candles" => "ny-session-shrinking-candles",
+                NYSweepReversalStrategy.Name => "ny-score-sweep-reversal",
+                TurtleTrendStrategy.Name => "ny-score-turtle-trend",
+                BreakoutRetestStrategy.Name => "ny-score-breakout-retest",
                 _ => "ny-session-4h-sweep-reclaim"
             }
         };

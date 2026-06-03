@@ -141,6 +141,10 @@ public static class FuturesBacktestPage
         <table><thead><tr><th>Side</th><th>Trades</th><th>PnL</th><th>Avg R</th></tr></thead><tbody id="sides"><tr><td colspan="4" class="empty">Нет данных</td></tr></tbody></table>
       </div>
       <div class="panel">
+        <h2>Strategy performance</h2>
+        <table><thead><tr><th>Strategy</th><th>Trades</th><th>PnL</th><th>PF</th></tr></thead><tbody id="strategies"><tr><td colspan="4" class="empty">Нет данных</td></tr></tbody></table>
+      </div>
+      <div class="panel">
         <h2>Pattern performance</h2>
         <table><thead><tr><th>Pattern</th><th>Trades</th><th>PnL</th><th>WR</th></tr></thead><tbody id="patterns"><tr><td colspan="4" class="empty">Нет данных</td></tr></tbody></table>
       </div>
@@ -221,6 +225,7 @@ public static class FuturesBacktestPage
       byId('best').innerHTML = perfRows(result.bestSymbols || [], 'symbol');
       byId('worst').innerHTML = perfRows(result.worstSymbols || [], 'symbol');
       byId('sides').innerHTML = sideRows(result.longShort || []);
+      byId('strategies').innerHTML = strategyRows(result.strategyPerformance || []);
       byId('patterns').innerHTML = perfRows(result.patternPerformance || [], 'bucket');
       byId('weekdays').innerHTML = perfRows(result.weekdayPerformance || [], 'bucket');
       byId('hours').innerHTML = perfRows(result.hourPerformance || [], 'bucket');
@@ -315,6 +320,7 @@ public static class FuturesBacktestPage
         tableBlock('BEST_SYMBOLS', result.bestSymbols || []),
         tableBlock('WORST_SYMBOLS', result.worstSymbols || []),
         tableBlock('LONG_SHORT', result.longShort || []),
+        tableBlock('STRATEGY_PERFORMANCE', result.strategyPerformance || []),
         tableBlock('PATTERN', result.patternPerformance || []),
         tableBlock('WEEKDAY', result.weekdayPerformance || []),
         tableBlock('HOUR_NY', result.hourPerformance || []),
@@ -348,6 +354,16 @@ public static class FuturesBacktestPage
           <td>${item.trades || 0}</td>
           <td class="${cls(item.netPnl)}">${pnl(item.netPnl)}</td>
           <td>${fmt.format(item.averageR || 0)}</td>
+        </tr>`).join('') : '<tr><td colspan="4" class="empty">Нет данных</td></tr>';
+    }
+
+    function strategyRows(items) {
+      return items.length ? items.map(item => `
+        <tr>
+          <td>${item.strategyName || '-'}</td>
+          <td>${item.tradesCount || 0}</td>
+          <td class="${cls(item.netPnl)}">${pnl(item.netPnl)}</td>
+          <td>${fmt.format(item.profitFactor || 0)}</td>
         </tr>`).join('') : '<tr><td colspan="4" class="empty">Нет данных</td></tr>';
     }
 

@@ -42,6 +42,8 @@ builder.Services.AddOptions<TelegramOptions>().Bind(builder.Configuration);
 builder.Services.AddOptions<RotationOptions>().Bind(builder.Configuration);
 builder.Services.AddOptions<NySessionBreakoutOptions>().Bind(builder.Configuration);
 builder.Services.AddOptions<FuturesBacktestOptions>().Bind(builder.Configuration);
+builder.Services.AddOptions<StrategyRoutingOptions>().Bind(builder.Configuration);
+builder.Services.AddOptions<TurtleTrendOptions>().Bind(builder.Configuration);
 
 builder.Services.AddSingleton<BybitSigner>();
 builder.Services.AddSingleton<BybitUserStreamTelemetry>();
@@ -82,16 +84,32 @@ builder.Services.AddSingleton<FuturesStrategyRouter>();
 builder.Services.AddSingleton<FuturesStrategyFitAnalyzer>();
 builder.Services.AddSingleton<StrategyRouter>();
 builder.Services.AddSingleton<CapitalAllocator>();
-builder.Services.AddSingleton<ConflictResolver>();
+builder.Services.AddSingleton<BybitGridBot.Strategy.ConflictResolver>();
 builder.Services.AddSingleton<BreakoutStrategy>();
 builder.Services.AddSingleton<TrendFollowingStrategy>();
-builder.Services.AddSingleton<PauseStrategy>();
+builder.Services.AddSingleton<BybitGridBot.Strategy.PauseStrategy>();
 builder.Services.AddSingleton<IGridDashboardService, GridDashboardService>();
 builder.Services.AddSingleton<IFuturesDashboardService, FuturesDashboardService>();
 builder.Services.AddSingleton<IMarketScannerService, MarketScannerService>();
 builder.Services.AddSingleton<IFuturesMarketScannerService, FuturesMarketScannerService>();
 builder.Services.AddSingleton<IRotationManagerService, RotationManagerService>();
 builder.Services.AddSingleton<NySessionBreakoutWorker>();
+builder.Services.AddSingleton(serviceProvider => new PatternConfirmationEngine(
+    serviceProvider.GetRequiredService<IOptions<NySessionBreakoutOptions>>().Value));
+builder.Services.AddSingleton(serviceProvider => new BreakoutClassifier(
+    serviceProvider.GetRequiredService<IOptions<NySessionBreakoutOptions>>().Value,
+    serviceProvider.GetRequiredService<IOptions<TurtleTrendOptions>>().Value));
+builder.Services.AddSingleton(serviceProvider => new NYSweepReversalStrategy(
+    serviceProvider.GetRequiredService<IOptions<NySessionBreakoutOptions>>().Value,
+    serviceProvider.GetRequiredService<PatternConfirmationEngine>()));
+builder.Services.AddSingleton(serviceProvider => new TurtleTrendStrategy(
+    serviceProvider.GetRequiredService<IOptions<TurtleTrendOptions>>().Value,
+    serviceProvider.GetRequiredService<PatternConfirmationEngine>()));
+builder.Services.AddSingleton<BreakoutRetestStrategy>();
+builder.Services.AddSingleton<StrategyPerformanceTracker>();
+builder.Services.AddSingleton(serviceProvider => new NyStrategyRouter(
+    serviceProvider.GetRequiredService<IOptions<StrategyRoutingOptions>>().Value));
+builder.Services.AddSingleton<ScoreBasedSignalEngine>();
 builder.Services.AddSingleton<INySessionBreakoutRuntime>(serviceProvider => serviceProvider.GetRequiredService<NySessionBreakoutWorker>());
 builder.Services.AddSingleton<IFuturesBacktestService, FuturesBacktestService>();
 

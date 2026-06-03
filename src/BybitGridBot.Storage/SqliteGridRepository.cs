@@ -283,6 +283,108 @@ public sealed class SqliteGridRepository : IGridRepository
                 created_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS strategy_candidates (
+                candidate_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                strategy_name TEXT NOT NULL,
+                side TEXT NOT NULL,
+                score TEXT NOT NULL,
+                confidence TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                trade_intent_json TEXT NOT NULL,
+                pattern_confirmations_json TEXT NOT NULL,
+                rejection_reason TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS strategy_conflicts (
+                conflict_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                first_strategy TEXT NOT NULL,
+                first_side TEXT NOT NULL,
+                first_score TEXT NOT NULL,
+                second_strategy TEXT NOT NULL,
+                second_side TEXT NOT NULL,
+                second_score TEXT NOT NULL,
+                resolution TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS pattern_signals (
+                pattern_signal_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                pattern_name TEXT NOT NULL,
+                side TEXT NOT NULL,
+                strength TEXT NOT NULL,
+                confidence TEXT NOT NULL,
+                candle_time TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS strategy_symbol_performance (
+                symbol TEXT NOT NULL,
+                strategy_name TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                gross_pnl TEXT NOT NULL,
+                fees TEXT NOT NULL,
+                net_pnl TEXT NOT NULL,
+                unrealized_pnl TEXT NOT NULL,
+                realized_pnl TEXT NOT NULL,
+                win_rate TEXT NOT NULL,
+                profit_factor TEXT NOT NULL,
+                average_r TEXT NOT NULL,
+                max_drawdown TEXT NOT NULL,
+                trades_count INTEGER NOT NULL,
+                long_trades INTEGER NOT NULL,
+                short_trades INTEGER NOT NULL,
+                average_win TEXT NOT NULL,
+                average_loss TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(symbol, strategy_name, direction)
+            );
+
+            CREATE TABLE IF NOT EXISTS shadow_trades (
+                shadow_trade_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                strategy_name TEXT NOT NULL,
+                side TEXT NOT NULL,
+                entry_price TEXT NOT NULL,
+                stop_loss TEXT NOT NULL,
+                take_profit TEXT NULL,
+                exit_price TEXT NULL,
+                net_pnl TEXT NOT NULL DEFAULT '0',
+                r_multiple TEXT NOT NULL DEFAULT '0',
+                status TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                opened_at TEXT NOT NULL,
+                closed_at TEXT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS turtle_channels (
+                channel_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                timeframe TEXT NOT NULL,
+                entry_high TEXT NOT NULL,
+                entry_low TEXT NOT NULL,
+                exit_high TEXT NOT NULL,
+                exit_low TEXT NOT NULL,
+                atr TEXT NOT NULL,
+                adx TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS turtle_exits (
+                turtle_exit_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                side TEXT NOT NULL,
+                exit_mode TEXT NOT NULL,
+                exit_level TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS strategy_decisions (
                 decision_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 symbol TEXT NOT NULL,

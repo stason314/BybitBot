@@ -122,6 +122,83 @@ Cross margin and hedge mode are deliberately rejected by the futures API until t
 Shorts are paper-only by default and can be enabled on testnet only with `FUTURES_TESTNET_SHORTS_ENABLED=true`.
 Mainnet order placement requires both `FUTURES_MAINNET_ENABLED=true` and `FUTURES_MAINNET_ORDER_PLACEMENT_ENABLED=true` plus the checklist flags.
 
+## NY Futures Regime Router
+
+The futures NY session bot no longer treats every candle pattern as a standalone mini-strategy when `SIGNAL_SELECTION_MODE=ScoreBased`.
+It builds strategy candidates, scores them, resolves conflicts, and opens a trade only when score and confidence are high enough.
+
+- `NYSweepReversalStrategy`: mean-reversion after a false breakout of the NY 08:00 range. It keeps fixed `TP = NY_SESSION_REWARD_RISK`, usually 2R.
+- `TurtleTrendStrategy`: trend continuation after a true breakout. It uses Donchian breakout plus ATR stop and does not use fixed 2R take-profit by default.
+- `BreakoutRetestStrategy`: MVP continuation candidate when a true breakout retests the boundary.
+- `PauseStrategy`: selected when there is no clean trade, scores are low, confidence is low, or Sweep and Turtle conflict.
+
+Sweep and Turtle are deliberately opposite regimes:
+
+- Sweep: price leaves the boundary, comes back inside, and the bot trades the return.
+- Turtle: price closes outside the boundary, holds outside, and the bot trades continuation.
+
+Candlestick patterns are confirmations, not separate priority entries, in score-based mode:
+
+- `Engulfing`
+- `Pinbar`
+- `3-Bar Continuation`
+- `3-Bar Reversal`
+- `Breakout Candle`
+- `Shrinking Candles`
+- `Momentum Candle`
+
+`PatternConfirmationEngine` returns pattern signals with side, strength, confidence, candle time, and reason. Those signals modify strategy scores. For example, bearish engulfing after an upper sweep increases Sweep short score, while a bullish momentum breakout increases Turtle long score.
+
+`BreakoutClassifier` classifies the current boundary event as:
+
+- `FalseBreakout`: boosts Sweep and reduces Turtle.
+- `TrueBreakout`: blocks or weakens Sweep against the breakout and boosts Turtle.
+- `Unclear`: Router pauses unless another candidate is strong enough.
+
+`NyStrategyRouter` uses these defaults:
+
+```env
+SIGNAL_SELECTION_MODE=ScoreBased
+STRATEGY_MIN_SCORE=75
+STRATEGY_MIN_CONFIDENCE=0.65
+MIN_SCORE_DIFFERENCE=15
+ALLOW_CONFLICTED_SIGNALS=false
+NY_RANGE_MODE=DynamicSessionRange
+```
+
+`NY_RANGE_MODE` supports:
+
+- `DynamicSessionRange`: 08:00-12:00 NY range updates while it forms.
+- `LockedSessionRange`: the 08:00-12:00 NY range is fixed after 12:00.
+- `PreSessionReferenceRange`: uses the closed 04:00-08:00 NY candle as reference.
+
+Turtle defaults:
+
+```env
+TURTLE_ENABLED=true
+TURTLE_TIMEFRAME=60
+TURTLE_ENTRY_FAST_PERIOD=20
+TURTLE_ENTRY_SLOW_PERIOD=55
+TURTLE_EXIT_FAST_PERIOD=10
+TURTLE_EXIT_SLOW_PERIOD=20
+TURTLE_ATR_PERIOD=20
+TURTLE_STOP_ATR_MULTIPLIER=2.0
+TURTLE_MIN_ADX=22
+TURTLE_REQUIRE_VOLUME_CONFIRMATION=true
+TURTLE_VOLUME_MULTIPLIER=1.3
+TURTLE_USE_BTC_FILTER=true
+TURTLE_USE_FIXED_TP=false
+TURTLE_USE_CHANNEL_EXIT=true
+TURTLE_USE_TRAILING_ATR_STOP=true
+TURTLE_USE_PYRAMIDING=false
+TURTLE_RISK_PER_UNIT_PERCENT=0.25
+MAX_OPEN_TURTLE_POSITIONS=3
+```
+
+Backtest at `/futures/backtest` tests the score-based regime router when `SIGNAL_SELECTION_MODE=ScoreBased`. The diagnostics button copies the run configuration, walk-forward metrics, symbol results, long/short results, pattern buckets, strategy performance, and recent trades.
+
+SQLite initializes tables for strategy decisions, candidates, conflicts, pattern signals, strategy performance, shadow trades, Turtle channels, and Turtle exits. This is the foundation for strategy+symbol+direction gating and shadow trading analysis.
+
 Testnet rollout checklist:
 
 1. Run futures profiles in `/futures` and confirm position sync works.
