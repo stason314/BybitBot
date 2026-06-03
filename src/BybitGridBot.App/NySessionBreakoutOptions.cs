@@ -46,6 +46,13 @@ public sealed class NySessionBreakoutOptions
     [ConfigurationKeyName("NY_SESSION_ALLOW_SHORTS")]
     public bool AllowShorts { get; init; } = true;
 
+    [ConfigurationKeyName("NY_SESSION_ENGULFING_ENABLED")]
+    public bool EngulfingEnabled { get; init; } = true;
+
+    [ConfigurationKeyName("NY_SESSION_MIN_ENGULFING_BODY_RATIO")]
+    [Range(typeof(decimal), "1", "100")]
+    public decimal MinEngulfingBodyRatio { get; init; } = 1.05m;
+
     [ConfigurationKeyName("NY_SESSION_MAX_OPEN_POSITIONS")]
     [Range(1, 100)]
     public int MaxOpenPositions { get; init; } = 5;

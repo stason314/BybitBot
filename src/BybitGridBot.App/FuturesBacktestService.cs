@@ -66,7 +66,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             _status = new FuturesBacktestStatusResponse
             {
                 IsRunning = true,
-                Status = "Starting 4H NY sweep/reversal backtest",
+                Status = "Starting 4H NY sweep/engulfing backtest",
                 StartedAt = DateTimeOffset.UtcNow,
                 ProgressPercent = 0m
             };
@@ -311,7 +311,11 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
 
             if (signal is not null)
             {
-                falseBreakoutCount++;
+                if (!string.Equals(signal.Pattern, "Engulfing", StringComparison.OrdinalIgnoreCase))
+                {
+                    falseBreakoutCount++;
+                }
+
                 var filter = EvaluateBacktestFilters(signal, session.Take(i + 1).ToArray(), fifteenMinuteCandles, btc15m);
                 if (filter.IsTrueBreakoutBlocked)
                 {
@@ -433,7 +437,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             }
         }
 
-        return null;
+        return TryFindEngulfingSignal(session.Take(index + 1).ToArray(), upperBoundary, lowerBoundary);
     }
 
     private NySessionSignal BuildSignal(
@@ -446,7 +450,9 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         decimal entryPrice,
         decimal sweepExtreme,
         string reason,
-        IReadOnlyList<Candle> candles)
+        IReadOnlyList<Candle> candles,
+        string pattern = "Sweep Reversal",
+        decimal bodyRatio = 0m)
     {
         var risk = Math.Abs(sweepExtreme - entryPrice);
         var takeProfit = side == "Short"
@@ -454,6 +460,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             : entryPrice + risk * _strategyOptions.RewardRisk;
         return new NySessionSignal
         {
+            Pattern = pattern,
             Side = side,
             SignalCandleOpenTime = signalCandleOpenTime,
             BreakoutCandleOpenTime = breakoutCandleOpenTime,
@@ -469,8 +476,87 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             StopDistancePercent = entryPrice > 0m ? risk / entryPrice * 100m : 0m,
             MidlineRoomR = CalculateMidlineRoomR(side, rangeHigh, rangeLow, entryPrice, risk),
             BreakoutVolumeRatio = CalculateBreakoutVolumeRatio(candles, breakoutCandleOpenTime),
+            BodyRatio = bodyRatio,
             Reason = reason
         };
+    }
+
+    private NySessionSignal? TryFindEngulfingSignal(
+        IReadOnlyList<Candle> closed,
+        decimal upperBoundary,
+        decimal lowerBoundary)
+    {
+        if (!_strategyOptions.EngulfingEnabled || closed.Count < 2 || upperBoundary <= lowerBoundary)
+        {
+            return null;
+        }
+
+        var previous = closed[^2];
+        var current = closed[^1];
+        if (!IsInsideRange(previous.Close, upperBoundary, lowerBoundary) ||
+            !IsInsideRange(current.Close, upperBoundary, lowerBoundary))
+        {
+            return null;
+        }
+
+        var previousBody = Math.Abs(previous.Close - previous.Open);
+        var currentBody = Math.Abs(current.Close - current.Open);
+        if (previousBody <= 0m || currentBody < previousBody * _strategyOptions.MinEngulfingBodyRatio)
+        {
+            return null;
+        }
+
+        var bullish = previous.Close < previous.Open &&
+            current.Close > current.Open &&
+            current.Open <= previous.Close &&
+            current.Close >= previous.Open;
+        if (bullish)
+        {
+            var risk = current.Close - current.Low;
+            if (risk > 0m)
+            {
+                return BuildSignal(
+                    "Long",
+                    current.OpenTime,
+                    current.OpenTime,
+                    lowerBoundary,
+                    upperBoundary,
+                    lowerBoundary,
+                    current.Close,
+                    current.Low,
+                    "Bullish engulfing inside the active 4H range.",
+                    closed,
+                    "Engulfing",
+                    currentBody / previousBody);
+            }
+        }
+
+        var bearish = previous.Close > previous.Open &&
+            current.Close < current.Open &&
+            current.Open >= previous.Close &&
+            current.Close <= previous.Open;
+        if (bearish)
+        {
+            var risk = current.High - current.Close;
+            if (risk > 0m)
+            {
+                return BuildSignal(
+                    "Short",
+                    current.OpenTime,
+                    current.OpenTime,
+                    upperBoundary,
+                    upperBoundary,
+                    lowerBoundary,
+                    current.Close,
+                    current.High,
+                    "Bearish engulfing inside the active 4H range.",
+                    closed,
+                    "Engulfing",
+                    currentBody / previousBody);
+            }
+        }
+
+        return null;
     }
 
     private BacktestFilterResult EvaluateBacktestFilters(
@@ -479,6 +565,11 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         IReadOnlyList<Candle> fifteenMinuteCandles,
         IReadOnlyList<Candle> btc15m)
     {
+        if (string.Equals(signal.Pattern, "Engulfing", StringComparison.OrdinalIgnoreCase))
+        {
+            return EvaluateEngulfingBacktestFilters(signal, btc15m);
+        }
+
         if (signal.SweepDepthPercent < _strategyOptions.MinSweepDepthPercent)
         {
             return new BacktestFilterResult(false, false);
@@ -510,6 +601,29 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         }
 
         if (signal.BreakoutVolumeRatio >= _strategyOptions.HighBreakoutVolumeRatio)
+        {
+            return new BacktestFilterResult(false, false);
+        }
+
+        var btc15mSoFar = btc15m
+            .Where(candle => candle.OpenTime.AddMinutes(15) <= signal.SignalCandleOpenTime.AddMinutes(5))
+            .OrderBy(candle => candle.OpenTime)
+            .ToArray();
+        if (IsBtcTrendAgainstSignal(signal.Side, btc15mSoFar))
+        {
+            return new BacktestFilterResult(false, false);
+        }
+
+        return new BacktestFilterResult(true, false);
+    }
+
+    private BacktestFilterResult EvaluateEngulfingBacktestFilters(
+        NySessionSignal signal,
+        IReadOnlyList<Candle> btc15m)
+    {
+        if (!_strategyOptions.EngulfingEnabled ||
+            signal.BodyRatio < _strategyOptions.MinEngulfingBodyRatio ||
+            signal.StopDistancePercent > _strategyOptions.MaxStopPercent)
         {
             return new BacktestFilterResult(false, false);
         }
@@ -711,7 +825,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         var publicTrades = outOfSampleTrades.Select(ToPublicTrade).ToArray();
         return new FuturesBacktestResult
         {
-            StrategyName = "NY 08:00 4H Sweep Reversal",
+            StrategyName = "NY 08:00 4H Sweep Reversal + Engulfing",
             PeriodStart = periodStart,
             PeriodEnd = periodEnd,
             SymbolsRequested = symbolsRequested,
@@ -978,6 +1092,9 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             : midline - entryPrice;
         return decimal.Max(0m, room / risk);
     }
+
+    private static bool IsInsideRange(decimal price, decimal upperBoundary, decimal lowerBoundary) =>
+        price > lowerBoundary && price < upperBoundary;
 
     private static decimal CalculateBreakoutVolumeRatio(IReadOnlyList<Candle> candles, DateTimeOffset breakoutOpenTime)
     {

@@ -107,6 +107,8 @@ public sealed class NySessionPoolReplaceRequest
 
 internal sealed class NySessionSignal
 {
+    public string Pattern { get; init; } = "Sweep Reversal";
+
     public string Side { get; init; } = string.Empty;
 
     public DateTimeOffset SignalCandleOpenTime { get; init; }
@@ -136,6 +138,8 @@ internal sealed class NySessionSignal
     public decimal MidlineRoomR { get; init; }
 
     public decimal BreakoutVolumeRatio { get; init; }
+
+    public decimal BodyRatio { get; init; }
 
     public string Reason { get; init; } = string.Empty;
 }

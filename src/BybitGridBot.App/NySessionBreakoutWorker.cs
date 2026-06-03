@@ -540,9 +540,9 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
 
             MarkSignalHandled(item.Symbol, signal.SignalCandleOpenTime);
             openPositions++;
-            AddEvent(item.Symbol, "trade", $"{signal.Side} opened at {signal.EntryPrice}. SL {signal.StopLoss}, TP {signal.TakeProfit}.");
+            AddEvent(item.Symbol, "trade", $"{signal.Pattern} {signal.Side} opened at {signal.EntryPrice}. SL {signal.StopLoss}, TP {signal.TakeProfit}.");
             await _notifier.NotifyAsync(
-                $"NY session entry.\nSymbol: `{item.Symbol}`\nSide: `{signal.Side}`\nEntry: `{signal.EntryPrice}`\nSL: `{signal.StopLoss}`\nTP: `{signal.TakeProfit}`\nMode: `{_appOptions.TradingMode}`\nResult: `{result.Message}`",
+                $"NY session entry.\nPattern: `{signal.Pattern}`\nSymbol: `{item.Symbol}`\nSide: `{signal.Side}`\nEntry: `{signal.EntryPrice}`\nSL: `{signal.StopLoss}`\nTP: `{signal.TakeProfit}`\nMode: `{_appOptions.TradingMode}`\nResult: `{result.Message}`",
                 cancellationToken);
         }
     }
@@ -662,6 +662,11 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
         IReadOnlyList<Candle> fiveMinuteCandles,
         CancellationToken cancellationToken)
     {
+        if (string.Equals(signal.Pattern, "Engulfing", StringComparison.OrdinalIgnoreCase))
+        {
+            return await EvaluateEngulfingFiltersAsync(signal, cancellationToken);
+        }
+
         if (signal.SweepDepthPercent < _options.MinSweepDepthPercent)
         {
             return new NySessionEntryFilterResult
@@ -745,6 +750,59 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
             IsAllowed = true,
             Mode = "Sweep Reversal",
             Reason = "Sweep reclaim passed filters."
+        };
+    }
+
+    private async Task<NySessionEntryFilterResult> EvaluateEngulfingFiltersAsync(
+        NySessionSignal signal,
+        CancellationToken cancellationToken)
+    {
+        if (!_options.EngulfingEnabled)
+        {
+            return new NySessionEntryFilterResult
+            {
+                IsAllowed = false,
+                Mode = "Engulfing",
+                Reason = "Engulfing pattern is disabled."
+            };
+        }
+
+        if (signal.BodyRatio < _options.MinEngulfingBodyRatio)
+        {
+            return new NySessionEntryFilterResult
+            {
+                IsAllowed = false,
+                Mode = "Engulfing",
+                Reason = $"Body ratio {signal.BodyRatio:F2} is below {_options.MinEngulfingBodyRatio:F2}."
+            };
+        }
+
+        if (signal.StopDistancePercent > _options.MaxStopPercent)
+        {
+            return new NySessionEntryFilterResult
+            {
+                IsAllowed = false,
+                Mode = "Engulfing",
+                Reason = $"Stop distance {signal.StopDistancePercent:F4}% is above {_options.MaxStopPercent:F4}%."
+            };
+        }
+
+        var btcTrend = await AnalyzeBtcTrendAsync(signal.Side, cancellationToken);
+        if (btcTrend.IsBlocked)
+        {
+            return new NySessionEntryFilterResult
+            {
+                IsAllowed = false,
+                Mode = "Engulfing",
+                Reason = btcTrend.Reason
+            };
+        }
+
+        return new NySessionEntryFilterResult
+        {
+            IsAllowed = true,
+            Mode = "Engulfing",
+            Reason = "Engulfing pattern passed filters."
         };
     }
 
@@ -947,6 +1005,13 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
             }
         }
 
+        var engulfingSignal = TryFindEngulfingSignal(closed, upperBoundary, lowerBoundary);
+        if (engulfingSignal is not null &&
+            (latestSignal is null || engulfingSignal.SignalCandleOpenTime > latestSignal.SignalCandleOpenTime))
+        {
+            return engulfingSignal;
+        }
+
         return latestSignal;
     }
 
@@ -960,7 +1025,9 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
         decimal entryPrice,
         decimal sweepExtreme,
         string reason,
-        IReadOnlyList<Candle> candles)
+        IReadOnlyList<Candle> candles,
+        string pattern = "Sweep Reversal",
+        decimal bodyRatio = 0m)
     {
         var risk = Math.Abs(sweepExtreme - entryPrice);
         var takeProfit = side == "Short"
@@ -968,6 +1035,7 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
             : entryPrice + risk * _options.RewardRisk;
         return new NySessionSignal
         {
+            Pattern = pattern,
             Side = side,
             SignalCandleOpenTime = signalCandleOpenTime,
             BreakoutCandleOpenTime = breakoutCandleOpenTime,
@@ -983,8 +1051,87 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
             StopDistancePercent = entryPrice > 0m ? risk / entryPrice * 100m : 0m,
             MidlineRoomR = CalculateMidlineRoomR(side, rangeHigh, rangeLow, entryPrice, risk),
             BreakoutVolumeRatio = CalculateBreakoutVolumeRatio(candles, breakoutCandleOpenTime),
+            BodyRatio = bodyRatio,
             Reason = reason
         };
+    }
+
+    private NySessionSignal? TryFindEngulfingSignal(
+        IReadOnlyList<Candle> closed,
+        decimal upperBoundary,
+        decimal lowerBoundary)
+    {
+        if (!_options.EngulfingEnabled || closed.Count < 2 || upperBoundary <= lowerBoundary)
+        {
+            return null;
+        }
+
+        var previous = closed[^2];
+        var current = closed[^1];
+        if (!IsInsideRange(previous.Close, upperBoundary, lowerBoundary) ||
+            !IsInsideRange(current.Close, upperBoundary, lowerBoundary))
+        {
+            return null;
+        }
+
+        var previousBody = Math.Abs(previous.Close - previous.Open);
+        var currentBody = Math.Abs(current.Close - current.Open);
+        if (previousBody <= 0m || currentBody < previousBody * _options.MinEngulfingBodyRatio)
+        {
+            return null;
+        }
+
+        var bullish = previous.Close < previous.Open &&
+            current.Close > current.Open &&
+            current.Open <= previous.Close &&
+            current.Close >= previous.Open;
+        if (bullish)
+        {
+            var risk = current.Close - current.Low;
+            if (risk > 0m)
+            {
+                return BuildSignal(
+                    "Long",
+                    current.OpenTime,
+                    current.OpenTime,
+                    lowerBoundary,
+                    upperBoundary,
+                    lowerBoundary,
+                    current.Close,
+                    current.Low,
+                    "Bullish engulfing inside the active 4H range.",
+                    closed,
+                    "Engulfing",
+                    currentBody / previousBody);
+            }
+        }
+
+        var bearish = previous.Close > previous.Open &&
+            current.Close < current.Open &&
+            current.Open >= previous.Close &&
+            current.Close <= previous.Open;
+        if (bearish)
+        {
+            var risk = current.High - current.Close;
+            if (risk > 0m)
+            {
+                return BuildSignal(
+                    "Short",
+                    current.OpenTime,
+                    current.OpenTime,
+                    upperBoundary,
+                    upperBoundary,
+                    lowerBoundary,
+                    current.Close,
+                    current.High,
+                    "Bearish engulfing inside the active 4H range.",
+                    closed,
+                    "Engulfing",
+                    currentBody / previousBody);
+            }
+        }
+
+        return null;
     }
 
     private static decimal CalculateReclaimPercent(string side, decimal boundary, decimal close)
@@ -1026,6 +1173,9 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
             : midline - entryPrice;
         return decimal.Max(0m, room / risk);
     }
+
+    private static bool IsInsideRange(decimal price, decimal upperBoundary, decimal lowerBoundary) =>
+        price > lowerBoundary && price < upperBoundary;
 
     private static decimal CalculateBreakoutVolumeRatio(IReadOnlyList<Candle> candles, DateTimeOffset breakoutOpenTime)
     {
@@ -1101,7 +1251,9 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
     {
         if (signal is not null)
         {
-            return "Signal";
+            return string.Equals(signal.Pattern, "Engulfing", StringComparison.OrdinalIgnoreCase)
+                ? "Engulfing"
+                : "Signal";
         }
 
         var session = candles
@@ -1146,6 +1298,7 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
         }
 
         return item.State == "Signal" ||
+            item.State == "Engulfing" ||
             item.State == "Upper swept" ||
             item.State == "Lower swept" ||
             item.DistanceToUpperPercent <= _options.NearBoundaryPercent ||
@@ -1157,6 +1310,7 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
         var stateScore = item.State switch
         {
             "Signal" => 100m,
+            "Engulfing" => 90m,
             "Upper swept" or "Lower swept" => 80m,
             _ => 50m
         };
@@ -1340,7 +1494,9 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
                 : EstimateLongLiquidationPrice(price, settings.Leverage),
             PositionIdx = 0,
             OrderLinkId = FuturesOrderLinkIds.Create(action),
-            Reason = "ny-session-4h-sweep-reclaim"
+            Reason = string.Equals(signal.Pattern, "Engulfing", StringComparison.OrdinalIgnoreCase)
+                ? "ny-session-engulfing"
+                : "ny-session-4h-sweep-reclaim"
         };
     }
 
