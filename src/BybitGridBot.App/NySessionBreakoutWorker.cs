@@ -687,6 +687,11 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
             return await EvaluateBreakoutCandleFiltersAsync(signal, cancellationToken);
         }
 
+        if (string.Equals(signal.Pattern, "Shrinking Candles", StringComparison.OrdinalIgnoreCase))
+        {
+            return await EvaluateShrinkingCandlesFiltersAsync(signal, cancellationToken);
+        }
+
         if (signal.SweepDepthPercent < _options.MinSweepDepthPercent)
         {
             return new NySessionEntryFilterResult
@@ -1048,6 +1053,59 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
         };
     }
 
+    private async Task<NySessionEntryFilterResult> EvaluateShrinkingCandlesFiltersAsync(
+        NySessionSignal signal,
+        CancellationToken cancellationToken)
+    {
+        if (!_options.ShrinkingCandlesEnabled)
+        {
+            return new NySessionEntryFilterResult
+            {
+                IsAllowed = false,
+                Mode = "Shrinking Candles",
+                Reason = "Shrinking candles pattern is disabled."
+            };
+        }
+
+        if (signal.BodyRatio < _options.MinShrinkingReversalBodyRatio)
+        {
+            return new NySessionEntryFilterResult
+            {
+                IsAllowed = false,
+                Mode = "Shrinking Candles",
+                Reason = $"Reversal body ratio {signal.BodyRatio:F2} is below {_options.MinShrinkingReversalBodyRatio:F2}."
+            };
+        }
+
+        if (signal.StopDistancePercent > _options.MaxStopPercent)
+        {
+            return new NySessionEntryFilterResult
+            {
+                IsAllowed = false,
+                Mode = "Shrinking Candles",
+                Reason = $"Stop distance {signal.StopDistancePercent:F4}% is above {_options.MaxStopPercent:F4}%."
+            };
+        }
+
+        var btcTrend = await AnalyzeBtcTrendAsync(signal.Side, cancellationToken);
+        if (btcTrend.IsBlocked)
+        {
+            return new NySessionEntryFilterResult
+            {
+                IsAllowed = false,
+                Mode = "Shrinking Candles",
+                Reason = btcTrend.Reason
+            };
+        }
+
+        return new NySessionEntryFilterResult
+        {
+            IsAllowed = true,
+            Mode = "Shrinking Candles",
+            Reason = "Shrinking candles pattern passed filters."
+        };
+    }
+
     private TrueBreakoutAssessment AnalyzeTrueBreakout(
         NySessionSignal signal,
         IReadOnlyList<Candle> fiveMinuteCandles,
@@ -1282,6 +1340,13 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
             return breakoutCandleSignal;
         }
 
+        var shrinkingCandlesSignal = TryFindShrinkingCandlesSignal(closed, upperBoundary, lowerBoundary);
+        if (shrinkingCandlesSignal is not null &&
+            (latestSignal is null || shrinkingCandlesSignal.SignalCandleOpenTime > latestSignal.SignalCandleOpenTime))
+        {
+            return shrinkingCandlesSignal;
+        }
+
         return latestSignal;
     }
 
@@ -1402,6 +1467,105 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
                     closed,
                     "Engulfing",
                     currentBody / previousBody);
+            }
+        }
+
+        return null;
+    }
+
+    private NySessionSignal? TryFindShrinkingCandlesSignal(
+        IReadOnlyList<Candle> closed,
+        decimal upperBoundary,
+        decimal lowerBoundary)
+    {
+        var sequenceCount = Math.Max(3, _options.ShrinkingSequenceCandles);
+        if (!_options.ShrinkingCandlesEnabled || closed.Count < sequenceCount + 1 || upperBoundary <= lowerBoundary)
+        {
+            return null;
+        }
+
+        var sequence = closed
+            .Skip(closed.Count - sequenceCount - 1)
+            .Take(sequenceCount)
+            .ToArray();
+        var reversal = closed[^1];
+        var all = sequence.Append(reversal).ToArray();
+        if (all.Any(candle =>
+                !IsInsideRange(candle.Close, upperBoundary, lowerBoundary) ||
+                !IsInsideRange(candle.High, upperBoundary, lowerBoundary) ||
+                !IsInsideRange(candle.Low, upperBoundary, lowerBoundary)))
+        {
+            return null;
+        }
+
+        var bodies = sequence.Select(candle => Math.Abs(candle.Close - candle.Open)).ToArray();
+        if (bodies.Any(body => body <= 0m))
+        {
+            return null;
+        }
+
+        for (var index = 1; index < bodies.Length; index++)
+        {
+            if (bodies[index - 1] / bodies[index] < _options.MinShrinkingBodyStepRatio)
+            {
+                return null;
+            }
+        }
+
+        var reversalBody = Math.Abs(reversal.Close - reversal.Open);
+        var reversalBodyRatio = reversalBody / bodies.Average();
+        if (reversalBody <= 0m || reversalBodyRatio < _options.MinShrinkingReversalBodyRatio)
+        {
+            return null;
+        }
+
+        var bullish = sequence.All(candle => candle.Close < candle.Open) &&
+            reversal.Close > reversal.Open &&
+            reversal.Close > sequence[0].Open;
+        if (bullish)
+        {
+            var stop = all.Min(candle => candle.Low);
+            var risk = reversal.Close - stop;
+            if (risk > 0m)
+            {
+                return BuildSignal(
+                    "Long",
+                    reversal.OpenTime,
+                    reversal.OpenTime,
+                    lowerBoundary,
+                    upperBoundary,
+                    lowerBoundary,
+                    reversal.Close,
+                    stop,
+                    "Bullish shrinking candles reversal inside the active 4H range.",
+                    closed,
+                    "Shrinking Candles",
+                    reversalBodyRatio);
+            }
+        }
+
+        var bearish = sequence.All(candle => candle.Close > candle.Open) &&
+            reversal.Close < reversal.Open &&
+            reversal.Close < sequence[0].Open;
+        if (bearish)
+        {
+            var stop = all.Max(candle => candle.High);
+            var risk = stop - reversal.Close;
+            if (risk > 0m)
+            {
+                return BuildSignal(
+                    "Short",
+                    reversal.OpenTime,
+                    reversal.OpenTime,
+                    upperBoundary,
+                    upperBoundary,
+                    lowerBoundary,
+                    reversal.Close,
+                    stop,
+                    "Bearish shrinking candles reversal inside the active 4H range.",
+                    closed,
+                    "Shrinking Candles",
+                    reversalBodyRatio);
             }
         }
 
@@ -1900,6 +2064,11 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
                 return "Breakout";
             }
 
+            if (string.Equals(signal.Pattern, "Shrinking Candles", StringComparison.OrdinalIgnoreCase))
+            {
+                return "Shrinking";
+            }
+
             return string.Equals(signal.Pattern, "3-Bar Reversal", StringComparison.OrdinalIgnoreCase)
                 ? "3-Bar Rev"
                 : "Signal";
@@ -1952,6 +2121,7 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
             item.State == "3-Bar Cont" ||
             item.State == "3-Bar Rev" ||
             item.State == "Breakout" ||
+            item.State == "Shrinking" ||
             item.State == "Upper swept" ||
             item.State == "Lower swept" ||
             item.DistanceToUpperPercent <= _options.NearBoundaryPercent ||
@@ -1968,6 +2138,7 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
             "3-Bar Rev" => 83m,
             "3-Bar Cont" => 82m,
             "Breakout" => 81m,
+            "Shrinking" => 84m,
             "Upper swept" or "Lower swept" => 80m,
             _ => 50m
         };
@@ -2158,6 +2329,7 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
                 "3-Bar Continuation" => "ny-session-3-bar-continuation",
                 "3-Bar Reversal" => "ny-session-3-bar-reversal",
                 "Breakout Candle" => "ny-session-breakout-candle",
+                "Shrinking Candles" => "ny-session-shrinking-candles",
                 _ => "ny-session-4h-sweep-reclaim"
             }
         };

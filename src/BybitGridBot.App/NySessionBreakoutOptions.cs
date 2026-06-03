@@ -93,6 +93,21 @@ public sealed class NySessionBreakoutOptions
     [Range(typeof(decimal), "1", "100")]
     public decimal MinBreakoutBodyRatio { get; init; } = 2m;
 
+    [ConfigurationKeyName("NY_SESSION_SHRINKING_CANDLES_ENABLED")]
+    public bool ShrinkingCandlesEnabled { get; init; } = true;
+
+    [ConfigurationKeyName("NY_SESSION_SHRINKING_SEQUENCE_CANDLES")]
+    [Range(3, 12)]
+    public int ShrinkingSequenceCandles { get; init; } = 3;
+
+    [ConfigurationKeyName("NY_SESSION_MIN_SHRINKING_BODY_STEP_RATIO")]
+    [Range(typeof(decimal), "1", "100")]
+    public decimal MinShrinkingBodyStepRatio { get; init; } = 1.05m;
+
+    [ConfigurationKeyName("NY_SESSION_MIN_SHRINKING_REVERSAL_BODY_RATIO")]
+    [Range(typeof(decimal), "1", "100")]
+    public decimal MinShrinkingReversalBodyRatio { get; init; } = 1.5m;
+
     [ConfigurationKeyName("NY_SESSION_MAX_OPEN_POSITIONS")]
     [Range(1, 100)]
     public int MaxOpenPositions { get; init; } = 5;
