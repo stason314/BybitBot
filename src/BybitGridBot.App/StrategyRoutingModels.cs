@@ -139,6 +139,10 @@ public sealed class StrategyDecision
     public bool IsTradeAllowed { get; init; }
 
     public DateTimeOffset CreatedAt { get; init; } = DateTimeOffset.UtcNow;
+
+    public BreakoutClassification BreakoutClassification { get; init; } = BreakoutClassification.Unclear;
+
+    public StrategySide BreakoutSide { get; init; } = StrategySide.None;
 }
 
 public sealed class BreakoutClassifierResult

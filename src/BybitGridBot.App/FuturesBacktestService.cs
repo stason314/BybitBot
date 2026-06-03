@@ -324,6 +324,8 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         decimal? lowerStop = null;
         DateTimeOffset? lowerSweepAt = null;
         decimal? lowerReturnLevel = null;
+        var processedScoreSignals = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var processedBreakoutClassifications = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         for (var i = 1; i < session.Count; i++)
         {
@@ -333,8 +335,16 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             if (_strategyRoutingOptions.SignalSelectionMode == SignalSelectionMode.ScoreBased)
             {
                 var decision = BuildScoreBasedBacktestDecision(symbol, session, allFiveMinuteCandles, i, fifteenMinuteCandles, turtleCandles, btc15m, settings);
-                if (decision.IsTradeAllowed && decision.SelectedCandidate is not null)
+                TrackScoreBasedBreakoutCounters(decision, session[i], processedBreakoutClassifications, ref falseBreakoutCount, ref trueBreakoutBlockedCount);
+
+                if (decision.IsTradeAllowed && decision.SelectedCandidate is not null && i + 1 < session.Count)
                 {
+                    var signalKey = BuildScoreSignalKey(decision.SelectedCandidate);
+                    if (!processedScoreSignals.Add(signalKey))
+                    {
+                        continue;
+                    }
+
                     var scoreSignal = ToBacktestSignal(decision.SelectedCandidate, session, i);
                     var trade = SimulateTrade(symbol, scoreSignal, session, i + 1, settings);
                     trades.Add(trade);
@@ -459,6 +469,40 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         return _scoreBasedSignalEngine.Decide(context);
     }
 
+    private static void TrackScoreBasedBreakoutCounters(
+        StrategyDecision decision,
+        Candle candle,
+        ISet<string> processedBreakoutClassifications,
+        ref int falseBreakoutCount,
+        ref int trueBreakoutBlockedCount)
+    {
+        if (decision.BreakoutClassification == BreakoutClassification.Unclear ||
+            decision.BreakoutSide == StrategySide.None)
+        {
+            return;
+        }
+
+        var key = $"{decision.BreakoutClassification}|{decision.BreakoutSide}|{candle.OpenTime:O}";
+        if (!processedBreakoutClassifications.Add(key))
+        {
+            return;
+        }
+
+        if (decision.BreakoutClassification == BreakoutClassification.FalseBreakout)
+        {
+            falseBreakoutCount++;
+            return;
+        }
+
+        var sweepBlocked = decision.AllCandidates.Any(candidate =>
+            string.Equals(candidate.StrategyName, NYSweepReversalStrategy.Name, StringComparison.OrdinalIgnoreCase) &&
+            candidate.RejectionReason == StrategyNoTradeReason.TrueBreakoutProtection);
+        if (decision.BreakoutClassification == BreakoutClassification.TrueBreakout && sweepBlocked)
+        {
+            trueBreakoutBlockedCount++;
+        }
+    }
+
     private NySessionRange BuildBacktestRange(
         IReadOnlyList<Candle> session,
         IReadOnlyList<Candle> allFiveMinuteCandles,
@@ -523,6 +567,24 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             Reason = $"{candidate.StrategyName}: score={candidate.Score:F0}, confidence={candidate.Confidence:F2}, {candidate.Reason}"
         };
     }
+
+    private static string BuildScoreSignalKey(StrategyCandidate candidate)
+    {
+        var intent = candidate.TradeIntent;
+        return string.Join(
+            '|',
+            candidate.StrategyName,
+            candidate.Symbol,
+            candidate.Side,
+            candidate.CreatedAt.ToUnixTimeSeconds(),
+            intent?.EntryType.ToString() ?? string.Empty,
+            FormatSignalPrice(intent?.EntryPrice),
+            FormatSignalPrice(intent?.StopLoss),
+            FormatSignalPrice(intent?.TakeProfit));
+    }
+
+    private static string FormatSignalPrice(decimal? value) =>
+        value.HasValue ? value.Value.ToString("0.########") : string.Empty;
 
     private static int ParseIntervalMinutes(string interval, int fallback)
     {

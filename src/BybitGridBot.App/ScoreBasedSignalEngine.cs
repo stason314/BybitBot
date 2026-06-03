@@ -34,8 +34,22 @@ public sealed class ScoreBasedSignalEngine
         AddIfNotNull(candidates, _sweep.BuildCandidate(context, breakout));
         AddIfNotNull(candidates, _turtle.BuildCandidate(context, breakout));
         AddIfNotNull(candidates, _retest.BuildCandidate(context, breakout));
-        return _router.Decide(candidates);
+        return AttachBreakout(_router.Decide(candidates), breakout);
     }
+
+    private static StrategyDecision AttachBreakout(StrategyDecision decision, BreakoutClassifierResult breakout) => new()
+    {
+        SelectedStrategy = decision.SelectedStrategy,
+        SelectedCandidate = decision.SelectedCandidate,
+        AllCandidates = decision.AllCandidates,
+        RejectedCandidates = decision.RejectedCandidates,
+        NoTradeReason = decision.NoTradeReason,
+        Reason = decision.Reason,
+        IsTradeAllowed = decision.IsTradeAllowed,
+        CreatedAt = decision.CreatedAt,
+        BreakoutClassification = breakout.Classification,
+        BreakoutSide = breakout.BreakoutSide
+    };
 
     private static void AddIfNotNull(List<StrategyCandidate> candidates, StrategyCandidate? candidate)
     {
