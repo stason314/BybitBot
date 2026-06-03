@@ -36,4 +36,10 @@ public sealed class FuturesBacktestOptions
     [ConfigurationKeyName("FUTURES_BACKTEST_INITIAL_EQUITY_USDT")]
     [Range(typeof(decimal), "0.00000001", "999999999")]
     public decimal InitialEquityUsdt { get; init; } = 10000m;
+
+    [ConfigurationKeyName("FUTURES_BACKTEST_CANDLE_CACHE_ENABLED")]
+    public bool CandleCacheEnabled { get; init; } = true;
+
+    [ConfigurationKeyName("FUTURES_BACKTEST_CANDLE_CACHE_PATH")]
+    public string CandleCachePath { get; init; } = "/app/data/backtest-candles";
 }

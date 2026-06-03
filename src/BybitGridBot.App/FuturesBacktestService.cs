@@ -1,6 +1,9 @@
 using BybitGridBot.Bybit;
 using BybitGridBot.Domain;
 using Microsoft.Extensions.Options;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
 
 namespace BybitGridBot.App;
 
@@ -32,6 +35,8 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
     private readonly NySessionBreakoutOptions _strategyOptions;
     private readonly StrategyRoutingOptions _strategyRoutingOptions;
     private readonly TurtleTrendOptions _turtleOptions;
+    private readonly SemaphoreSlim _candleCacheLock = new(1, 1);
+    private readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web);
     private readonly object _sync = new();
     private CancellationTokenSource? _runCancellation;
     private FuturesBacktestStatusResponse _status = new();
@@ -1786,6 +1791,76 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         DateTimeOffset end,
         CancellationToken cancellationToken)
     {
+        if (!_backtestOptions.CandleCacheEnabled)
+        {
+            return await FetchHistoricalCandlesFromBybitAsync(symbol, interval, start, end, cancellationToken);
+        }
+
+        return await FetchHistoricalCandlesWithCacheAsync(symbol, interval, start, end, cancellationToken);
+    }
+
+    private async Task<IReadOnlyList<Candle>> FetchHistoricalCandlesWithCacheAsync(
+        string symbol,
+        string interval,
+        DateTimeOffset start,
+        DateTimeOffset end,
+        CancellationToken cancellationToken)
+    {
+        var intervalMinutes = ResolveIntervalMinutes(interval);
+        var cacheableEnd = end.AddMinutes(-intervalMinutes);
+        var cachePath = BuildCandleCachePath(symbol, interval);
+        var cached = await ReadCandleCacheAsync(cachePath, cancellationToken);
+        var additions = new List<Candle>();
+
+        if (cached.Count == 0)
+        {
+            additions.AddRange(await FetchHistoricalCandlesFromBybitAsync(symbol, interval, start, end, cancellationToken));
+        }
+        else
+        {
+            var ordered = cached.OrderBy(candle => candle.OpenTime).ToArray();
+            var cachedStart = ordered[0].OpenTime;
+            var cachedEnd = ordered[^1].OpenTime;
+            if (cachedStart > start.AddMinutes(intervalMinutes))
+            {
+                additions.AddRange(await FetchHistoricalCandlesFromBybitAsync(
+                    symbol,
+                    interval,
+                    start,
+                    cachedStart.AddMilliseconds(-1),
+                    cancellationToken));
+            }
+
+            if (cachedEnd < cacheableEnd.AddMinutes(-intervalMinutes))
+            {
+                additions.AddRange(await FetchHistoricalCandlesFromBybitAsync(
+                    symbol,
+                    interval,
+                    cachedEnd.AddMinutes(intervalMinutes),
+                    end,
+                    cancellationToken));
+            }
+        }
+
+        if (additions.Count > 0)
+        {
+            cached = await MergeAndWriteCandleCacheAsync(cachePath, cached, additions, intervalMinutes, cancellationToken);
+        }
+
+        return cached
+            .Where(candle => candle.OpenTime >= start && candle.OpenTime <= end)
+            .DistinctBy(candle => candle.OpenTime)
+            .OrderBy(candle => candle.OpenTime)
+            .ToArray();
+    }
+
+    private async Task<IReadOnlyList<Candle>> FetchHistoricalCandlesFromBybitAsync(
+        string symbol,
+        string interval,
+        DateTimeOffset start,
+        DateTimeOffset end,
+        CancellationToken cancellationToken)
+    {
         var result = new List<Candle>();
         var cursorEnd = end;
         while (cursorEnd > start)
@@ -1818,6 +1893,104 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             .OrderBy(candle => candle.OpenTime)
             .ToArray();
     }
+
+    private async Task<IReadOnlyList<Candle>> ReadCandleCacheAsync(string path, CancellationToken cancellationToken)
+    {
+        await _candleCacheLock.WaitAsync(cancellationToken);
+        try
+        {
+            if (!File.Exists(path))
+            {
+                return Array.Empty<Candle>();
+            }
+
+            await using var stream = File.OpenRead(path);
+            return await JsonSerializer.DeserializeAsync<List<Candle>>(stream, _jsonOptions, cancellationToken) ?? [];
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            _logger.LogWarning(exception, "Failed to read backtest candle cache {Path}", path);
+            return Array.Empty<Candle>();
+        }
+        finally
+        {
+            _candleCacheLock.Release();
+        }
+    }
+
+    private async Task<IReadOnlyList<Candle>> MergeAndWriteCandleCacheAsync(
+        string path,
+        IReadOnlyList<Candle> cached,
+        IReadOnlyList<Candle> additions,
+        int intervalMinutes,
+        CancellationToken cancellationToken)
+    {
+        await _candleCacheLock.WaitAsync(cancellationToken);
+        try
+        {
+            IReadOnlyList<Candle> disk = File.Exists(path)
+                ? await ReadCandleCacheFileWithoutLockAsync(path, cancellationToken)
+                : Array.Empty<Candle>();
+            var cacheableBefore = DateTimeOffset.UtcNow.AddMinutes(-intervalMinutes);
+            var merged = disk
+                .Concat(cached)
+                .Concat(additions)
+                .Where(candle => candle.OpenTime.AddMinutes(intervalMinutes) <= cacheableBefore)
+                .DistinctBy(candle => candle.OpenTime)
+                .OrderBy(candle => candle.OpenTime)
+                .ToArray();
+
+            Directory.CreateDirectory(Path.GetDirectoryName(path) ?? ".");
+            await using var stream = File.Create(path);
+            await JsonSerializer.SerializeAsync(stream, merged, _jsonOptions, cancellationToken);
+            return merged
+                .Concat(additions)
+                .DistinctBy(candle => candle.OpenTime)
+                .OrderBy(candle => candle.OpenTime)
+                .ToArray();
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            _logger.LogWarning(exception, "Failed to write backtest candle cache {Path}", path);
+            return cached.Concat(additions)
+                .DistinctBy(candle => candle.OpenTime)
+                .OrderBy(candle => candle.OpenTime)
+                .ToArray();
+        }
+        finally
+        {
+            _candleCacheLock.Release();
+        }
+    }
+
+    private async Task<IReadOnlyList<Candle>> ReadCandleCacheFileWithoutLockAsync(string path, CancellationToken cancellationToken)
+    {
+        await using var stream = File.OpenRead(path);
+        return await JsonSerializer.DeserializeAsync<List<Candle>>(stream, _jsonOptions, cancellationToken) ?? [];
+    }
+
+    private string BuildCandleCachePath(string symbol, string interval)
+    {
+        var key = $"{Category}:{symbol.ToUpperInvariant()}:{interval}";
+        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(key))).ToLowerInvariant()[..16];
+        var fileName = $"{SanitizeFileName(symbol)}_{SanitizeFileName(interval)}_{hash}.json";
+        return Path.Combine(_backtestOptions.CandleCachePath, Category, fileName);
+    }
+
+    private static string SanitizeFileName(string value)
+    {
+        var invalid = Path.GetInvalidFileNameChars().ToHashSet();
+        return new string(value.Select(character => invalid.Contains(character) ? '_' : character).ToArray());
+    }
+
+    private static int ResolveIntervalMinutes(string interval) =>
+        int.TryParse(interval, out var minutes) && minutes > 0 ? minutes : interval switch
+        {
+            "D" => 1440,
+            "W" => 10080,
+            "M" => 43200,
+            _ => 60
+        };
 
     private BacktestRunSettings ResolveSettings(FuturesBacktestRequest request) => new(
         Math.Clamp(request.Days ?? _backtestOptions.Days, 1, 365),
