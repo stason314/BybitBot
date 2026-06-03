@@ -92,6 +92,7 @@ public static class FuturesBacktestPage
       </div>
       <div class="actions">
         <a class="link secondary" href="/futures">Futures bot</a>
+        <button class="btn secondary" id="copyDiagnostics" type="button">Copy diagnostics</button>
         <button class="btn" id="start" type="button">Start</button>
         <button class="btn danger" id="stop" type="button">Stop</button>
       </div>
@@ -161,6 +162,7 @@ public static class FuturesBacktestPage
     const cls = v => Number(v) >= 0 ? 'pos' : 'neg';
     const pnl = v => `${Number(v) >= 0 ? '+' : ''}${money.format(Number(v || 0))}`;
     const pct = v => `${fmt.format(Number(v || 0))}%`;
+    let latestStatus = null;
 
     async function status() {
       const response = await fetch('/api/futures/backtest', { cache: 'no-store' });
@@ -187,6 +189,7 @@ public static class FuturesBacktestPage
     }
 
     function render(data) {
+      latestStatus = data;
       const progress = Number(data.progressPercent || 0);
       byId('bar').style.width = `${Math.max(0, Math.min(100, progress))}%`;
       byId('status').textContent = `${data.status || 'Not started'} (${fmt.format(progress)}%)`;
@@ -195,6 +198,7 @@ public static class FuturesBacktestPage
         : data.completedAt ? `Completed: ${new Date(data.completedAt).toLocaleString()}` : 'ETA: -';
       byId('start').disabled = Boolean(data.isRunning);
       byId('stop').disabled = !data.isRunning;
+      byId('copyDiagnostics').disabled = !data.result;
 
       const result = data.result;
       if (!result) return;
@@ -209,7 +213,7 @@ public static class FuturesBacktestPage
       byId('breakouts').textContent = `${result.falseBreakoutCount || 0} / ${result.trueBreakoutBlockedCount || 0}`;
       byId('eligibleCount').textContent = `${(result.eligibleSymbols || []).length} / ${(result.excludedSymbols || []).length}`;
       byId('wfSymbols').innerHTML = walkForwardSymbolRows(result.eligibleSymbols || [], result.excludedSymbols || []);
-      byId('wfMetrics').innerHTML = walkForwardMetricRows(result.optimizationMetrics || {}, result.outOfSampleMetrics || {});
+      byId('wfMetrics').innerHTML = walkForwardMetricRows(result.optimizationMetrics || {}, result.outOfSampleMetrics || {}, result.filteredOutOfSampleMetrics || {});
       byId('best').innerHTML = perfRows(result.bestSymbols || [], 'symbol');
       byId('worst').innerHTML = perfRows(result.worstSymbols || [], 'symbol');
       byId('sides').innerHTML = sideRows(result.longShort || []);
@@ -233,10 +237,11 @@ public static class FuturesBacktestPage
       return `<tr><td>${eligible.slice(0, 60).join(', ') || '-'}</td><td>${excluded.slice(0, 60).join(', ') || '-'}</td></tr>`;
     }
 
-    function walkForwardMetricRows(optimization, outOfSample) {
+    function walkForwardMetricRows(optimization, outOfSample, filteredOutOfSample) {
       return [
         ['60d optimization', optimization],
-        ['30d out-of-sample', outOfSample]
+        ['30d out-of-sample', outOfSample],
+        ['30d OOS filtered', filteredOutOfSample]
       ].map(([label, item]) => `
         <tr>
           <td>${label}</td>
@@ -244,6 +249,90 @@ public static class FuturesBacktestPage
           <td class="${cls(item.netPnl)}">${pnl(item.netPnl)}</td>
           <td>${fmt.format(item.profitFactor || 0)}</td>
         </tr>`).join('');
+    }
+
+    async function copyDiagnostics() {
+      if (!latestStatus?.result) {
+        byId('status').textContent = 'No backtest result to copy';
+        return;
+      }
+
+      const text = buildDiagnostics(latestStatus);
+      try {
+        if (navigator.clipboard?.writeText) {
+          await navigator.clipboard.writeText(text);
+        } else {
+          const textarea = document.createElement('textarea');
+          textarea.value = text;
+          textarea.setAttribute('readonly', '');
+          textarea.style.position = 'fixed';
+          textarea.style.left = '-9999px';
+          document.body.appendChild(textarea);
+          textarea.select();
+          document.execCommand('copy');
+          textarea.remove();
+        }
+
+        byId('copyDiagnostics').textContent = 'Copied';
+        setTimeout(() => { byId('copyDiagnostics').textContent = 'Copy diagnostics'; }, 1400);
+      } catch (error) {
+        byId('status').textContent = `Copy failed: ${error.message}`;
+      }
+    }
+
+    function buildDiagnostics(data) {
+      const result = data.result || {};
+      const lines = [
+        'BYBIT FUTURES BACKTEST DIAGNOSTICS',
+        `generatedAt=${new Date().toISOString()}`,
+        `status=${data.status || '-'}`,
+        `progressPercent=${data.progressPercent || 0}`,
+        `startedAt=${data.startedAt || '-'}`,
+        `completedAt=${data.completedAt || '-'}`,
+        '',
+        'RUN',
+        `strategy=${result.strategyName || '-'}`,
+        `period=${result.periodStart || '-'} .. ${result.periodEnd || '-'}`,
+        `symbolsRequested=${result.symbolsRequested || 0}`,
+        `symbolsProcessed=${result.symbolsProcessed || 0}`,
+        `tradesCount=${result.tradesCount || 0}`,
+        `falseBreakoutCount=${result.falseBreakoutCount || 0}`,
+        `trueBreakoutBlockedCount=${result.trueBreakoutBlockedCount || 0}`,
+        '',
+        metricBlock('MAIN_OOS_ALL_SYMBOLS', result.metrics || {}),
+        metricBlock('OPTIMIZATION_60D', result.optimizationMetrics || {}),
+        metricBlock('OUT_OF_SAMPLE_30D_ALL_SYMBOLS', result.outOfSampleMetrics || {}),
+        metricBlock('OUT_OF_SAMPLE_30D_ELIGIBLE_ONLY', result.filteredOutOfSampleMetrics || {}),
+        '',
+        `eligibleSymbols(${(result.eligibleSymbols || []).length})=${(result.eligibleSymbols || []).join(', ') || '-'}`,
+        `excludedSymbols(${(result.excludedSymbols || []).length})=${(result.excludedSymbols || []).join(', ') || '-'}`,
+        '',
+        tableBlock('BEST_SYMBOLS', result.bestSymbols || []),
+        tableBlock('WORST_SYMBOLS', result.worstSymbols || []),
+        tableBlock('LONG_SHORT', result.longShort || []),
+        tableBlock('WEEKDAY', result.weekdayPerformance || []),
+        tableBlock('HOUR_NY', result.hourPerformance || []),
+        tableBlock('RECENT_TRADES', result.recentTrades || [])
+      ];
+      return lines.join('\n');
+    }
+
+    function metricBlock(name, item) {
+      return [
+        name,
+        `netPnl=${Number(item.netPnl || 0)}`,
+        `maxDrawdown=${Number(item.maxDrawdown || 0)}`,
+        `maxDrawdownPercent=${Number(item.maxDrawdownPercent || 0)}`,
+        `winRate=${Number(item.winRate || 0)}`,
+        `profitFactor=${Number(item.profitFactor || 0)}`,
+        `averageR=${Number(item.averageR || 0)}`,
+        `tradesPerDay=${Number(item.tradesPerDay || 0)}`
+      ].join('\n');
+    }
+
+    function tableBlock(name, items) {
+      if (!items.length) return `${name}\n-`;
+      return `${name}\n${items.slice(0, 100).map(item => JSON.stringify(item)).join('\n')}`;
     }
 
     function sideRows(items) {
@@ -269,6 +358,8 @@ public static class FuturesBacktestPage
 
     byId('start').addEventListener('click', () => start().catch(error => { byId('status').textContent = error.message; }));
     byId('stop').addEventListener('click', () => stop().catch(error => { byId('status').textContent = error.message; }));
+    byId('copyDiagnostics').addEventListener('click', () => copyDiagnostics());
+    byId('copyDiagnostics').disabled = true;
     status().catch(error => { byId('status').textContent = error.message; });
     setInterval(() => status().catch(() => {}), 5000);
   </script>

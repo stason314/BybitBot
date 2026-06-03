@@ -1421,6 +1421,9 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         var eligibleSet = eligibleSymbols.ToHashSet(StringComparer.OrdinalIgnoreCase);
         var outOfSampleTrades = trades
             .Where(trade => trade.EntryTime >= splitAt)
+            .OrderBy(trade => trade.EntryTime)
+            .ToArray();
+        var filteredOutOfSampleTrades = outOfSampleTrades
             .Where(trade => eligibleSet.Contains(trade.Symbol))
             .OrderBy(trade => trade.EntryTime)
             .ToArray();
@@ -1446,6 +1449,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             Metrics = BuildMetrics(outOfSampleTrades, splitAt, periodEnd, settings.InitialEquityUsdt),
             OptimizationMetrics = BuildMetrics(optimizationTrades, periodStart, splitAt, settings.InitialEquityUsdt),
             OutOfSampleMetrics = BuildMetrics(outOfSampleTrades, splitAt, periodEnd, settings.InitialEquityUsdt),
+            FilteredOutOfSampleMetrics = BuildMetrics(filteredOutOfSampleTrades, splitAt, periodEnd, settings.InitialEquityUsdt),
             EligibleSymbols = eligibleSymbols,
             ExcludedSymbols = excludedSymbols,
             BestSymbols = BuildSymbolPerformance(outOfSampleTrades).OrderByDescending(item => item.NetPnl).Take(10).ToArray(),

@@ -58,6 +58,8 @@ public sealed class FuturesBacktestResult
 
     public FuturesBacktestMetrics OutOfSampleMetrics { get; init; } = new();
 
+    public FuturesBacktestMetrics FilteredOutOfSampleMetrics { get; init; } = new();
+
     public IReadOnlyList<string> EligibleSymbols { get; init; } = [];
 
     public IReadOnlyList<string> ExcludedSymbols { get; init; } = [];
