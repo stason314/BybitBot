@@ -66,7 +66,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             _status = new FuturesBacktestStatusResponse
             {
                 IsRunning = true,
-                Status = "Starting 4H NY sweep/engulfing/pinbar backtest",
+                Status = "Starting 4H NY sweep/engulfing/pinbar/3-bar backtest",
                 StartedAt = DateTimeOffset.UtcNow,
                 ProgressPercent = 0m
             };
@@ -312,7 +312,8 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             if (signal is not null)
             {
                 if (!string.Equals(signal.Pattern, "Engulfing", StringComparison.OrdinalIgnoreCase) &&
-                    !string.Equals(signal.Pattern, "Pinbar", StringComparison.OrdinalIgnoreCase))
+                    !string.Equals(signal.Pattern, "Pinbar", StringComparison.OrdinalIgnoreCase) &&
+                    !string.Equals(signal.Pattern, "3-Bar Continuation", StringComparison.OrdinalIgnoreCase))
                 {
                     falseBreakoutCount++;
                 }
@@ -440,7 +441,8 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
 
         var closed = session.Take(index + 1).ToArray();
         return TryFindEngulfingSignal(closed, upperBoundary, lowerBoundary) ??
-            TryFindPinbarSignal(closed, upperBoundary, lowerBoundary);
+            TryFindPinbarSignal(closed, upperBoundary, lowerBoundary) ??
+            TryFindThreeBarContinuationSignal(closed, upperBoundary, lowerBoundary);
     }
 
     private NySessionSignal BuildSignal(
@@ -647,6 +649,95 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         return null;
     }
 
+    private NySessionSignal? TryFindThreeBarContinuationSignal(
+        IReadOnlyList<Candle> closed,
+        decimal upperBoundary,
+        decimal lowerBoundary)
+    {
+        if (!_strategyOptions.ThreeBarContinuationEnabled || closed.Count < 3 || upperBoundary <= lowerBoundary)
+        {
+            return null;
+        }
+
+        var first = closed[^3];
+        var second = closed[^2];
+        var third = closed[^1];
+        if (!IsInsideRange(first.Close, upperBoundary, lowerBoundary) ||
+            !IsInsideRange(second.Close, upperBoundary, lowerBoundary) ||
+            !IsInsideRange(third.Close, upperBoundary, lowerBoundary))
+        {
+            return null;
+        }
+
+        var firstBody = Math.Abs(first.Close - first.Open);
+        var secondBody = Math.Abs(second.Close - second.Open);
+        var thirdBody = Math.Abs(third.Close - third.Open);
+        if (firstBody <= 0m || secondBody <= 0m || thirdBody <= 0m)
+        {
+            return null;
+        }
+
+        var outerBodyRatio = decimal.Min(firstBody, thirdBody) / secondBody;
+        if (outerBodyRatio < _strategyOptions.MinThreeBarOuterBodyRatio)
+        {
+            return null;
+        }
+
+        var bullish = first.Close > first.Open &&
+            second.Close < second.Open &&
+            third.Close > third.Open &&
+            third.Close > first.Close;
+        if (bullish)
+        {
+            var stop = decimal.Min(first.Low, decimal.Min(second.Low, third.Low));
+            var risk = third.Close - stop;
+            if (risk > 0m)
+            {
+                return BuildSignal(
+                    "Long",
+                    third.OpenTime,
+                    third.OpenTime,
+                    lowerBoundary,
+                    upperBoundary,
+                    lowerBoundary,
+                    third.Close,
+                    stop,
+                    "Bullish 3-bar continuation inside the active 4H range.",
+                    closed,
+                    "3-Bar Continuation",
+                    outerBodyRatio);
+            }
+        }
+
+        var bearish = first.Close < first.Open &&
+            second.Close > second.Open &&
+            third.Close < third.Open &&
+            third.Close < first.Close;
+        if (bearish)
+        {
+            var stop = decimal.Max(first.High, decimal.Max(second.High, third.High));
+            var risk = stop - third.Close;
+            if (risk > 0m)
+            {
+                return BuildSignal(
+                    "Short",
+                    third.OpenTime,
+                    third.OpenTime,
+                    upperBoundary,
+                    upperBoundary,
+                    lowerBoundary,
+                    third.Close,
+                    stop,
+                    "Bearish 3-bar continuation inside the active 4H range.",
+                    closed,
+                    "3-Bar Continuation",
+                    outerBodyRatio);
+            }
+        }
+
+        return null;
+    }
+
     private BacktestFilterResult EvaluateBacktestFilters(
         NySessionSignal signal,
         IReadOnlyList<Candle> fiveMinuteCandlesSoFar,
@@ -661,6 +752,11 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         if (string.Equals(signal.Pattern, "Pinbar", StringComparison.OrdinalIgnoreCase))
         {
             return EvaluatePinbarBacktestFilters(signal, btc15m);
+        }
+
+        if (string.Equals(signal.Pattern, "3-Bar Continuation", StringComparison.OrdinalIgnoreCase))
+        {
+            return EvaluateThreeBarContinuationBacktestFilters(signal, btc15m);
         }
 
         if (signal.SweepDepthPercent < _strategyOptions.MinSweepDepthPercent)
@@ -694,6 +790,29 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         }
 
         if (signal.BreakoutVolumeRatio >= _strategyOptions.HighBreakoutVolumeRatio)
+        {
+            return new BacktestFilterResult(false, false);
+        }
+
+        var btc15mSoFar = btc15m
+            .Where(candle => candle.OpenTime.AddMinutes(15) <= signal.SignalCandleOpenTime.AddMinutes(5))
+            .OrderBy(candle => candle.OpenTime)
+            .ToArray();
+        if (IsBtcTrendAgainstSignal(signal.Side, btc15mSoFar))
+        {
+            return new BacktestFilterResult(false, false);
+        }
+
+        return new BacktestFilterResult(true, false);
+    }
+
+    private BacktestFilterResult EvaluateThreeBarContinuationBacktestFilters(
+        NySessionSignal signal,
+        IReadOnlyList<Candle> btc15m)
+    {
+        if (!_strategyOptions.ThreeBarContinuationEnabled ||
+            signal.BodyRatio < _strategyOptions.MinThreeBarOuterBodyRatio ||
+            signal.StopDistancePercent > _strategyOptions.MaxStopPercent)
         {
             return new BacktestFilterResult(false, false);
         }
@@ -942,7 +1061,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         var publicTrades = outOfSampleTrades.Select(ToPublicTrade).ToArray();
         return new FuturesBacktestResult
         {
-            StrategyName = "NY 08:00 4H Sweep Reversal + Engulfing + Pinbar",
+            StrategyName = "NY 08:00 4H Sweep Reversal + Engulfing + Pinbar + 3-Bar Continuation",
             PeriodStart = periodStart,
             PeriodEnd = periodEnd,
             SymbolsRequested = symbolsRequested,

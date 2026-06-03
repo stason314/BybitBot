@@ -68,6 +68,13 @@ public sealed class NySessionBreakoutOptions
     [Range(typeof(decimal), "0.00000001", "100")]
     public decimal MinPinbarWickRangePercent { get; init; } = 50m;
 
+    [ConfigurationKeyName("NY_SESSION_THREE_BAR_CONTINUATION_ENABLED")]
+    public bool ThreeBarContinuationEnabled { get; init; } = true;
+
+    [ConfigurationKeyName("NY_SESSION_MIN_THREE_BAR_OUTER_BODY_RATIO")]
+    [Range(typeof(decimal), "1", "100")]
+    public decimal MinThreeBarOuterBodyRatio { get; init; } = 1.25m;
+
     [ConfigurationKeyName("NY_SESSION_MAX_OPEN_POSITIONS")]
     [Range(1, 100)]
     public int MaxOpenPositions { get; init; } = 5;

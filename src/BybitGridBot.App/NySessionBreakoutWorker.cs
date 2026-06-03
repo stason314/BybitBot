@@ -672,6 +672,11 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
             return await EvaluatePinbarFiltersAsync(signal, cancellationToken);
         }
 
+        if (string.Equals(signal.Pattern, "3-Bar Continuation", StringComparison.OrdinalIgnoreCase))
+        {
+            return await EvaluateThreeBarContinuationFiltersAsync(signal, cancellationToken);
+        }
+
         if (signal.SweepDepthPercent < _options.MinSweepDepthPercent)
         {
             return new NySessionEntryFilterResult
@@ -871,6 +876,59 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
             IsAllowed = true,
             Mode = "Pinbar",
             Reason = "Pinbar pattern passed filters."
+        };
+    }
+
+    private async Task<NySessionEntryFilterResult> EvaluateThreeBarContinuationFiltersAsync(
+        NySessionSignal signal,
+        CancellationToken cancellationToken)
+    {
+        if (!_options.ThreeBarContinuationEnabled)
+        {
+            return new NySessionEntryFilterResult
+            {
+                IsAllowed = false,
+                Mode = "3-Bar Continuation",
+                Reason = "3-bar continuation pattern is disabled."
+            };
+        }
+
+        if (signal.BodyRatio < _options.MinThreeBarOuterBodyRatio)
+        {
+            return new NySessionEntryFilterResult
+            {
+                IsAllowed = false,
+                Mode = "3-Bar Continuation",
+                Reason = $"Outer/body ratio {signal.BodyRatio:F2} is below {_options.MinThreeBarOuterBodyRatio:F2}."
+            };
+        }
+
+        if (signal.StopDistancePercent > _options.MaxStopPercent)
+        {
+            return new NySessionEntryFilterResult
+            {
+                IsAllowed = false,
+                Mode = "3-Bar Continuation",
+                Reason = $"Stop distance {signal.StopDistancePercent:F4}% is above {_options.MaxStopPercent:F4}%."
+            };
+        }
+
+        var btcTrend = await AnalyzeBtcTrendAsync(signal.Side, cancellationToken);
+        if (btcTrend.IsBlocked)
+        {
+            return new NySessionEntryFilterResult
+            {
+                IsAllowed = false,
+                Mode = "3-Bar Continuation",
+                Reason = btcTrend.Reason
+            };
+        }
+
+        return new NySessionEntryFilterResult
+        {
+            IsAllowed = true,
+            Mode = "3-Bar Continuation",
+            Reason = "3-bar continuation pattern passed filters."
         };
     }
 
@@ -1087,6 +1145,13 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
             return pinbarSignal;
         }
 
+        var threeBarSignal = TryFindThreeBarContinuationSignal(closed, upperBoundary, lowerBoundary);
+        if (threeBarSignal is not null &&
+            (latestSignal is null || threeBarSignal.SignalCandleOpenTime > latestSignal.SignalCandleOpenTime))
+        {
+            return threeBarSignal;
+        }
+
         return latestSignal;
     }
 
@@ -1207,6 +1272,95 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
                     closed,
                     "Engulfing",
                     currentBody / previousBody);
+            }
+        }
+
+        return null;
+    }
+
+    private NySessionSignal? TryFindThreeBarContinuationSignal(
+        IReadOnlyList<Candle> closed,
+        decimal upperBoundary,
+        decimal lowerBoundary)
+    {
+        if (!_options.ThreeBarContinuationEnabled || closed.Count < 3 || upperBoundary <= lowerBoundary)
+        {
+            return null;
+        }
+
+        var first = closed[^3];
+        var second = closed[^2];
+        var third = closed[^1];
+        if (!IsInsideRange(first.Close, upperBoundary, lowerBoundary) ||
+            !IsInsideRange(second.Close, upperBoundary, lowerBoundary) ||
+            !IsInsideRange(third.Close, upperBoundary, lowerBoundary))
+        {
+            return null;
+        }
+
+        var firstBody = Math.Abs(first.Close - first.Open);
+        var secondBody = Math.Abs(second.Close - second.Open);
+        var thirdBody = Math.Abs(third.Close - third.Open);
+        if (firstBody <= 0m || secondBody <= 0m || thirdBody <= 0m)
+        {
+            return null;
+        }
+
+        var outerBodyRatio = decimal.Min(firstBody, thirdBody) / secondBody;
+        if (outerBodyRatio < _options.MinThreeBarOuterBodyRatio)
+        {
+            return null;
+        }
+
+        var bullish = first.Close > first.Open &&
+            second.Close < second.Open &&
+            third.Close > third.Open &&
+            third.Close > first.Close;
+        if (bullish)
+        {
+            var stop = decimal.Min(first.Low, decimal.Min(second.Low, third.Low));
+            var risk = third.Close - stop;
+            if (risk > 0m)
+            {
+                return BuildSignal(
+                    "Long",
+                    third.OpenTime,
+                    third.OpenTime,
+                    lowerBoundary,
+                    upperBoundary,
+                    lowerBoundary,
+                    third.Close,
+                    stop,
+                    "Bullish 3-bar continuation inside the active 4H range.",
+                    closed,
+                    "3-Bar Continuation",
+                    outerBodyRatio);
+            }
+        }
+
+        var bearish = first.Close < first.Open &&
+            second.Close > second.Open &&
+            third.Close < third.Open &&
+            third.Close < first.Close;
+        if (bearish)
+        {
+            var stop = decimal.Max(first.High, decimal.Max(second.High, third.High));
+            var risk = stop - third.Close;
+            if (risk > 0m)
+            {
+                return BuildSignal(
+                    "Short",
+                    third.OpenTime,
+                    third.OpenTime,
+                    upperBoundary,
+                    upperBoundary,
+                    lowerBoundary,
+                    third.Close,
+                    stop,
+                    "Bearish 3-bar continuation inside the active 4H range.",
+                    closed,
+                    "3-Bar Continuation",
+                    outerBodyRatio);
             }
         }
 
@@ -1416,8 +1570,13 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
                 return "Engulfing";
             }
 
-            return string.Equals(signal.Pattern, "Pinbar", StringComparison.OrdinalIgnoreCase)
-                ? "Pinbar"
+            if (string.Equals(signal.Pattern, "Pinbar", StringComparison.OrdinalIgnoreCase))
+            {
+                return "Pinbar";
+            }
+
+            return string.Equals(signal.Pattern, "3-Bar Continuation", StringComparison.OrdinalIgnoreCase)
+                ? "3-Bar"
                 : "Signal";
         }
 
@@ -1465,6 +1624,7 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
         return item.State == "Signal" ||
             item.State == "Engulfing" ||
             item.State == "Pinbar" ||
+            item.State == "3-Bar" ||
             item.State == "Upper swept" ||
             item.State == "Lower swept" ||
             item.DistanceToUpperPercent <= _options.NearBoundaryPercent ||
@@ -1478,6 +1638,7 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
             "Signal" => 100m,
             "Engulfing" => 90m,
             "Pinbar" => 85m,
+            "3-Bar" => 82m,
             "Upper swept" or "Lower swept" => 80m,
             _ => 50m
         };
@@ -1665,6 +1826,7 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
             {
                 "Engulfing" => "ny-session-engulfing",
                 "Pinbar" => "ny-session-pinbar",
+                "3-Bar Continuation" => "ny-session-3-bar-continuation",
                 _ => "ny-session-4h-sweep-reclaim"
             }
         };
