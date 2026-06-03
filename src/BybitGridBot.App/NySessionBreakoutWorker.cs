@@ -763,7 +763,7 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
         }
     }
 
-    private static decimal? ResolvePaperExitPrice(
+    private decimal? ResolvePaperExitPrice(
         FuturesPositionSnapshot position,
         FuturesOrderRecord entryOrder,
         IReadOnlyList<Candle> candles,
