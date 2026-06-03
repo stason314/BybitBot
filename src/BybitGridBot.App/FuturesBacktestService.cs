@@ -1861,20 +1861,26 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             .ToArray();
         var eligibleSet = eligibleSymbols.ToHashSet(StringComparer.OrdinalIgnoreCase);
         var optimizationStrategyGates = BuildStrategyGatePerformance(optimizationTrades);
+        var outOfSampleTrades = closedTrades
+            .Where(trade => trade.EntryTime >= splitAt)
+            .OrderBy(trade => trade.EntryTime)
+            .ToArray();
+        var outOfSampleStrategyGates = BuildStrategyGatePerformance(outOfSampleTrades)
+            .ToDictionary(
+                item => BuildStrategyGateKey(item.StrategyName, item.Symbol, item.Direction),
+                StringComparer.OrdinalIgnoreCase);
         var eligibleStrategySymbolDirections = optimizationStrategyGates
+            .Where(item => IsLiveGateStrategyEnabled(item.StrategyName))
             .Where(item => item.TradesCount >= _strategyRoutingOptions.MinTradesForStrategySymbolGating)
             .Where(item =>
                 item.ProfitFactor >= _strategyRoutingOptions.MinProfitFactorToEnable &&
                 item.AverageR >= _strategyRoutingOptions.MinAverageRToEnable &&
                 item.NetPnl > 0m)
+            .Where(item => IsOosGateConfirmed(item, outOfSampleStrategyGates))
             .Select(item => BuildStrategyGateKey(item.StrategyName, item.Symbol, item.Direction))
             .OrderBy(key => key)
             .ToArray();
         var eligibleStrategyGateSet = eligibleStrategySymbolDirections.ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var outOfSampleTrades = closedTrades
-            .Where(trade => trade.EntryTime >= splitAt)
-            .OrderBy(trade => trade.EntryTime)
-            .ToArray();
         var filteredOutOfSampleTrades = outOfSampleTrades
             .Where(trade => eligibleStrategyGateSet.Contains(BuildStrategyGateKey(trade.Pattern, trade.Symbol, trade.Side)))
             .OrderBy(trade => trade.EntryTime)
@@ -1951,6 +1957,22 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
 
     private static bool IsOpenAtBacktestEnd(BacktestTradeInternal trade) =>
         string.Equals(trade.ExitReason, "BacktestEnd", StringComparison.OrdinalIgnoreCase);
+
+    private bool IsOosGateConfirmed(
+        StrategyGatePerformance optimizationGate,
+        IReadOnlyDictionary<string, StrategyGatePerformance> outOfSampleGates)
+    {
+        var key = BuildStrategyGateKey(optimizationGate.StrategyName, optimizationGate.Symbol, optimizationGate.Direction);
+        return outOfSampleGates.TryGetValue(key, out var outOfSampleGate) &&
+            outOfSampleGate.TradesCount >= _strategyRoutingOptions.MinOosTradesForStrategySymbolGating &&
+            outOfSampleGate.ProfitFactor >= _strategyRoutingOptions.MinOosProfitFactorToEnable &&
+            outOfSampleGate.AverageR >= _strategyRoutingOptions.MinOosAverageRToEnable &&
+            outOfSampleGate.NetPnl >= 0m;
+    }
+
+    private bool IsLiveGateStrategyEnabled(string strategyName) =>
+        !string.Equals(strategyName, NYSweepReversalStrategy.Name, StringComparison.OrdinalIgnoreCase) ||
+        _strategyRoutingOptions.NySweepLiveTradingEnabled;
 
     private static string BuildStrategyGateKey(string strategyName, string symbol, string direction) =>
         $"{NormalizeStrategyGateText(strategyName)}:{NormalizeStrategyGateSymbol(symbol)}:{NormalizeStrategyGateText(direction)}";

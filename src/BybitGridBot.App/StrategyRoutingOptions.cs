@@ -44,6 +44,18 @@ public sealed class StrategyRoutingOptions
     [Range(typeof(decimal), "-100", "100")]
     public decimal MinAverageRToEnable { get; init; } = 0.05m;
 
+    [ConfigurationKeyName("MIN_OOS_TRADES_FOR_STRATEGY_SYMBOL_GATING")]
+    [Range(1, 10000)]
+    public int MinOosTradesForStrategySymbolGating { get; init; } = 1;
+
+    [ConfigurationKeyName("MIN_OOS_PROFIT_FACTOR_TO_ENABLE")]
+    [Range(typeof(decimal), "0", "1000")]
+    public decimal MinOosProfitFactorToEnable { get; init; } = 1.05m;
+
+    [ConfigurationKeyName("MIN_OOS_AVERAGE_R_TO_ENABLE")]
+    [Range(typeof(decimal), "-100", "100")]
+    public decimal MinOosAverageRToEnable { get; init; } = 0m;
+
     [ConfigurationKeyName("DISABLE_AFTER_NEGATIVE_TRADES")]
     [Range(1, 10000)]
     public int DisableAfterNegativeTrades { get; init; } = 100;
