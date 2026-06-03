@@ -293,7 +293,7 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
             }
 
             _lastScanAt = now;
-            _status = $"Monitoring {nextPool.Length} pairs";
+            _status = $"Monitoring {nextPool.Count} pairs";
         }
 
         await SyncOpenPositionsAsync(nextPool, cancellationToken);
