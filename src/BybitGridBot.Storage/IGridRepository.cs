@@ -30,10 +30,12 @@ public interface IGridRepository
     Task<FuturesOrderRecord?> GetFuturesOrderByLinkIdAsync(string orderLinkId, CancellationToken cancellationToken);
     Task UpsertFuturesOrderAsync(FuturesOrderRecord order, CancellationToken cancellationToken);
     Task<FuturesPositionSnapshot?> GetFuturesPositionAsync(string symbol, CancellationToken cancellationToken);
+    Task<IReadOnlyList<FuturesPositionSnapshot>> GetOpenFuturesPositionsAsync(CancellationToken cancellationToken);
     Task UpsertFuturesPositionAsync(FuturesPositionSnapshot position, TradingMode tradingMode, CancellationToken cancellationToken);
     Task AddFuturesFillAsync(FuturesFillRecord fill, CancellationToken cancellationToken);
     Task<bool> FuturesFillExistsAsync(string execId, CancellationToken cancellationToken);
     Task<IReadOnlyList<FuturesFillRecord>> GetFuturesFillsAsync(string symbol, int limit, CancellationToken cancellationToken);
+    Task<IReadOnlyList<FuturesFillRecord>> GetRecentFuturesFillsAsync(int limit, CancellationToken cancellationToken);
     Task<ExecutionTurnoverStats> GetFuturesFillTurnoverAsync(string symbol, DateOnly today, CancellationToken cancellationToken);
     Task<IReadOnlyList<FuturesRiskDecisionRecord>> GetFuturesRiskDecisionsAsync(string symbol, int limit, CancellationToken cancellationToken);
     Task AddFuturesRiskDecisionAsync(FuturesRiskDecisionRecord decision, CancellationToken cancellationToken);

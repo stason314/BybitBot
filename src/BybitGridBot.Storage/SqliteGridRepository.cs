@@ -1197,6 +1197,29 @@ public sealed class SqliteGridRepository : IGridRepository
         return ReadFuturesPosition(reader);
     }
 
+    public async Task<IReadOnlyList<FuturesPositionSnapshot>> GetOpenFuturesPositionsAsync(CancellationToken cancellationToken)
+    {
+        const string sql = """
+            SELECT symbol, category, side, size, entry_price, mark_price, liquidation_price, position_value_usdt,
+                   margin_used_usdt, leverage, unrealized_pnl, realized_pnl, position_idx, updated_at, funding
+            FROM futures_positions
+            WHERE CAST(size AS REAL) > 0
+            ORDER BY updated_at DESC;
+            """;
+
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        var result = new List<FuturesPositionSnapshot>();
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            result.Add(ReadFuturesPosition(reader));
+        }
+
+        return result;
+    }
+
     public async Task UpsertFuturesPositionAsync(FuturesPositionSnapshot position, TradingMode tradingMode, CancellationToken cancellationToken)
     {
         const string sql = """
@@ -1307,6 +1330,29 @@ public sealed class SqliteGridRepository : IGridRepository
         await using var command = connection.CreateCommand();
         command.CommandText = sql;
         command.Parameters.AddWithValue("$symbol", symbol);
+        command.Parameters.AddWithValue("$limit", Math.Max(1, limit));
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        var result = new List<FuturesFillRecord>();
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            result.Add(ReadFuturesFill(reader));
+        }
+
+        return result;
+    }
+
+    public async Task<IReadOnlyList<FuturesFillRecord>> GetRecentFuturesFillsAsync(int limit, CancellationToken cancellationToken)
+    {
+        const string sql = """
+            SELECT fill_id, exec_id, order_link_id, symbol, action, side, exec_type, quantity, price, fee, realized_pnl, funding, created_at
+            FROM futures_fills
+            ORDER BY created_at DESC
+            LIMIT $limit;
+            """;
+
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
         command.Parameters.AddWithValue("$limit", Math.Max(1, limit));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         var result = new List<FuturesFillRecord>();

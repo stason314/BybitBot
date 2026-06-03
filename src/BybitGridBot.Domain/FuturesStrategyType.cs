@@ -9,5 +9,6 @@ public enum FuturesStrategyType
     Pause = 5,
     TrendFollowShortOnly = 6,
     BreakdownShort = 7,
-    GridShortOnly = 8
+    GridShortOnly = 8,
+    NySessionBreakout = 9
 }

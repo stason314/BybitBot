@@ -40,6 +40,7 @@ builder.Services.AddOptions<FuturesStrategyQualityOptions>().Bind(builder.Config
 builder.Services.AddOptions<FuturesMainnetChecklistOptions>().Bind(builder.Configuration);
 builder.Services.AddOptions<TelegramOptions>().Bind(builder.Configuration);
 builder.Services.AddOptions<RotationOptions>().Bind(builder.Configuration);
+builder.Services.AddOptions<NySessionBreakoutOptions>().Bind(builder.Configuration);
 
 builder.Services.AddSingleton<BybitSigner>();
 builder.Services.AddSingleton<BybitUserStreamTelemetry>();
@@ -89,6 +90,8 @@ builder.Services.AddSingleton<IFuturesDashboardService, FuturesDashboardService>
 builder.Services.AddSingleton<IMarketScannerService, MarketScannerService>();
 builder.Services.AddSingleton<IFuturesMarketScannerService, FuturesMarketScannerService>();
 builder.Services.AddSingleton<IRotationManagerService, RotationManagerService>();
+builder.Services.AddSingleton<NySessionBreakoutWorker>();
+builder.Services.AddSingleton<INySessionBreakoutRuntime>(serviceProvider => serviceProvider.GetRequiredService<NySessionBreakoutWorker>());
 
 builder.Services.AddHttpClient<IBybitRestClient, BybitRestClient>(client =>
 {
@@ -115,7 +118,7 @@ if (ShouldRunSpotWorker(builder.Configuration))
     builder.Services.AddHostedService<MarketRotationWorker>();
 }
 
-builder.Services.AddHostedService<FuturesBotWorker>();
+builder.Services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<NySessionBreakoutWorker>());
 builder.Services.AddHostedService<FuturesUserStreamWorker>();
 
 var app = builder.Build();
@@ -125,8 +128,8 @@ await app.Services.GetRequiredService<IGridRepository>().InitializeAsync(Cancell
 app.MapGet("/", (IGridDashboardService dashboardService) =>
     Results.Content(dashboardService.RenderDashboardPage(), "text/html; charset=utf-8"));
 
-app.MapGet("/futures", (IFuturesDashboardService dashboardService) =>
-    Results.Content(dashboardService.RenderDashboardPage(), "text/html; charset=utf-8"));
+app.MapGet("/futures", () =>
+    Results.Content(NySessionDashboardPage.Render(), "text/html; charset=utf-8"));
 
 app.MapGet("/api/dashboard", async (string? symbol, bool? fast, IGridDashboardService dashboardService, CancellationToken cancellationToken) =>
     Results.Ok(await dashboardService.GetDashboardAsync(symbol, fast == true, cancellationToken)));
@@ -170,8 +173,8 @@ app.MapDelete("/api/settings/{symbol}", async (string symbol, IGridDashboardServ
     return response.Success ? Results.Ok(response) : Results.BadRequest(response);
 });
 
-app.MapGet("/api/futures/dashboard", async (string? symbol, IFuturesDashboardService dashboardService, CancellationToken cancellationToken) =>
-    Results.Ok(await dashboardService.GetDashboardAsync(symbol, cancellationToken)));
+app.MapGet("/api/futures/dashboard", async (INySessionBreakoutRuntime runtime, CancellationToken cancellationToken) =>
+    Results.Ok(await runtime.GetDashboardAsync(cancellationToken)));
 
 app.MapGet("/api/futures/market-scan", async (int? limit, IFuturesMarketScannerService marketScannerService, CancellationToken cancellationToken) =>
     Results.Ok(await marketScannerService.ScanAsync(limit, cancellationToken)));
