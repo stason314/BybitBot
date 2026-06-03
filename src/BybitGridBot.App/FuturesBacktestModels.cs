@@ -52,6 +52,10 @@ public sealed class FuturesBacktestResult
 
     public int TrueBreakoutBlockedCount { get; init; }
 
+    public int OpenAtBacktestEndCount { get; init; }
+
+    public decimal OpenAtBacktestEndUnrealizedPnl { get; init; }
+
     public FuturesBacktestMetrics Metrics { get; init; } = new();
 
     public FuturesBacktestMetrics OptimizationMetrics { get; init; } = new();
@@ -63,6 +67,10 @@ public sealed class FuturesBacktestResult
     public IReadOnlyList<string> EligibleSymbols { get; init; } = [];
 
     public IReadOnlyList<string> ExcludedSymbols { get; init; } = [];
+
+    public IReadOnlyList<string> EligibleStrategySymbolDirections { get; init; } = [];
+
+    public IReadOnlyList<string> ExcludedStrategySymbolDirections { get; init; } = [];
 
     public IReadOnlyList<FuturesBacktestSymbolPerformance> BestSymbols { get; init; } = [];
 
@@ -79,6 +87,8 @@ public sealed class FuturesBacktestResult
     public IReadOnlyList<FuturesBacktestBucketPerformance> HourPerformance { get; init; } = [];
 
     public IReadOnlyList<FuturesBacktestTrade> RecentTrades { get; init; } = [];
+
+    public IReadOnlyList<FuturesBacktestTrade> OpenAtBacktestEndTrades { get; init; } = [];
 }
 
 public sealed class FuturesBacktestMetrics

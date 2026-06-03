@@ -522,10 +522,21 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
                 continue;
             }
 
-            if (!_backtestService.IsSymbolAllowedForTrading(item.Symbol, _options.RequireBacktestSymbolFilter))
+            if (!IsLiveStrategyEnabled(signal.Pattern))
             {
                 MarkSignalHandled(item.Symbol, signal.SignalCandleOpenTime);
-                AddEvent(item.Symbol, "warning", "Symbol skipped by walk-forward backtest filter.");
+                AddEvent(item.Symbol, "warning", $"{signal.Pattern} {signal.Side} left shadow-only; live entries are disabled.");
+                continue;
+            }
+
+            if (!_backtestService.IsStrategySymbolDirectionAllowedForTrading(
+                    signal.Pattern,
+                    item.Symbol,
+                    signal.Side,
+                    _options.RequireBacktestSymbolFilter))
+            {
+                MarkSignalHandled(item.Symbol, signal.SignalCandleOpenTime);
+                AddEvent(item.Symbol, "warning", $"{signal.Pattern}:{item.Symbol}:{signal.Side} skipped by walk-forward strategy gate.");
                 continue;
             }
 
@@ -569,6 +580,10 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
         string.Equals(signal.Pattern, NYSweepReversalStrategy.Name, StringComparison.OrdinalIgnoreCase) ||
         string.Equals(signal.Pattern, TurtleTrendStrategy.Name, StringComparison.OrdinalIgnoreCase) ||
         string.Equals(signal.Pattern, BreakoutRetestStrategy.Name, StringComparison.OrdinalIgnoreCase);
+
+    private bool IsLiveStrategyEnabled(string strategyName) =>
+        !string.Equals(strategyName, NYSweepReversalStrategy.Name, StringComparison.OrdinalIgnoreCase) ||
+        _strategyRoutingOptions.NySweepLiveTradingEnabled;
 
     private async Task<NySessionSignal?> TryResolveScoreBasedSignalAsync(
         NySessionPoolItem item,

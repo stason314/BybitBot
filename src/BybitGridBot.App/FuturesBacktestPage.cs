@@ -128,12 +128,13 @@ public static class FuturesBacktestPage
       <div class="metric"><div class="label">Trades/day</div><div class="value" id="tradesDay">-</div></div>
       <div class="metric"><div class="label">Breakouts</div><div class="value" id="breakouts">-</div></div>
       <div class="metric"><div class="label">Eligible</div><div class="value" id="eligibleCount">-</div></div>
+      <div class="metric"><div class="label">Open @ end</div><div class="value" id="openAtEnd">-</div></div>
     </section>
 
     <section class="grid">
       <div class="panel">
-        <h2>Walk-forward symbols</h2>
-        <table><thead><tr><th>Allowed after 60d optimization</th><th>Excluded</th></tr></thead><tbody id="wfSymbols"><tr><td colspan="2" class="empty">Нет данных</td></tr></tbody></table>
+        <h2>Walk-forward gates</h2>
+        <table><thead><tr><th>Allowed strategy:symbol:direction</th><th>Excluded</th></tr></thead><tbody id="wfSymbols"><tr><td colspan="2" class="empty">Нет данных</td></tr></tbody></table>
       </div>
       <div class="panel">
         <h2>Walk-forward metrics</h2>
@@ -170,6 +171,10 @@ public static class FuturesBacktestPage
       <div class="panel">
         <h2>Recent trades</h2>
         <table><thead><tr><th>Symbol</th><th>Side</th><th>Pattern</th><th>Exit</th><th>PnL</th><th>R</th></tr></thead><tbody id="trades"><tr><td colspan="6" class="empty">Нет данных</td></tr></tbody></table>
+      </div>
+      <div class="panel">
+        <h2>Open at backtest end</h2>
+        <table><thead><tr><th>Symbol</th><th>Side</th><th>Pattern</th><th>Exit</th><th>PnL</th><th>R</th></tr></thead><tbody id="openTrades"><tr><td colspan="6" class="empty">Нет данных</td></tr></tbody></table>
       </div>
     </section>
   </main>
@@ -240,8 +245,11 @@ public static class FuturesBacktestPage
       byId('averageR').textContent = fmt.format(m.averageR || 0);
       byId('tradesDay').textContent = fmt.format(m.tradesPerDay || 0);
       byId('breakouts').textContent = `${result.falseBreakoutCount || 0} / ${result.trueBreakoutBlockedCount || 0}`;
-      byId('eligibleCount').textContent = `${(result.eligibleSymbols || []).length} / ${(result.excludedSymbols || []).length}`;
-      byId('wfSymbols').innerHTML = walkForwardSymbolRows(result.eligibleSymbols || [], result.excludedSymbols || []);
+      const eligibleGates = preferNonEmpty(result.eligibleStrategySymbolDirections, result.eligibleSymbols);
+      const excludedGates = preferNonEmpty(result.excludedStrategySymbolDirections, result.excludedSymbols);
+      byId('eligibleCount').textContent = `${eligibleGates.length} / ${excludedGates.length}`;
+      byId('openAtEnd').textContent = `${result.openAtBacktestEndCount || 0} (${pnl(result.openAtBacktestEndUnrealizedPnl)})`;
+      byId('wfSymbols').innerHTML = walkForwardSymbolRows(eligibleGates, excludedGates);
       byId('wfMetrics').innerHTML = walkForwardMetricRows(result.optimizationMetrics || {}, result.outOfSampleMetrics || {}, result.filteredOutOfSampleMetrics || {});
       byId('best').innerHTML = perfRows(result.bestSymbols || [], 'symbol');
       byId('worst').innerHTML = perfRows(result.worstSymbols || [], 'symbol');
@@ -251,6 +259,7 @@ public static class FuturesBacktestPage
       byId('weekdays').innerHTML = perfRows(result.weekdayPerformance || [], 'bucket');
       byId('hours').innerHTML = perfRows(result.hourPerformance || [], 'bucket');
       byId('trades').innerHTML = tradeRows(result.recentTrades || []);
+      byId('openTrades').innerHTML = tradeRows(result.openAtBacktestEndTrades || []);
     }
 
     function perfRows(items, key) {
@@ -261,6 +270,10 @@ public static class FuturesBacktestPage
           <td class="${cls(item.netPnl)}">${pnl(item.netPnl)}</td>
           <td>${pct(item.winRate)}</td>
         </tr>`).join('') : '<tr><td colspan="4" class="empty">Нет данных</td></tr>';
+    }
+
+    function preferNonEmpty(primary, fallback) {
+      return Array.isArray(primary) && primary.length ? primary : (fallback || []);
     }
 
     function walkForwardSymbolRows(eligible, excluded) {
@@ -327,6 +340,8 @@ public static class FuturesBacktestPage
         `symbolsRequested=${result.symbolsRequested || 0}`,
         `symbolsProcessed=${result.symbolsProcessed || 0}`,
         `tradesCount=${result.tradesCount || 0}`,
+        `openAtBacktestEndCount=${result.openAtBacktestEndCount || 0}`,
+        `openAtBacktestEndUnrealizedPnl=${Number(result.openAtBacktestEndUnrealizedPnl || 0)}`,
         `falseBreakoutCount=${result.falseBreakoutCount || 0}`,
         `trueBreakoutBlockedCount=${result.trueBreakoutBlockedCount || 0}`,
         '',
@@ -335,6 +350,8 @@ public static class FuturesBacktestPage
         metricBlock('OUT_OF_SAMPLE_30D_ALL_SYMBOLS', result.outOfSampleMetrics || {}),
         metricBlock('OUT_OF_SAMPLE_30D_ELIGIBLE_ONLY', result.filteredOutOfSampleMetrics || {}),
         '',
+        `eligibleStrategySymbolDirections(${(result.eligibleStrategySymbolDirections || []).length})=${(result.eligibleStrategySymbolDirections || []).join(', ') || '-'}`,
+        `excludedStrategySymbolDirections(${(result.excludedStrategySymbolDirections || []).length})=${(result.excludedStrategySymbolDirections || []).join(', ') || '-'}`,
         `eligibleSymbols(${(result.eligibleSymbols || []).length})=${(result.eligibleSymbols || []).join(', ') || '-'}`,
         `excludedSymbols(${(result.excludedSymbols || []).length})=${(result.excludedSymbols || []).join(', ') || '-'}`,
         '',
@@ -345,6 +362,7 @@ public static class FuturesBacktestPage
         tableBlock('PATTERN', result.patternPerformance || []),
         tableBlock('WEEKDAY', result.weekdayPerformance || []),
         tableBlock('HOUR_NY', result.hourPerformance || []),
+        tableBlock('OPEN_AT_BACKTEST_END', result.openAtBacktestEndTrades || []),
         tableBlock('RECENT_TRADES', result.recentTrades || [])
       ];
       return lines.join('\n');

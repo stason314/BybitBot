@@ -29,9 +29,12 @@ public sealed class StrategyRoutingOptions
     [ConfigurationKeyName("ENABLE_STRATEGY_SYMBOL_GATING")]
     public bool EnableStrategySymbolGating { get; init; } = true;
 
+    [ConfigurationKeyName("NYSWEEP_LIVE_TRADING_ENABLED")]
+    public bool NySweepLiveTradingEnabled { get; init; } = false;
+
     [ConfigurationKeyName("MIN_TRADES_FOR_STRATEGY_SYMBOL_GATING")]
     [Range(1, 10000)]
-    public int MinTradesForStrategySymbolGating { get; init; } = 50;
+    public int MinTradesForStrategySymbolGating { get; init; } = 3;
 
     [ConfigurationKeyName("MIN_PROFIT_FACTOR_TO_ENABLE")]
     [Range(typeof(decimal), "0", "1000")]
