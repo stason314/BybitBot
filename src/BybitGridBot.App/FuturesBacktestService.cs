@@ -20,7 +20,6 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
     private const string Category = "linear";
     private const string FiveMinuteInterval = "5";
     private const string FifteenMinuteInterval = "15";
-    private const string FourHourInterval = "240";
     private const int ExpectedNySessionFiveMinuteCandles = 96;
     private const int KlinePageLimit = 1000;
     private const int MaxConcurrency = 2;
@@ -249,8 +248,9 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
     {
         var fiveMinuteCandles = await FetchHistoricalCandlesAsync(symbol, FiveMinuteInterval, periodStart, periodEnd, cancellationToken);
         var fifteenMinuteCandles = await FetchHistoricalCandlesAsync(symbol, FifteenMinuteInterval, periodStart, periodEnd, cancellationToken);
-        var turtleCandles = await FetchHistoricalCandlesAsync(symbol, _turtleOptions.Timeframe, periodStart.AddDays(-10), periodEnd, cancellationToken);
-        _ = await FetchHistoricalCandlesAsync(symbol, FourHourInterval, periodStart, periodEnd, cancellationToken);
+        var turtleCandles = _strategyRoutingOptions.SignalSelectionMode == SignalSelectionMode.ScoreBased
+            ? await FetchHistoricalCandlesAsync(symbol, _turtleOptions.Timeframe, periodStart.AddDays(-10), periodEnd, cancellationToken)
+            : Array.Empty<Candle>();
         if (fiveMinuteCandles.Count < 500 || fifteenMinuteCandles.Count < 200)
         {
             return new SymbolBacktestOutput(symbol, [], 0, 0);

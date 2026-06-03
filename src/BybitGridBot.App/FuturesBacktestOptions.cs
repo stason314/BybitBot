@@ -11,7 +11,7 @@ public sealed class FuturesBacktestOptions
 
     [ConfigurationKeyName("FUTURES_BACKTEST_SYMBOLS")]
     [Range(1, 200)]
-    public int Symbols { get; init; } = 50;
+    public int Symbols { get; init; } = 20;
 
     [ConfigurationKeyName("FUTURES_BACKTEST_ENTRY_NOTIONAL_USDT")]
     [Range(typeof(decimal), "0.00000001", "999999999")]

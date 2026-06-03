@@ -51,6 +51,9 @@ public static class FuturesBacktestPage
     .btn.secondary, .link.secondary { background: #fff; color: var(--accent); }
     .btn.danger { border-color: var(--bad); background: var(--bad); }
     .btn:disabled { cursor: wait; opacity: .62; }
+    .run-field { display: grid; gap: 3px; min-width: 84px; }
+    .run-field label { color: var(--muted); font-size: 11px; font-weight: 650; text-transform: uppercase; letter-spacing: .04em; }
+    .run-field input { width: 100%; min-height: 36px; border: 1px solid var(--line); border-radius: 7px; padding: 7px 9px; font: inherit; font-variant-numeric: tabular-nums; }
     .panel, .metric { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
     .metric { padding: 14px; min-width: 0; }
     .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
@@ -92,6 +95,14 @@ public static class FuturesBacktestPage
       </div>
       <div class="actions">
         <a class="link secondary" href="/futures">Futures bot</a>
+        <div class="run-field">
+          <label for="daysInput">Days</label>
+          <input id="daysInput" type="number" min="1" max="365" step="1" value="90" />
+        </div>
+        <div class="run-field">
+          <label for="symbolsInput">Pairs</label>
+          <input id="symbolsInput" type="number" min="1" max="200" step="1" value="20" />
+        </div>
         <button class="btn secondary" id="copyDiagnostics" type="button">Copy diagnostics</button>
         <button class="btn" id="start" type="button">Start</button>
         <button class="btn danger" id="stop" type="button">Stop</button>
@@ -180,13 +191,21 @@ public static class FuturesBacktestPage
 
     async function start() {
       byId('start').disabled = true;
+      const days = clampInt(byId('daysInput').value, 1, 365, 90);
+      const symbols = clampInt(byId('symbolsInput').value, 1, 200, 20);
       const response = await fetch('/api/futures/backtest/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ days: 90, symbols: 50 })
+        body: JSON.stringify({ days, symbols })
       });
       if (!response.ok) throw new Error(`Start ${response.status}`);
       render(await response.json());
+    }
+
+    function clampInt(value, min, max, fallback) {
+      const parsed = Number.parseInt(value, 10);
+      if (!Number.isFinite(parsed)) return fallback;
+      return Math.max(min, Math.min(max, parsed));
     }
 
     async function stop() {
@@ -206,6 +225,8 @@ public static class FuturesBacktestPage
         : data.completedAt ? `Completed: ${new Date(data.completedAt).toLocaleString()}` : 'ETA: -';
       byId('start').disabled = Boolean(data.isRunning);
       byId('stop').disabled = !data.isRunning;
+      byId('daysInput').disabled = Boolean(data.isRunning);
+      byId('symbolsInput').disabled = Boolean(data.isRunning);
       byId('copyDiagnostics').disabled = !data.result;
 
       const result = data.result;
