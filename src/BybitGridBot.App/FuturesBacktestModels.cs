@@ -27,6 +27,8 @@ public sealed class FuturesBacktestStatusResponse
 
     public DateTimeOffset? StartedAt { get; init; }
 
+    public DateTimeOffset? EstimatedCompletedAt { get; init; }
+
     public DateTimeOffset? CompletedAt { get; init; }
 
     public FuturesBacktestResult? Result { get; init; }
@@ -34,6 +36,8 @@ public sealed class FuturesBacktestStatusResponse
 
 public sealed class FuturesBacktestResult
 {
+    public string StrategyName { get; init; } = "NY 08:00 4H Sweep Reversal";
+
     public DateTimeOffset PeriodStart { get; init; }
 
     public DateTimeOffset PeriodEnd { get; init; }

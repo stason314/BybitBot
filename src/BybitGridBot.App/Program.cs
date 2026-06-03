@@ -133,6 +133,9 @@ app.MapGet("/", (IGridDashboardService dashboardService) =>
 app.MapGet("/futures", () =>
     Results.Content(NySessionDashboardPage.Render(), "text/html; charset=utf-8"));
 
+app.MapGet("/futures/backtest", () =>
+    Results.Content(FuturesBacktestPage.Render(), "text/html; charset=utf-8"));
+
 app.MapGet("/api/dashboard", async (string? symbol, bool? fast, IGridDashboardService dashboardService, CancellationToken cancellationToken) =>
     Results.Ok(await dashboardService.GetDashboardAsync(symbol, fast == true, cancellationToken)));
 
@@ -183,6 +186,9 @@ app.MapGet("/api/futures/backtest", (IFuturesBacktestService backtestService) =>
 
 app.MapPost("/api/futures/backtest/start", async (FuturesBacktestRequest request, IFuturesBacktestService backtestService, CancellationToken cancellationToken) =>
     Results.Ok(await backtestService.StartAsync(request, cancellationToken)));
+
+app.MapPost("/api/futures/backtest/stop", (IFuturesBacktestService backtestService) =>
+    Results.Ok(backtestService.Stop()));
 
 app.MapGet("/api/futures/market-scan", async (int? limit, IFuturesMarketScannerService marketScannerService, CancellationToken cancellationToken) =>
     Results.Ok(await marketScannerService.ScanAsync(limit, cancellationToken)));

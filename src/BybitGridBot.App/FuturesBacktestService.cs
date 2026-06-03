@@ -9,6 +9,8 @@ public interface IFuturesBacktestService
     FuturesBacktestStatusResponse GetStatus();
 
     Task<FuturesBacktestStatusResponse> StartAsync(FuturesBacktestRequest request, CancellationToken cancellationToken);
+
+    FuturesBacktestStatusResponse Stop();
 }
 
 public sealed class FuturesBacktestService : IFuturesBacktestService
@@ -58,17 +60,40 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             }
 
             _runCancellation?.Dispose();
-            _runCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            _runCancellation = new CancellationTokenSource();
             _status = new FuturesBacktestStatusResponse
             {
                 IsRunning = true,
-                Status = "Starting backtest",
+                Status = "Starting 4H NY sweep/reversal backtest",
                 StartedAt = DateTimeOffset.UtcNow,
                 ProgressPercent = 0m
             };
 
             _ = Task.Run(() => RunBacktestAsync(request, _runCancellation.Token), CancellationToken.None);
             return Task.FromResult(_status);
+        }
+    }
+
+    public FuturesBacktestStatusResponse Stop()
+    {
+        lock (_sync)
+        {
+            if (!_status.IsRunning)
+            {
+                return _status;
+            }
+
+            _runCancellation?.Cancel();
+            _status = new FuturesBacktestStatusResponse
+            {
+                IsRunning = true,
+                Status = "Stopping backtest",
+                ProgressPercent = _status.ProgressPercent,
+                StartedAt = _status.StartedAt,
+                EstimatedCompletedAt = _status.EstimatedCompletedAt,
+                Result = _status.Result
+            };
+            return _status;
         }
     }
 
@@ -144,6 +169,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                     Status = "Completed",
                     ProgressPercent = 100m,
                     StartedAt = _status.StartedAt,
+                    EstimatedCompletedAt = null,
                     CompletedAt = DateTimeOffset.UtcNow,
                     Result = result
                 };
@@ -159,6 +185,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                     Status = "Cancelled",
                     ProgressPercent = _status.ProgressPercent,
                     StartedAt = _status.StartedAt,
+                    EstimatedCompletedAt = null,
                     CompletedAt = DateTimeOffset.UtcNow,
                     Result = _status.Result
                 };
@@ -175,6 +202,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                     Status = $"Failed: {exception.Message}",
                     ProgressPercent = _status.ProgressPercent,
                     StartedAt = _status.StartedAt,
+                    EstimatedCompletedAt = null,
                     CompletedAt = DateTimeOffset.UtcNow,
                     Result = _status.Result
                 };
@@ -582,6 +610,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         var publicTrades = trades.Select(ToPublicTrade).ToArray();
         return new FuturesBacktestResult
         {
+            StrategyName = "NY 08:00 4H Sweep Reversal",
             PeriodStart = periodStart,
             PeriodEnd = periodEnd,
             SymbolsRequested = symbolsRequested,
@@ -763,15 +792,35 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
     {
         lock (_sync)
         {
+            var roundedProgress = decimal.Round(Math.Clamp(progressPercent, 0m, 100m), 2);
             _status = new FuturesBacktestStatusResponse
             {
                 IsRunning = true,
                 Status = message,
-                ProgressPercent = decimal.Round(Math.Clamp(progressPercent, 0m, 100m), 2),
+                ProgressPercent = roundedProgress,
                 StartedAt = _status.StartedAt,
+                EstimatedCompletedAt = EstimateCompletion(_status.StartedAt, roundedProgress),
                 Result = _status.Result
             };
         }
+    }
+
+    private static DateTimeOffset? EstimateCompletion(DateTimeOffset? startedAt, decimal progressPercent)
+    {
+        if (startedAt is null || progressPercent <= 1m || progressPercent >= 100m)
+        {
+            return null;
+        }
+
+        var elapsed = DateTimeOffset.UtcNow - startedAt.Value;
+        if (elapsed <= TimeSpan.Zero)
+        {
+            return null;
+        }
+
+        var totalSeconds = elapsed.TotalSeconds / ((double)progressPercent / 100d);
+        var remaining = TimeSpan.FromSeconds(Math.Max(0d, totalSeconds - elapsed.TotalSeconds));
+        return DateTimeOffset.UtcNow.Add(remaining);
     }
 
     private static bool IsTradable(BybitInstrumentInfo instrument) =>
