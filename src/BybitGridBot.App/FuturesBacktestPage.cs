@@ -91,7 +91,7 @@ public static class FuturesBacktestPage
     <header>
       <div>
         <h1>Backtest 4H NY Strategy</h1>
-        <div class="sub">Тестирует sweep reversal, engulfing, pinbar, 3-bar continuation, 3-bar reversal, breakout candle и shrinking candles. Метрики считаются по 30 дням out-of-sample после 60 дней отбора символов.</div>
+        <div class="sub">Тестирует score-based regime router. Live gate считается только по strategy:symbol:direction; symbol-only список оставлен как legacy диагностика.</div>
       </div>
       <div class="actions">
         <a class="link secondary" href="/futures">Futures bot</a>
@@ -101,7 +101,7 @@ public static class FuturesBacktestPage
         </div>
         <div class="run-field">
           <label for="symbolsInput">Pairs</label>
-          <input id="symbolsInput" type="number" min="1" max="200" step="1" value="20" />
+          <input id="symbolsInput" type="number" min="1" max="200" step="1" value="30" />
         </div>
         <button class="btn secondary" id="copyDiagnostics" type="button">Copy diagnostics</button>
         <button class="btn" id="start" type="button">Start</button>
@@ -127,7 +127,7 @@ public static class FuturesBacktestPage
       <div class="metric"><div class="label">Average R</div><div class="value" id="averageR">-</div></div>
       <div class="metric"><div class="label">Trades/day</div><div class="value" id="tradesDay">-</div></div>
       <div class="metric"><div class="label">Breakouts</div><div class="value" id="breakouts">-</div></div>
-      <div class="metric"><div class="label">Eligible</div><div class="value" id="eligibleCount">-</div></div>
+      <div class="metric"><div class="label">Live allowed</div><div class="value" id="eligibleCount">-</div></div>
       <div class="metric"><div class="label">Open @ end</div><div class="value" id="openAtEnd">-</div></div>
     </section>
 
@@ -245,9 +245,9 @@ public static class FuturesBacktestPage
       byId('averageR').textContent = fmt.format(m.averageR || 0);
       byId('tradesDay').textContent = fmt.format(m.tradesPerDay || 0);
       byId('breakouts').textContent = `${result.falseBreakoutCount || 0} / ${result.trueBreakoutBlockedCount || 0}`;
-      const eligibleGates = preferNonEmpty(result.eligibleStrategySymbolDirections, result.eligibleSymbols);
-      const excludedGates = preferNonEmpty(result.excludedStrategySymbolDirections, result.excludedSymbols);
-      byId('eligibleCount').textContent = `${eligibleGates.length} / ${excludedGates.length}`;
+      const eligibleGates = Array.isArray(result.eligibleStrategySymbolDirections) ? result.eligibleStrategySymbolDirections : [];
+      const excludedGates = Array.isArray(result.excludedStrategySymbolDirections) ? result.excludedStrategySymbolDirections : [];
+      byId('eligibleCount').textContent = `${Number(result.liveAllowedStrategyGatesCount ?? eligibleGates.length)}`;
       byId('openAtEnd').textContent = `${result.openAtBacktestEndCount || 0} (${pnl(result.openAtBacktestEndUnrealizedPnl)})`;
       byId('wfSymbols').innerHTML = walkForwardSymbolRows(eligibleGates, excludedGates);
       byId('wfMetrics').innerHTML = walkForwardMetricRows(result.optimizationMetrics || {}, result.outOfSampleMetrics || {}, result.filteredOutOfSampleMetrics || {});
@@ -270,10 +270,6 @@ public static class FuturesBacktestPage
           <td class="${cls(item.netPnl)}">${pnl(item.netPnl)}</td>
           <td>${pct(item.winRate)}</td>
         </tr>`).join('') : '<tr><td colspan="4" class="empty">Нет данных</td></tr>';
-    }
-
-    function preferNonEmpty(primary, fallback) {
-      return Array.isArray(primary) && primary.length ? primary : (fallback || []);
     }
 
     function walkForwardSymbolRows(eligible, excluded) {
@@ -342,6 +338,10 @@ public static class FuturesBacktestPage
         `tradesCount=${result.tradesCount || 0}`,
         `openAtBacktestEndCount=${result.openAtBacktestEndCount || 0}`,
         `openAtBacktestEndUnrealizedPnl=${Number(result.openAtBacktestEndUnrealizedPnl || 0)}`,
+        `liveUseEligibleStrategyGatesOnly=${Boolean(result.liveUseEligibleStrategyGatesOnly)}`,
+        `liveAllowedStrategyGatesCount=${Number(result.liveAllowedStrategyGatesCount || 0)}`,
+        `liveEligibleGateSizeMultiplier=${Number(result.liveEligibleGateSizeMultiplier || 0)}`,
+        `liveIneligibleGateSizeMultiplier=${Number(result.liveIneligibleGateSizeMultiplier || 0)}`,
         `falseBreakoutCount=${result.falseBreakoutCount || 0}`,
         `trueBreakoutBlockedCount=${result.trueBreakoutBlockedCount || 0}`,
         '',
@@ -350,10 +350,10 @@ public static class FuturesBacktestPage
         metricBlock('OUT_OF_SAMPLE_30D_ALL_SYMBOLS', result.outOfSampleMetrics || {}),
         metricBlock('OUT_OF_SAMPLE_30D_ELIGIBLE_ONLY', result.filteredOutOfSampleMetrics || {}),
         '',
-        `eligibleStrategySymbolDirections(${(result.eligibleStrategySymbolDirections || []).length})=${(result.eligibleStrategySymbolDirections || []).join(', ') || '-'}`,
+        `liveAllowedStrategySymbolDirections(${(result.eligibleStrategySymbolDirections || []).length})=${(result.eligibleStrategySymbolDirections || []).join(', ') || '-'}`,
         `excludedStrategySymbolDirections(${(result.excludedStrategySymbolDirections || []).length})=${(result.excludedStrategySymbolDirections || []).join(', ') || '-'}`,
-        `eligibleSymbols(${(result.eligibleSymbols || []).length})=${(result.eligibleSymbols || []).join(', ') || '-'}`,
-        `excludedSymbols(${(result.excludedSymbols || []).length})=${(result.excludedSymbols || []).join(', ') || '-'}`,
+        `legacyEligibleSymbols_symbolOnly_notLiveGate(${(result.eligibleSymbols || []).length})=${(result.eligibleSymbols || []).join(', ') || '-'}`,
+        `legacyExcludedSymbols_symbolOnly_notLiveGate(${(result.excludedSymbols || []).length})=${(result.excludedSymbols || []).join(', ') || '-'}`,
         '',
         tableBlock('BEST_SYMBOLS', result.bestSymbols || []),
         tableBlock('WORST_SYMBOLS', result.worstSymbols || []),

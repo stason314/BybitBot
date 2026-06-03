@@ -547,6 +547,18 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
                 continue;
             }
 
+            var edgeSizeMultiplier = _backtestService.ResolveStrategySymbolDirectionSizeMultiplier(
+                signal.Pattern,
+                item.Symbol,
+                signal.Side,
+                _options.RequireBacktestSymbolFilter);
+            if (edgeSizeMultiplier <= 0m)
+            {
+                MarkSignalHandled(item.Symbol, signal.SignalCandleOpenTime);
+                AddEvent(item.Symbol, "warning", $"{signal.Pattern}:{item.Symbol}:{signal.Side} left shadow-only by edge sizing.");
+                continue;
+            }
+
             var filter = IsScoreBasedStrategySignal(signal)
                 ? new NySessionEntryFilterResult
                 {
@@ -563,8 +575,9 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
             }
 
             var instrument = MapInstrumentRules(instruments[item.Symbol]);
-            var settings = BuildSettings(item.Symbol, signal);
-            var intent = BuildOpenIntent(settings, signal, instrument);
+            var entryNotionalUsdt = _options.EntryNotionalUsdt * edgeSizeMultiplier;
+            var settings = BuildSettings(item.Symbol, signal, entryNotionalUsdt, edgeSizeMultiplier);
+            var intent = BuildOpenIntent(settings, signal, instrument, entryNotionalUsdt);
             var result = await _executionService.ExecuteAsync(new FuturesExecutionRequest
             {
                 Settings = settings,
@@ -576,9 +589,9 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
 
             MarkSignalHandled(item.Symbol, signal.SignalCandleOpenTime);
             openPositions++;
-            AddEvent(item.Symbol, "trade", $"{signal.Pattern} {signal.Side} opened at {signal.EntryPrice}. SL {signal.StopLoss}, TP {signal.TakeProfit}.");
+            AddEvent(item.Symbol, "trade", $"{signal.Pattern} {signal.Side} opened at {signal.EntryPrice}. Size {edgeSizeMultiplier:0.####}x. SL {signal.StopLoss}, TP {signal.TakeProfit}.");
             await _notifier.NotifyAsync(
-                $"NY session entry.\nPattern: `{signal.Pattern}`\nSymbol: `{item.Symbol}`\nSide: `{signal.Side}`\nEntry: `{signal.EntryPrice}`\nSL: `{signal.StopLoss}`\nTP: `{signal.TakeProfit}`\nMode: `{_appOptions.TradingMode}`\nResult: `{result.Message}`",
+                $"NY session entry.\nPattern: `{signal.Pattern}`\nSymbol: `{item.Symbol}`\nSide: `{signal.Side}`\nEntry: `{signal.EntryPrice}`\nSL: `{signal.StopLoss}`\nTP: `{signal.TakeProfit}`\nSize: `{edgeSizeMultiplier:0.####}x`\nNotional: `{entryNotionalUsdt}`\nMode: `{_appOptions.TradingMode}`\nResult: `{result.Message}`",
                 cancellationToken);
         }
     }
@@ -793,7 +806,7 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
                 EntryPrice = position.EntryPrice,
                 StopLoss = entryOrder.StopLossPrice,
                 TakeProfit = entryOrder.TakeProfitPrice
-            });
+            }, _options.EntryNotionalUsdt, 1m);
             await _executionService.ExecuteAsync(new FuturesExecutionRequest
             {
                 Settings = settings,
@@ -2582,10 +2595,11 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
     private FuturesTradeIntent BuildOpenIntent(
         FuturesBotSettings settings,
         NySessionSignal signal,
-        FuturesInstrumentRules instrument)
+        FuturesInstrumentRules instrument,
+        decimal entryNotionalUsdt)
     {
         var price = instrument.RoundPrice(signal.EntryPrice);
-        var quantity = ResolveEntryQuantity(_options.EntryNotionalUsdt, price, instrument);
+        var quantity = ResolveEntryQuantity(entryNotionalUsdt, price, instrument);
         var action = signal.Side == "Short" ? FuturesTradeAction.OpenShort : FuturesTradeAction.OpenLong;
         var stopLoss = instrument.RoundPrice(signal.StopLoss);
         var takeProfit = signal.TakeProfit > 0m ? instrument.RoundPrice(signal.TakeProfit) : (decimal?)null;
@@ -2622,19 +2636,23 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
         };
     }
 
-    private FuturesBotSettings BuildSettings(string symbol, NySessionSignal signal) => new()
+    private FuturesBotSettings BuildSettings(
+        string symbol,
+        NySessionSignal signal,
+        decimal entryNotionalUsdt,
+        decimal edgeSizeMultiplier) => new()
     {
         Enabled = true,
         Symbol = symbol,
         Category = Category,
         StrategyType = FuturesStrategyType.NySessionBreakout,
-        StrategyConfigJson = FormattableString.Invariant($"{{\"entryNotionalUsdt\":{_options.EntryNotionalUsdt},\"rewardRisk\":{_options.RewardRisk}}}"),
+        StrategyConfigJson = FormattableString.Invariant($"{{\"entryNotionalUsdt\":{entryNotionalUsdt},\"baseEntryNotionalUsdt\":{_options.EntryNotionalUsdt},\"edgeSizeMultiplier\":{edgeSizeMultiplier},\"rewardRisk\":{_options.RewardRisk}}}"),
         Leverage = decimal.Min(_futuresOptions.Leverage, _futuresOptions.MvpMaxLeverage),
         MarginMode = FuturesMarginMode.Isolated,
         PositionMode = FuturesPositionMode.OneWay,
         Direction = signal.Side == "Short" ? FuturesDirection.ShortOnly : FuturesDirection.LongOnly,
-        MaxNotionalUsdt = decimal.Max(_futuresOptions.MaxNotionalUsdt, _options.EntryNotionalUsdt),
-        MaxMarginUsdt = decimal.Max(_futuresOptions.MaxMarginUsdt, _options.EntryNotionalUsdt / decimal.Max(1m, _futuresOptions.Leverage)),
+        MaxNotionalUsdt = decimal.Max(_futuresOptions.MaxNotionalUsdt, entryNotionalUsdt),
+        MaxMarginUsdt = decimal.Max(_futuresOptions.MaxMarginUsdt, entryNotionalUsdt / decimal.Max(1m, _futuresOptions.Leverage)),
         StopLossPercent = 1m,
         TakeProfitPercent = _options.RewardRisk,
         LiquidationBufferPercent = _futuresOptions.MinLiquidationBufferPercent,

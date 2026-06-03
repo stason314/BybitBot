@@ -195,7 +195,24 @@ TURTLE_RISK_PER_UNIT_PERCENT=0.25
 MAX_OPEN_TURTLE_POSITIONS=3
 ```
 
-Backtest at `/futures/backtest` tests the score-based regime router when `SIGNAL_SELECTION_MODE=ScoreBased`. The diagnostics button copies the run configuration, walk-forward metrics, symbol results, long/short results, pattern buckets, strategy performance, and recent trades.
+Live profit gating defaults:
+
+```env
+ENABLE_STRATEGY_SYMBOL_GATING=true
+LIVE_USE_ELIGIBLE_STRATEGY_GATES_ONLY=true
+LIVE_ELIGIBLE_GATE_SIZE_MULTIPLIER=1.0
+LIVE_INELIGIBLE_GATE_SIZE_MULTIPLIER=0.0
+NYSWEEP_LIVE_TRADING_ENABLED=false
+NY_LIVE_ALLOWED_HOURS=10,11
+MIN_TRADES_FOR_STRATEGY_SYMBOL_GATING=3
+MIN_PROFIT_FACTOR_TO_ENABLE=1.15
+MIN_AVERAGE_R_TO_ENABLE=0.05
+MIN_OOS_TRADES_FOR_STRATEGY_SYMBOL_GATING=1
+MIN_OOS_PROFIT_FACTOR_TO_ENABLE=1.05
+MIN_OOS_AVERAGE_R_TO_ENABLE=0
+```
+
+Backtest at `/futures/backtest` tests the score-based regime router when `SIGNAL_SELECTION_MODE=ScoreBased`. Run 20-30 symbols when looking for additional Turtle edges. The live allow-list is `strategy:symbol:direction` only, for example `TurtleTrendStrategy:LABUSDT:Long`; `eligibleSymbols` is legacy symbol-only diagnostics and is not a live gate.
 
 SQLite initializes tables for strategy decisions, candidates, conflicts, pattern signals, strategy performance, shadow trades, Turtle channels, and Turtle exits. This is the foundation for strategy+symbol+direction gating and shadow trading analysis.
 

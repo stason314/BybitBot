@@ -64,6 +64,14 @@ public sealed class FuturesBacktestResult
 
     public FuturesBacktestMetrics FilteredOutOfSampleMetrics { get; init; } = new();
 
+    public bool LiveUseEligibleStrategyGatesOnly { get; init; }
+
+    public decimal LiveEligibleGateSizeMultiplier { get; init; }
+
+    public decimal LiveIneligibleGateSizeMultiplier { get; init; }
+
+    public int LiveAllowedStrategyGatesCount => EligibleStrategySymbolDirections.Count;
+
     public IReadOnlyList<string> EligibleSymbols { get; init; } = [];
 
     public IReadOnlyList<string> ExcludedSymbols { get; init; } = [];

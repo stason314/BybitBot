@@ -18,6 +18,8 @@ public interface IFuturesBacktestService
     bool IsSymbolAllowedForTrading(string symbol, bool requireCompletedBacktest);
 
     bool IsStrategySymbolDirectionAllowedForTrading(string strategyName, string symbol, string direction, bool requireCompletedBacktest);
+
+    decimal ResolveStrategySymbolDirectionSizeMultiplier(string strategyName, string symbol, string direction, bool requireCompletedBacktest);
 }
 
 public sealed class FuturesBacktestService : IFuturesBacktestService
@@ -125,13 +127,18 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             var result = _status.Result;
             if (result is null)
             {
-                return !requireCompletedBacktest;
+                return !RequiresEligibleStrategyGates(requireCompletedBacktest);
             }
 
             if (result.EligibleStrategySymbolDirections.Count > 0)
             {
                 return result.EligibleStrategySymbolDirections
                     .Any(key => IsStrategyGateKeyForSymbol(key, symbol));
+            }
+
+            if (_strategyRoutingOptions.LiveUseEligibleStrategyGatesOnly)
+            {
+                return false;
             }
 
             if (_strategyRoutingOptions.EnableStrategySymbolGating)
@@ -151,7 +158,8 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         string direction,
         bool requireCompletedBacktest)
     {
-        if (!_strategyRoutingOptions.EnableStrategySymbolGating)
+        if (!_strategyRoutingOptions.EnableStrategySymbolGating &&
+            !_strategyRoutingOptions.LiveUseEligibleStrategyGatesOnly)
         {
             return true;
         }
@@ -161,7 +169,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             var result = _status.Result;
             if (result is null)
             {
-                return !requireCompletedBacktest;
+                return !RequiresEligibleStrategyGates(requireCompletedBacktest);
             }
 
             if (result.EligibleStrategySymbolDirections.Count > 0)
@@ -173,6 +181,21 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             return false;
         }
     }
+
+    public decimal ResolveStrategySymbolDirectionSizeMultiplier(
+        string strategyName,
+        string symbol,
+        string direction,
+        bool requireCompletedBacktest)
+    {
+        var isAllowed = IsStrategySymbolDirectionAllowedForTrading(strategyName, symbol, direction, requireCompletedBacktest);
+        return isAllowed
+            ? decimal.Max(0m, _strategyRoutingOptions.LiveEligibleGateSizeMultiplier)
+            : decimal.Max(0m, _strategyRoutingOptions.LiveIneligibleGateSizeMultiplier);
+    }
+
+    private bool RequiresEligibleStrategyGates(bool requireCompletedBacktest) =>
+        requireCompletedBacktest || _strategyRoutingOptions.LiveUseEligibleStrategyGatesOnly;
 
     private async Task RunBacktestAsync(FuturesBacktestRequest request, CancellationToken cancellationToken)
     {
@@ -1986,6 +2009,9 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             OptimizationMetrics = BuildMetrics(optimizationTrades, periodStart, splitAt, settings.InitialEquityUsdt),
             OutOfSampleMetrics = BuildMetrics(outOfSampleTrades, splitAt, periodEnd, settings.InitialEquityUsdt),
             FilteredOutOfSampleMetrics = BuildMetrics(filteredOutOfSampleTrades, splitAt, periodEnd, settings.InitialEquityUsdt),
+            LiveUseEligibleStrategyGatesOnly = _strategyRoutingOptions.LiveUseEligibleStrategyGatesOnly,
+            LiveEligibleGateSizeMultiplier = _strategyRoutingOptions.LiveEligibleGateSizeMultiplier,
+            LiveIneligibleGateSizeMultiplier = _strategyRoutingOptions.LiveIneligibleGateSizeMultiplier,
             EligibleSymbols = eligibleSymbols,
             ExcludedSymbols = excludedSymbols,
             EligibleStrategySymbolDirections = eligibleStrategySymbolDirections,

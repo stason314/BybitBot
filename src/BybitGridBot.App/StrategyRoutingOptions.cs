@@ -29,6 +29,17 @@ public sealed class StrategyRoutingOptions
     [ConfigurationKeyName("ENABLE_STRATEGY_SYMBOL_GATING")]
     public bool EnableStrategySymbolGating { get; init; } = true;
 
+    [ConfigurationKeyName("LIVE_USE_ELIGIBLE_STRATEGY_GATES_ONLY")]
+    public bool LiveUseEligibleStrategyGatesOnly { get; init; } = true;
+
+    [ConfigurationKeyName("LIVE_ELIGIBLE_GATE_SIZE_MULTIPLIER")]
+    [Range(typeof(decimal), "0", "100")]
+    public decimal LiveEligibleGateSizeMultiplier { get; init; } = 1m;
+
+    [ConfigurationKeyName("LIVE_INELIGIBLE_GATE_SIZE_MULTIPLIER")]
+    [Range(typeof(decimal), "0", "100")]
+    public decimal LiveIneligibleGateSizeMultiplier { get; init; } = 0m;
+
     [ConfigurationKeyName("NYSWEEP_LIVE_TRADING_ENABLED")]
     public bool NySweepLiveTradingEnabled { get; init; } = false;
 
