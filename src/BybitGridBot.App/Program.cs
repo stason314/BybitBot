@@ -181,6 +181,12 @@ app.MapDelete("/api/settings/{symbol}", async (string symbol, IGridDashboardServ
 app.MapGet("/api/futures/dashboard", async (INySessionBreakoutRuntime runtime, CancellationToken cancellationToken) =>
     Results.Ok(await runtime.GetDashboardAsync(cancellationToken)));
 
+app.MapPost("/api/futures/pool/replace", async (NySessionPoolReplaceRequest request, INySessionBreakoutRuntime runtime, CancellationToken cancellationToken) =>
+{
+    var response = await runtime.ReplacePoolSymbolAsync(request, cancellationToken);
+    return response.Success ? Results.Ok(response) : Results.BadRequest(response);
+});
+
 app.MapGet("/api/futures/backtest", (IFuturesBacktestService backtestService) =>
     Results.Ok(backtestService.GetStatus()));
 

@@ -11,6 +11,8 @@ namespace BybitGridBot.App;
 public interface INySessionBreakoutRuntime
 {
     Task<NySessionDashboardResponse> GetDashboardAsync(CancellationToken cancellationToken);
+
+    Task<UpdateSettingsResponse> ReplacePoolSymbolAsync(NySessionPoolReplaceRequest request, CancellationToken cancellationToken);
 }
 
 public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreakoutRuntime
@@ -32,6 +34,8 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
     private readonly NySessionBreakoutOptions _options;
     private readonly object _sync = new();
     private readonly Dictionary<string, NySessionPoolItem> _pool = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<int, string> _manualSlotSymbols = new();
+    private readonly HashSet<string> _manuallyRemovedSymbols = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, DateTimeOffset> _lastSignalBySymbol = new(StringComparer.OrdinalIgnoreCase);
     private readonly Queue<NySessionEventItem> _events = new();
     private string _status = "Starting";
@@ -110,6 +114,85 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
         };
     }
 
+    public async Task<UpdateSettingsResponse> ReplacePoolSymbolAsync(
+        NySessionPoolReplaceRequest request,
+        CancellationToken cancellationToken)
+    {
+        var slot = request.Slot;
+        var currentSymbol = NormalizeSymbol(request.CurrentSymbol);
+        var newSymbol = NormalizeSymbol(request.NewSymbol);
+        if (slot <= 0 || string.IsNullOrWhiteSpace(currentSymbol) || string.IsNullOrWhiteSpace(newSymbol))
+        {
+            return new UpdateSettingsResponse
+            {
+                Success = false,
+                Symbol = newSymbol,
+                Message = "Pool pair was not replaced.",
+                Errors = ["Slot, current symbol and new symbol are required."]
+            };
+        }
+
+        if (string.Equals(currentSymbol, newSymbol, StringComparison.OrdinalIgnoreCase))
+        {
+            return new UpdateSettingsResponse
+            {
+                Success = true,
+                Symbol = newSymbol,
+                Message = $"Pool slot {slot} already uses {newSymbol}."
+            };
+        }
+
+        var instruments = await _bybitRestClient.GetInstrumentsAsync(Category, cancellationToken);
+        var instrument = instruments.FirstOrDefault(item => string.Equals(item.Symbol, newSymbol, StringComparison.OrdinalIgnoreCase));
+        if (instrument is null || !IsTradable(instrument))
+        {
+            return new UpdateSettingsResponse
+            {
+                Success = false,
+                Symbol = newSymbol,
+                Message = "Pool pair was not replaced.",
+                Errors = [$"{newSymbol} is not a trading Bybit USDT linear perpetual."]
+            };
+        }
+
+        var ticker = await _bybitRestClient.GetTickerAsync(Category, newSymbol, cancellationToken);
+        var replacement = new NySessionPoolItem
+        {
+            Slot = slot,
+            Symbol = newSymbol,
+            LastPrice = ticker.LastPrice,
+            State = "Manual replacement",
+            Bias = "Waiting scan",
+            Turnover24h = ticker.Turnover24h,
+            Reason = "Manual pair replacement saved. The next worker cycle will apply the 4H NY strategy.",
+            UpdatedAt = DateTimeOffset.UtcNow
+        };
+
+        lock (_sync)
+        {
+            foreach (var pair in _manualSlotSymbols.Where(pair => string.Equals(pair.Value, newSymbol, StringComparison.OrdinalIgnoreCase)).ToArray())
+            {
+                _manualSlotSymbols.Remove(pair.Key);
+            }
+
+            _manualSlotSymbols[slot] = newSymbol;
+            _manuallyRemovedSymbols.Add(currentSymbol);
+            _manuallyRemovedSymbols.Remove(newSymbol);
+            _pool.Remove(currentSymbol);
+            _pool[newSymbol] = replacement;
+            _lastSignalBySymbol.Remove(currentSymbol);
+            _lastSignalBySymbol.Remove(newSymbol);
+        }
+
+        AddEvent(newSymbol, "info", $"Pool slot {slot} changed from {currentSymbol} to {newSymbol}.");
+        return new UpdateSettingsResponse
+        {
+            Success = true,
+            Symbol = newSymbol,
+            Message = $"Pool slot {slot} changed from {currentSymbol} to {newSymbol}."
+        };
+    }
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         if (!_futuresOptions.Enabled || !_options.Enabled)
@@ -161,16 +244,28 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
             .ToDictionary(instrument => instrument.Symbol, StringComparer.OrdinalIgnoreCase);
         var tickers = await _bybitRestClient.GetTickersAsync(Category, cancellationToken);
         string[] previousPoolSymbols;
+        Dictionary<int, string> manualSlotSymbols;
+        HashSet<string> manuallyRemovedSymbols;
         lock (_sync)
         {
             previousPoolSymbols = _pool.Keys.ToArray();
+            manualSlotSymbols = new Dictionary<int, string>(_manualSlotSymbols);
+            manuallyRemovedSymbols = new HashSet<string>(_manuallyRemovedSymbols, StringComparer.OrdinalIgnoreCase);
         }
         var storedOpenPositions = await _repository.GetOpenFuturesPositionsAsync(cancellationToken);
 
         var prioritySymbols = previousPoolSymbols.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (var symbol in manualSlotSymbols.Values)
+        {
+            prioritySymbols.Add(symbol);
+        }
+
         foreach (var position in storedOpenPositions)
         {
-            prioritySymbols.Add(position.Symbol);
+            if (!manuallyRemovedSymbols.Contains(position.Symbol))
+            {
+                prioritySymbols.Add(position.Symbol);
+            }
         }
 
         var candidates = tickers
@@ -184,14 +279,7 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
 
         var evaluated = await EvaluateCandidatesAsync(candidates, tradable, anchors, cancellationToken);
         var openSymbols = await GetOpenSymbolsAsync(evaluated, cancellationToken);
-        var nextPool = evaluated
-            .Where(item => IsPoolEligible(item) || openSymbols.Contains(item.Symbol))
-            .OrderByDescending(item => openSymbols.Contains(item.Symbol))
-            .ThenByDescending(item => ScorePoolItem(item))
-            .ThenByDescending(item => item.Turnover24h)
-            .Take(Math.Max(1, _options.PoolSize))
-            .Select((item, index) => item.WithSlot(index + 1))
-            .ToArray();
+        var nextPool = BuildNextPool(evaluated, openSymbols, manualSlotSymbols, manuallyRemovedSymbols);
 
         lock (_sync)
         {
@@ -208,6 +296,69 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
         await SyncOpenPositionsAsync(nextPool, cancellationToken);
         await ProcessPaperStopsAsync(nextPool, tradable, cancellationToken);
         await ProcessSignalsAsync(nextPool, tradable, cancellationToken);
+    }
+
+    private IReadOnlyList<NySessionPoolItem> BuildNextPool(
+        IReadOnlyList<NySessionPoolItem> evaluated,
+        IReadOnlySet<string> openSymbols,
+        IReadOnlyDictionary<int, string> manualSlotSymbols,
+        IReadOnlySet<string> manuallyRemovedSymbols)
+    {
+        var manualSymbols = manualSlotSymbols.Values.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var orderedCandidates = evaluated
+            .Where(item => IsPoolEligible(item) || openSymbols.Contains(item.Symbol))
+            .Where(item => !manuallyRemovedSymbols.Contains(item.Symbol) || manualSymbols.Contains(item.Symbol))
+            .OrderByDescending(item => openSymbols.Contains(item.Symbol))
+            .ThenByDescending(item => ScorePoolItem(item))
+            .ThenByDescending(item => item.Turnover24h)
+            .ToArray();
+        var evaluatedBySymbol = evaluated.ToDictionary(item => item.Symbol, StringComparer.OrdinalIgnoreCase);
+        var usedSymbols = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var bySlot = new Dictionary<int, NySessionPoolItem>();
+        var poolSize = Math.Max(1, _options.PoolSize);
+        foreach (var pair in manualSlotSymbols.OrderBy(pair => pair.Key))
+        {
+            if (pair.Key < 1 || pair.Key > poolSize)
+            {
+                continue;
+            }
+
+            var symbol = pair.Value;
+            var item = evaluatedBySymbol.TryGetValue(symbol, out var evaluatedItem)
+                ? evaluatedItem.WithSlot(pair.Key)
+                : BuildManualPendingPoolItem(pair.Key, symbol);
+            bySlot[pair.Key] = item;
+            usedSymbols.Add(symbol);
+        }
+
+        var candidateIndex = 0;
+        for (var slot = 1; slot <= poolSize; slot++)
+        {
+            if (bySlot.ContainsKey(slot))
+            {
+                continue;
+            }
+
+            while (candidateIndex < orderedCandidates.Length && usedSymbols.Contains(orderedCandidates[candidateIndex].Symbol))
+            {
+                candidateIndex++;
+            }
+
+            if (candidateIndex >= orderedCandidates.Length)
+            {
+                break;
+            }
+
+            var item = orderedCandidates[candidateIndex].WithSlot(slot);
+            bySlot[slot] = item;
+            usedSymbols.Add(item.Symbol);
+            candidateIndex++;
+        }
+
+        return bySlot
+            .OrderBy(pair => pair.Key)
+            .Select(pair => pair.Value)
+            .ToArray();
     }
 
     private async Task<IReadOnlyList<NySessionPoolItem>> EvaluateCandidatesAsync(
@@ -306,6 +457,16 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
             UpdatedAt = now
         };
     }
+
+    private static NySessionPoolItem BuildManualPendingPoolItem(int slot, string symbol) => new()
+    {
+        Slot = slot,
+        Symbol = symbol,
+        State = "Manual replacement",
+        Bias = "Waiting scan",
+        Reason = "Manual pair replacement is waiting for market data.",
+        UpdatedAt = DateTimeOffset.UtcNow
+    };
 
     private async Task ProcessSignalsAsync(
         IReadOnlyCollection<NySessionPoolItem> pool,
@@ -1187,6 +1348,9 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
 
         return distanceToUpper <= distanceToLower ? "Upper watch" : "Lower watch";
     }
+
+    private static string NormalizeSymbol(string symbol) =>
+        symbol.Trim().ToUpperInvariant();
 
     private static FuturesInstrumentRules MapInstrumentRules(BybitInstrumentInfo instrument) => new()
     {

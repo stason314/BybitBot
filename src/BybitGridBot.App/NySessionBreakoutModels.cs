@@ -96,6 +96,15 @@ public sealed class NySessionEventItem
     public string Message { get; init; } = string.Empty;
 }
 
+public sealed class NySessionPoolReplaceRequest
+{
+    public int Slot { get; init; }
+
+    public string CurrentSymbol { get; init; } = string.Empty;
+
+    public string NewSymbol { get; init; } = string.Empty;
+}
+
 internal sealed class NySessionSignal
 {
     public string Side { get; init; } = string.Empty;

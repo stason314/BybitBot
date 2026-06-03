@@ -61,6 +61,20 @@ public static class NySessionDashboardPage
     .empty { padding: 24px 16px; color: var(--muted); }
     .btn { appearance: none; border: 1px solid #1d4ed8; background: var(--accent); color: #fff; min-height: 36px; padding: 7px 12px; border-radius: 7px; font-weight: 720; cursor: pointer; }
     .btn { text-decoration: none; display: inline-flex; align-items: center; }
+    .btn.secondary { background: #fff; color: var(--accent); }
+    .pool-row { cursor: pointer; }
+    .pool-row:hover td { background: #f8fafc; }
+    .modal { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; background: rgba(23,32,27,.42); padding: 18px; z-index: 20; }
+    .modal.open { display: flex; }
+    .dialog { width: min(420px, 100%); background: #fff; border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 24px 80px rgba(23,32,27,.25); }
+    .dialog header { display: block; margin: 0; padding: 16px; border-bottom: 1px solid var(--line); }
+    .dialog h2 { margin: 0; font-size: 18px; }
+    .dialog-body { padding: 16px; }
+    .field { display: grid; gap: 7px; }
+    .field label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+    .field input { width: 100%; min-height: 40px; border: 1px solid var(--line); border-radius: 7px; padding: 8px 10px; font: inherit; text-transform: uppercase; }
+    .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; padding: 14px 16px; border-top: 1px solid var(--line); }
+    .dialog-error { min-height: 20px; margin-top: 10px; color: var(--bad); }
     @media (max-width: 1100px) {
       .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .grid { grid-template-columns: 1fr; }
@@ -129,6 +143,26 @@ public static class NySessionDashboardPage
     </section>
   </main>
 
+  <div class="modal" id="pairModal" aria-hidden="true">
+    <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="pairModalTitle">
+      <header>
+        <h2 id="pairModalTitle">Изменить пару</h2>
+        <div class="muted" id="pairModalCurrent">-</div>
+      </header>
+      <div class="dialog-body">
+        <div class="field">
+          <label for="pairSymbolInput">Новая торговая пара</label>
+          <input id="pairSymbolInput" autocomplete="off" spellcheck="false" placeholder="BTCUSDT" />
+        </div>
+        <div class="dialog-error" id="pairModalError"></div>
+      </div>
+      <div class="dialog-actions">
+        <button class="btn secondary" id="pairCancel" type="button">Отмена</button>
+        <button class="btn" id="pairSave" type="button">Сохранить</button>
+      </div>
+    </div>
+  </div>
+
   <script>
     const fmt = new Intl.NumberFormat('en-US', { maximumFractionDigits: 6 });
     const money = new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -141,6 +175,8 @@ public static class NySessionDashboardPage
       const c = state === 'Signal' ? 'signal' : (state.includes('swept') || state === 'Building range' ? 'warn' : '');
       return `<span class="pill ${c}">${state}</span>`;
     }
+
+    let pairEdit = null;
 
     async function load() {
       const response = await fetch('/api/futures/dashboard', { cache: 'no-store' });
@@ -159,7 +195,7 @@ public static class NySessionDashboardPage
 
       const pool = data.pool || [];
       byId('poolRows').innerHTML = pool.length ? pool.map(item => `
-        <tr title="${item.reason || ''}">
+        <tr class="pool-row" title="${item.reason || ''}" data-slot="${item.slot}" data-symbol="${item.symbol}">
           <td>${item.slot}</td>
           <td><span class="pair">${item.symbol}</span><div class="muted">${item.bias || ''}</div></td>
           <td>${pill(item.state || '-')}</td>
@@ -168,6 +204,9 @@ public static class NySessionDashboardPage
           <td class="hide-sm">${fmt.format(item.fourHourLow || 0)}</td>
           <td>${pct(Math.min(item.distanceToUpperPercent || 0, item.distanceToLowerPercent || 0))}</td>
         </tr>`).join('') : '<tr><td colspan="7" class="empty">Пул пока пуст</td></tr>';
+      document.querySelectorAll('.pool-row').forEach(row => {
+        row.addEventListener('click', () => openPairModal(Number(row.dataset.slot), row.dataset.symbol || ''));
+      });
 
       const trades = data.openTrades || [];
       byId('tradeRows').innerHTML = trades.length ? trades.map(trade => `
@@ -186,6 +225,63 @@ public static class NySessionDashboardPage
           <div>${event.message}</div>
         </div>`).join('') : '<div class="empty">Событий пока нет</div>';
     }
+
+    function openPairModal(slot, symbol) {
+      pairEdit = { slot, symbol };
+      byId('pairModalTitle').textContent = symbol;
+      byId('pairModalCurrent').textContent = `Slot ${slot}`;
+      byId('pairSymbolInput').value = symbol;
+      byId('pairModalError').textContent = '';
+      byId('pairModal').classList.add('open');
+      byId('pairModal').setAttribute('aria-hidden', 'false');
+      setTimeout(() => byId('pairSymbolInput').focus(), 0);
+    }
+
+    function closePairModal() {
+      byId('pairModal').classList.remove('open');
+      byId('pairModal').setAttribute('aria-hidden', 'true');
+      pairEdit = null;
+    }
+
+    async function savePairModal() {
+      if (!pairEdit) return;
+      const newSymbol = byId('pairSymbolInput').value.trim().toUpperCase();
+      if (!newSymbol) {
+        byId('pairModalError').textContent = 'Введите торговую пару.';
+        return;
+      }
+
+      byId('pairSave').disabled = true;
+      byId('pairModalError').textContent = '';
+      try {
+        const response = await fetch('/api/futures/pool/replace', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ slot: pairEdit.slot, currentSymbol: pairEdit.symbol, newSymbol })
+        });
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok || result.success === false) {
+          throw new Error((result.errors || [result.message || `HTTP ${response.status}`]).join(' '));
+        }
+
+        closePairModal();
+        await load();
+      } catch (error) {
+        byId('pairModalError').textContent = error.message;
+      } finally {
+        byId('pairSave').disabled = false;
+      }
+    }
+
+    byId('pairCancel').addEventListener('click', closePairModal);
+    byId('pairSave').addEventListener('click', () => savePairModal().catch(error => { byId('pairModalError').textContent = error.message; }));
+    byId('pairModal').addEventListener('click', event => {
+      if (event.target === byId('pairModal')) closePairModal();
+    });
+    byId('pairSymbolInput').addEventListener('keydown', event => {
+      if (event.key === 'Enter') savePairModal().catch(error => { byId('pairModalError').textContent = error.message; });
+      if (event.key === 'Escape') closePairModal();
+    });
 
     load().catch(error => { byId('status').textContent = error.message; });
     setInterval(() => load().catch(() => {}), 5000);
