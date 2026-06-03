@@ -337,7 +337,10 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                 var decision = BuildScoreBasedBacktestDecision(symbol, session, allFiveMinuteCandles, i, fifteenMinuteCandles, turtleCandles, btc15m, settings);
                 TrackScoreBasedBreakoutCounters(decision, session[i], processedBreakoutClassifications, ref falseBreakoutCount, ref trueBreakoutBlockedCount);
 
-                if (decision.IsTradeAllowed && decision.SelectedCandidate is not null && i + 1 < session.Count)
+                if (decision.IsTradeAllowed &&
+                    decision.SelectedCandidate is not null &&
+                    i + 1 < session.Count &&
+                    !HasOpenBacktestTrade(trades, session[i].OpenTime))
                 {
                     var signalKey = BuildScoreSignalKey(decision.SelectedCandidate);
                     if (!processedScoreSignals.Add(signalKey))
@@ -346,7 +349,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                     }
 
                     var scoreSignal = ToBacktestSignal(decision.SelectedCandidate, session, i);
-                    var trade = SimulateTrade(symbol, scoreSignal, session, i + 1, settings);
+                    var trade = SimulateTrade(symbol, scoreSignal, session, allFiveMinuteCandles, i + 1, settings);
                     trades.Add(trade);
                     i = trade.ExitIndex;
                     continue;
@@ -394,7 +397,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
 
                 if (filter.IsAllowed)
                 {
-                    var trade = SimulateTrade(symbol, signal, session, i + 1, settings);
+                    var trade = SimulateTrade(symbol, signal, session, allFiveMinuteCandles, i + 1, settings);
                     trades.Add(trade);
                     i = trade.ExitIndex;
                     upperStop = null;
@@ -585,6 +588,9 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
 
     private static string FormatSignalPrice(decimal? value) =>
         value.HasValue ? value.Value.ToString("0.########") : string.Empty;
+
+    private static bool HasOpenBacktestTrade(IReadOnlyList<BacktestTradeInternal> trades, DateTimeOffset currentTime) =>
+        trades.Any(trade => trade.EntryTime <= currentTime && trade.ExitTime > currentTime);
 
     private static int ParseIntervalMinutes(string interval, int fallback)
     {
@@ -1531,9 +1537,17 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         string symbol,
         NySessionSignal signal,
         IReadOnlyList<Candle> session,
+        IReadOnlyList<Candle> allFiveMinuteCandles,
         int startIndex,
         BacktestRunSettings settings)
     {
+        var useTurtleChannelExit = string.Equals(signal.Pattern, TurtleTrendStrategy.Name, StringComparison.OrdinalIgnoreCase) &&
+            signal.TakeProfit <= 0m;
+        if (useTurtleChannelExit)
+        {
+            return SimulateTurtleTrade(symbol, signal, session, allFiveMinuteCandles, settings);
+        }
+
         var isShort = signal.Side == "Short";
         var entryPrice = ApplySlippage(signal.EntryPrice, isShort, isEntry: true, settings.SlippagePercent);
         var quantity = settings.EntryNotionalUsdt / entryPrice;
@@ -1542,13 +1556,10 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         var exitTime = session[^1].OpenTime;
         var exitReason = "SessionClose";
         var exitIndex = session.Count - 1;
-        var useTurtleChannelExit = string.Equals(signal.Pattern, TurtleTrendStrategy.Name, StringComparison.OrdinalIgnoreCase) &&
-            signal.TakeProfit <= 0m;
 
         for (var i = startIndex; i < session.Count; i++)
         {
             var candle = session[i];
-            var candlesSoFar = useTurtleChannelExit ? session.Take(i + 1).ToArray() : Array.Empty<Candle>();
             if (isShort)
             {
                 if (candle.High >= signal.StopLoss)
@@ -1565,15 +1576,6 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                     exitPrice = signal.TakeProfit;
                     exitTime = candle.OpenTime;
                     exitReason = "TakeProfit";
-                    exitIndex = i;
-                    break;
-                }
-
-                if (useTurtleChannelExit && IsBacktestTurtleChannelExit(candlesSoFar, candle, StrategySide.Short))
-                {
-                    exitPrice = candle.Close;
-                    exitTime = candle.OpenTime;
-                    exitReason = "ChannelExit";
                     exitIndex = i;
                     break;
                 }
@@ -1594,15 +1596,6 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                     exitPrice = signal.TakeProfit;
                     exitTime = candle.OpenTime;
                     exitReason = "TakeProfit";
-                    exitIndex = i;
-                    break;
-                }
-
-                if (useTurtleChannelExit && IsBacktestTurtleChannelExit(candlesSoFar, candle, StrategySide.Long))
-                {
-                    exitPrice = candle.Close;
-                    exitTime = candle.OpenTime;
-                    exitReason = "ChannelExit";
                     exitIndex = i;
                     break;
                 }
@@ -1644,18 +1637,142 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             exitIndex);
     }
 
-    private static bool IsBacktestTurtleChannelExit(IReadOnlyList<Candle> candles, Candle current, StrategySide side)
+    private BacktestTradeInternal SimulateTurtleTrade(
+        string symbol,
+        NySessionSignal signal,
+        IReadOnlyList<Candle> session,
+        IReadOnlyList<Candle> allFiveMinuteCandles,
+        BacktestRunSettings settings)
     {
-        if (candles.Count < 12)
+        var candles = allFiveMinuteCandles.OrderBy(candle => candle.OpenTime).ToArray();
+        var startIndex = Array.FindIndex(candles, candle => candle.OpenTime > signal.SignalCandleOpenTime);
+        if (startIndex < 0)
+        {
+            startIndex = candles.Length - 1;
+        }
+
+        var isShort = signal.Side == "Short";
+        var entryPrice = ApplySlippage(signal.EntryPrice, isShort, isEntry: true, settings.SlippagePercent);
+        var quantity = settings.EntryNotionalUsdt / entryPrice;
+        var riskPerUnit = Math.Abs(entryPrice - signal.StopLoss);
+        var exitPrice = candles[startIndex].Close;
+        var exitTime = candles[startIndex].OpenTime;
+        var exitReason = "BacktestEnd";
+        var exitIndex = ResolveSessionExitIndex(session, exitTime);
+
+        for (var i = startIndex; i < candles.Length; i++)
+        {
+            var candle = candles[i];
+            if (isShort)
+            {
+                if (candle.High >= signal.StopLoss)
+                {
+                    exitPrice = signal.StopLoss;
+                    exitTime = candle.OpenTime;
+                    exitReason = "StopLoss";
+                    exitIndex = ResolveSessionExitIndex(session, exitTime);
+                    break;
+                }
+
+                if (IsBacktestTurtleChannelExit(candles, i, StrategySide.Short))
+                {
+                    exitPrice = candle.Close;
+                    exitTime = candle.OpenTime;
+                    exitReason = "ChannelExit";
+                    exitIndex = ResolveSessionExitIndex(session, exitTime);
+                    break;
+                }
+            }
+            else
+            {
+                if (candle.Low <= signal.StopLoss)
+                {
+                    exitPrice = signal.StopLoss;
+                    exitTime = candle.OpenTime;
+                    exitReason = "StopLoss";
+                    exitIndex = ResolveSessionExitIndex(session, exitTime);
+                    break;
+                }
+
+                if (IsBacktestTurtleChannelExit(candles, i, StrategySide.Long))
+                {
+                    exitPrice = candle.Close;
+                    exitTime = candle.OpenTime;
+                    exitReason = "ChannelExit";
+                    exitIndex = ResolveSessionExitIndex(session, exitTime);
+                    break;
+                }
+            }
+
+            exitPrice = candle.Close;
+            exitTime = candle.OpenTime;
+            exitIndex = ResolveSessionExitIndex(session, exitTime);
+        }
+
+        exitPrice = ApplySlippage(exitPrice, isShort, isEntry: false, settings.SlippagePercent);
+        var grossPnl = isShort
+            ? (entryPrice - exitPrice) * quantity
+            : (exitPrice - entryPrice) * quantity;
+        var entryNotional = entryPrice * quantity;
+        var exitNotional = exitPrice * quantity;
+        var fees = entryNotional * settings.TakerFeePercent / 100m + exitNotional * settings.TakerFeePercent / 100m;
+        var slippageCost = settings.EntryNotionalUsdt * settings.SlippagePercent / 100m * 2m;
+        var holdingHours = decimal.Max(0m, (decimal)(exitTime - signal.SignalCandleOpenTime).TotalHours);
+        var fundingCost = settings.EntryNotionalUsdt * settings.FundingPercentPer8h / 100m * holdingHours / 8m;
+        var netPnl = grossPnl - fees - fundingCost;
+        var initialRiskUsdt = riskPerUnit * quantity;
+        var rMultiple = initialRiskUsdt > 0m ? netPnl / initialRiskUsdt : 0m;
+
+        return new BacktestTradeInternal(
+            symbol,
+            signal.Side,
+            signal.Pattern,
+            signal.SignalCandleOpenTime,
+            exitTime,
+            entryPrice,
+            exitPrice,
+            signal.StopLoss,
+            signal.TakeProfit,
+            grossPnl,
+            fees,
+            slippageCost,
+            fundingCost,
+            netPnl,
+            rMultiple,
+            exitReason,
+            exitIndex);
+    }
+
+    private bool IsBacktestTurtleChannelExit(IReadOnlyList<Candle> candles, int index, StrategySide side)
+    {
+        var exitBars = Math.Max(
+            _turtleOptions.ExitFastPeriod,
+            _turtleOptions.ExitFastPeriod * ParseIntervalMinutes(_turtleOptions.Timeframe, 60) / 5);
+        if (index + 1 < exitBars + 2)
         {
             return false;
         }
 
-        var exitLow = TradingIndicatorMath.DonchianLow(candles, 10);
-        var exitHigh = TradingIndicatorMath.DonchianHigh(candles, 10);
+        var current = candles[index];
+        var closed = candles.Take(index + 1).ToArray();
+        var exitLow = TradingIndicatorMath.DonchianLow(closed, exitBars);
+        var exitHigh = TradingIndicatorMath.DonchianHigh(closed, exitBars);
         return side == StrategySide.Long
             ? exitLow > 0m && current.Close < exitLow
             : exitHigh > 0m && current.Close > exitHigh;
+    }
+
+    private static int ResolveSessionExitIndex(IReadOnlyList<Candle> session, DateTimeOffset exitTime)
+    {
+        for (var i = 0; i < session.Count; i++)
+        {
+            if (session[i].OpenTime >= exitTime)
+            {
+                return i;
+            }
+        }
+
+        return session.Count - 1;
     }
 
     private FuturesBacktestResult BuildResult(

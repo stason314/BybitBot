@@ -807,19 +807,22 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
         return null;
     }
 
-    private static bool IsTurtleChannelExit(IReadOnlyList<Candle> candles, Candle current, StrategySide side)
+    private bool IsTurtleChannelExit(IReadOnlyList<Candle> candles, Candle current, StrategySide side)
     {
         var closed = candles
             .Where(candle => candle.OpenTime <= current.OpenTime)
             .OrderBy(candle => candle.OpenTime)
             .ToArray();
-        if (closed.Length < 12)
+        var exitBars = Math.Max(
+            _turtleOptions.ExitFastPeriod,
+            _turtleOptions.ExitFastPeriod * ParseIntervalMinutes(_turtleOptions.Timeframe) / 5);
+        if (closed.Length < exitBars + 2)
         {
             return false;
         }
 
-        var exitLow = TradingIndicatorMath.DonchianLow(closed, 10);
-        var exitHigh = TradingIndicatorMath.DonchianHigh(closed, 10);
+        var exitLow = TradingIndicatorMath.DonchianLow(closed, exitBars);
+        var exitHigh = TradingIndicatorMath.DonchianHigh(closed, exitBars);
         return side == StrategySide.Long
             ? exitLow > 0m && current.Close < exitLow
             : exitHigh > 0m && current.Close > exitHigh;
