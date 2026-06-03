@@ -141,6 +141,10 @@ internal sealed class NySessionSignal
 
     public decimal BodyRatio { get; init; }
 
+    public decimal WickBodyRatio { get; init; }
+
+    public decimal WickRangePercent { get; init; }
+
     public string Reason { get; init; } = string.Empty;
 }
 

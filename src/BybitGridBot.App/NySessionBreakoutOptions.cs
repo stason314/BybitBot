@@ -53,6 +53,21 @@ public sealed class NySessionBreakoutOptions
     [Range(typeof(decimal), "1", "100")]
     public decimal MinEngulfingBodyRatio { get; init; } = 1.05m;
 
+    [ConfigurationKeyName("NY_SESSION_PINBAR_ENABLED")]
+    public bool PinbarEnabled { get; init; } = true;
+
+    [ConfigurationKeyName("NY_SESSION_MAX_PINBAR_BODY_RANGE_PERCENT")]
+    [Range(typeof(decimal), "0.00000001", "100")]
+    public decimal MaxPinbarBodyRangePercent { get; init; } = 30m;
+
+    [ConfigurationKeyName("NY_SESSION_MIN_PINBAR_WICK_BODY_RATIO")]
+    [Range(typeof(decimal), "0.00000001", "100")]
+    public decimal MinPinbarWickBodyRatio { get; init; } = 2m;
+
+    [ConfigurationKeyName("NY_SESSION_MIN_PINBAR_WICK_RANGE_PERCENT")]
+    [Range(typeof(decimal), "0.00000001", "100")]
+    public decimal MinPinbarWickRangePercent { get; init; } = 50m;
+
     [ConfigurationKeyName("NY_SESSION_MAX_OPEN_POSITIONS")]
     [Range(1, 100)]
     public int MaxOpenPositions { get; init; } = 5;

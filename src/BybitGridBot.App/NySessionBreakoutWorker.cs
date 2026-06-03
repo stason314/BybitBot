@@ -667,6 +667,11 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
             return await EvaluateEngulfingFiltersAsync(signal, cancellationToken);
         }
 
+        if (string.Equals(signal.Pattern, "Pinbar", StringComparison.OrdinalIgnoreCase))
+        {
+            return await EvaluatePinbarFiltersAsync(signal, cancellationToken);
+        }
+
         if (signal.SweepDepthPercent < _options.MinSweepDepthPercent)
         {
             return new NySessionEntryFilterResult
@@ -803,6 +808,69 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
             IsAllowed = true,
             Mode = "Engulfing",
             Reason = "Engulfing pattern passed filters."
+        };
+    }
+
+    private async Task<NySessionEntryFilterResult> EvaluatePinbarFiltersAsync(
+        NySessionSignal signal,
+        CancellationToken cancellationToken)
+    {
+        if (!_options.PinbarEnabled)
+        {
+            return new NySessionEntryFilterResult
+            {
+                IsAllowed = false,
+                Mode = "Pinbar",
+                Reason = "Pinbar pattern is disabled."
+            };
+        }
+
+        if (signal.WickBodyRatio < _options.MinPinbarWickBodyRatio)
+        {
+            return new NySessionEntryFilterResult
+            {
+                IsAllowed = false,
+                Mode = "Pinbar",
+                Reason = $"Wick/body ratio {signal.WickBodyRatio:F2} is below {_options.MinPinbarWickBodyRatio:F2}."
+            };
+        }
+
+        if (signal.WickRangePercent < _options.MinPinbarWickRangePercent)
+        {
+            return new NySessionEntryFilterResult
+            {
+                IsAllowed = false,
+                Mode = "Pinbar",
+                Reason = $"Wick share {signal.WickRangePercent:F2}% is below {_options.MinPinbarWickRangePercent:F2}%."
+            };
+        }
+
+        if (signal.StopDistancePercent > _options.MaxStopPercent)
+        {
+            return new NySessionEntryFilterResult
+            {
+                IsAllowed = false,
+                Mode = "Pinbar",
+                Reason = $"Stop distance {signal.StopDistancePercent:F4}% is above {_options.MaxStopPercent:F4}%."
+            };
+        }
+
+        var btcTrend = await AnalyzeBtcTrendAsync(signal.Side, cancellationToken);
+        if (btcTrend.IsBlocked)
+        {
+            return new NySessionEntryFilterResult
+            {
+                IsAllowed = false,
+                Mode = "Pinbar",
+                Reason = btcTrend.Reason
+            };
+        }
+
+        return new NySessionEntryFilterResult
+        {
+            IsAllowed = true,
+            Mode = "Pinbar",
+            Reason = "Pinbar pattern passed filters."
         };
     }
 
@@ -1012,6 +1080,13 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
             return engulfingSignal;
         }
 
+        var pinbarSignal = TryFindPinbarSignal(closed, upperBoundary, lowerBoundary);
+        if (pinbarSignal is not null &&
+            (latestSignal is null || pinbarSignal.SignalCandleOpenTime > latestSignal.SignalCandleOpenTime))
+        {
+            return pinbarSignal;
+        }
+
         return latestSignal;
     }
 
@@ -1027,7 +1102,9 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
         string reason,
         IReadOnlyList<Candle> candles,
         string pattern = "Sweep Reversal",
-        decimal bodyRatio = 0m)
+        decimal bodyRatio = 0m,
+        decimal wickBodyRatio = 0m,
+        decimal wickRangePercent = 0m)
     {
         var risk = Math.Abs(sweepExtreme - entryPrice);
         var takeProfit = side == "Short"
@@ -1052,6 +1129,8 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
             MidlineRoomR = CalculateMidlineRoomR(side, rangeHigh, rangeLow, entryPrice, risk),
             BreakoutVolumeRatio = CalculateBreakoutVolumeRatio(candles, breakoutCandleOpenTime),
             BodyRatio = bodyRatio,
+            WickBodyRatio = wickBodyRatio,
+            WickRangePercent = wickRangePercent,
             Reason = reason
         };
     }
@@ -1128,6 +1207,87 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
                     closed,
                     "Engulfing",
                     currentBody / previousBody);
+            }
+        }
+
+        return null;
+    }
+
+    private NySessionSignal? TryFindPinbarSignal(
+        IReadOnlyList<Candle> closed,
+        decimal upperBoundary,
+        decimal lowerBoundary)
+    {
+        if (!_options.PinbarEnabled || closed.Count < 1 || upperBoundary <= lowerBoundary)
+        {
+            return null;
+        }
+
+        var current = closed[^1];
+        if (!IsInsideRange(current.Open, upperBoundary, lowerBoundary) ||
+            !IsInsideRange(current.Close, upperBoundary, lowerBoundary) ||
+            !IsInsideRange(current.High, upperBoundary, lowerBoundary) ||
+            !IsInsideRange(current.Low, upperBoundary, lowerBoundary))
+        {
+            return null;
+        }
+
+        var range = current.High - current.Low;
+        var body = Math.Abs(current.Close - current.Open);
+        if (range <= 0m || body <= 0m || body / range * 100m > _options.MaxPinbarBodyRangePercent)
+        {
+            return null;
+        }
+
+        var upperWick = current.High - decimal.Max(current.Open, current.Close);
+        var lowerWick = decimal.Min(current.Open, current.Close) - current.Low;
+        var bullish = lowerWick / body >= _options.MinPinbarWickBodyRatio &&
+            lowerWick / range * 100m >= _options.MinPinbarWickRangePercent &&
+            upperWick < lowerWick;
+        if (bullish)
+        {
+            var risk = current.Close - current.Low;
+            if (risk > 0m)
+            {
+                return BuildSignal(
+                    "Long",
+                    current.OpenTime,
+                    current.OpenTime,
+                    lowerBoundary,
+                    upperBoundary,
+                    lowerBoundary,
+                    current.Close,
+                    current.Low,
+                    "Bullish pinbar inside the active 4H range.",
+                    closed,
+                    "Pinbar",
+                    wickBodyRatio: lowerWick / body,
+                    wickRangePercent: lowerWick / range * 100m);
+            }
+        }
+
+        var bearish = upperWick / body >= _options.MinPinbarWickBodyRatio &&
+            upperWick / range * 100m >= _options.MinPinbarWickRangePercent &&
+            lowerWick < upperWick;
+        if (bearish)
+        {
+            var risk = current.High - current.Close;
+            if (risk > 0m)
+            {
+                return BuildSignal(
+                    "Short",
+                    current.OpenTime,
+                    current.OpenTime,
+                    upperBoundary,
+                    upperBoundary,
+                    lowerBoundary,
+                    current.Close,
+                    current.High,
+                    "Bearish pinbar inside the active 4H range.",
+                    closed,
+                    "Pinbar",
+                    wickBodyRatio: upperWick / body,
+                    wickRangePercent: upperWick / range * 100m);
             }
         }
 
@@ -1251,8 +1411,13 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
     {
         if (signal is not null)
         {
-            return string.Equals(signal.Pattern, "Engulfing", StringComparison.OrdinalIgnoreCase)
-                ? "Engulfing"
+            if (string.Equals(signal.Pattern, "Engulfing", StringComparison.OrdinalIgnoreCase))
+            {
+                return "Engulfing";
+            }
+
+            return string.Equals(signal.Pattern, "Pinbar", StringComparison.OrdinalIgnoreCase)
+                ? "Pinbar"
                 : "Signal";
         }
 
@@ -1299,6 +1464,7 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
 
         return item.State == "Signal" ||
             item.State == "Engulfing" ||
+            item.State == "Pinbar" ||
             item.State == "Upper swept" ||
             item.State == "Lower swept" ||
             item.DistanceToUpperPercent <= _options.NearBoundaryPercent ||
@@ -1311,6 +1477,7 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
         {
             "Signal" => 100m,
             "Engulfing" => 90m,
+            "Pinbar" => 85m,
             "Upper swept" or "Lower swept" => 80m,
             _ => 50m
         };
@@ -1494,9 +1661,12 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
                 : EstimateLongLiquidationPrice(price, settings.Leverage),
             PositionIdx = 0,
             OrderLinkId = FuturesOrderLinkIds.Create(action),
-            Reason = string.Equals(signal.Pattern, "Engulfing", StringComparison.OrdinalIgnoreCase)
-                ? "ny-session-engulfing"
-                : "ny-session-4h-sweep-reclaim"
+            Reason = signal.Pattern switch
+            {
+                "Engulfing" => "ny-session-engulfing",
+                "Pinbar" => "ny-session-pinbar",
+                _ => "ny-session-4h-sweep-reclaim"
+            }
         };
     }
 

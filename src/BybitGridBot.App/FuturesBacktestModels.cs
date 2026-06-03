@@ -36,7 +36,7 @@ public sealed class FuturesBacktestStatusResponse
 
 public sealed class FuturesBacktestResult
 {
-    public string StrategyName { get; init; } = "NY 08:00 4H Sweep Reversal + Engulfing";
+    public string StrategyName { get; init; } = "NY 08:00 4H Sweep Reversal + Engulfing + Pinbar";
 
     public DateTimeOffset PeriodStart { get; init; }
 

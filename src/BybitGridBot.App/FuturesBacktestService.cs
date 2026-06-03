@@ -66,7 +66,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             _status = new FuturesBacktestStatusResponse
             {
                 IsRunning = true,
-                Status = "Starting 4H NY sweep/engulfing backtest",
+                Status = "Starting 4H NY sweep/engulfing/pinbar backtest",
                 StartedAt = DateTimeOffset.UtcNow,
                 ProgressPercent = 0m
             };
@@ -311,7 +311,8 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
 
             if (signal is not null)
             {
-                if (!string.Equals(signal.Pattern, "Engulfing", StringComparison.OrdinalIgnoreCase))
+                if (!string.Equals(signal.Pattern, "Engulfing", StringComparison.OrdinalIgnoreCase) &&
+                    !string.Equals(signal.Pattern, "Pinbar", StringComparison.OrdinalIgnoreCase))
                 {
                     falseBreakoutCount++;
                 }
@@ -437,7 +438,9 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             }
         }
 
-        return TryFindEngulfingSignal(session.Take(index + 1).ToArray(), upperBoundary, lowerBoundary);
+        var closed = session.Take(index + 1).ToArray();
+        return TryFindEngulfingSignal(closed, upperBoundary, lowerBoundary) ??
+            TryFindPinbarSignal(closed, upperBoundary, lowerBoundary);
     }
 
     private NySessionSignal BuildSignal(
@@ -452,7 +455,9 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         string reason,
         IReadOnlyList<Candle> candles,
         string pattern = "Sweep Reversal",
-        decimal bodyRatio = 0m)
+        decimal bodyRatio = 0m,
+        decimal wickBodyRatio = 0m,
+        decimal wickRangePercent = 0m)
     {
         var risk = Math.Abs(sweepExtreme - entryPrice);
         var takeProfit = side == "Short"
@@ -477,6 +482,8 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             MidlineRoomR = CalculateMidlineRoomR(side, rangeHigh, rangeLow, entryPrice, risk),
             BreakoutVolumeRatio = CalculateBreakoutVolumeRatio(candles, breakoutCandleOpenTime),
             BodyRatio = bodyRatio,
+            WickBodyRatio = wickBodyRatio,
+            WickRangePercent = wickRangePercent,
             Reason = reason
         };
     }
@@ -559,6 +566,87 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         return null;
     }
 
+    private NySessionSignal? TryFindPinbarSignal(
+        IReadOnlyList<Candle> closed,
+        decimal upperBoundary,
+        decimal lowerBoundary)
+    {
+        if (!_strategyOptions.PinbarEnabled || closed.Count < 1 || upperBoundary <= lowerBoundary)
+        {
+            return null;
+        }
+
+        var current = closed[^1];
+        if (!IsInsideRange(current.Open, upperBoundary, lowerBoundary) ||
+            !IsInsideRange(current.Close, upperBoundary, lowerBoundary) ||
+            !IsInsideRange(current.High, upperBoundary, lowerBoundary) ||
+            !IsInsideRange(current.Low, upperBoundary, lowerBoundary))
+        {
+            return null;
+        }
+
+        var range = current.High - current.Low;
+        var body = Math.Abs(current.Close - current.Open);
+        if (range <= 0m || body <= 0m || body / range * 100m > _strategyOptions.MaxPinbarBodyRangePercent)
+        {
+            return null;
+        }
+
+        var upperWick = current.High - decimal.Max(current.Open, current.Close);
+        var lowerWick = decimal.Min(current.Open, current.Close) - current.Low;
+        var bullish = lowerWick / body >= _strategyOptions.MinPinbarWickBodyRatio &&
+            lowerWick / range * 100m >= _strategyOptions.MinPinbarWickRangePercent &&
+            upperWick < lowerWick;
+        if (bullish)
+        {
+            var risk = current.Close - current.Low;
+            if (risk > 0m)
+            {
+                return BuildSignal(
+                    "Long",
+                    current.OpenTime,
+                    current.OpenTime,
+                    lowerBoundary,
+                    upperBoundary,
+                    lowerBoundary,
+                    current.Close,
+                    current.Low,
+                    "Bullish pinbar inside the active 4H range.",
+                    closed,
+                    "Pinbar",
+                    wickBodyRatio: lowerWick / body,
+                    wickRangePercent: lowerWick / range * 100m);
+            }
+        }
+
+        var bearish = upperWick / body >= _strategyOptions.MinPinbarWickBodyRatio &&
+            upperWick / range * 100m >= _strategyOptions.MinPinbarWickRangePercent &&
+            lowerWick < upperWick;
+        if (bearish)
+        {
+            var risk = current.High - current.Close;
+            if (risk > 0m)
+            {
+                return BuildSignal(
+                    "Short",
+                    current.OpenTime,
+                    current.OpenTime,
+                    upperBoundary,
+                    upperBoundary,
+                    lowerBoundary,
+                    current.Close,
+                    current.High,
+                    "Bearish pinbar inside the active 4H range.",
+                    closed,
+                    "Pinbar",
+                    wickBodyRatio: upperWick / body,
+                    wickRangePercent: upperWick / range * 100m);
+            }
+        }
+
+        return null;
+    }
+
     private BacktestFilterResult EvaluateBacktestFilters(
         NySessionSignal signal,
         IReadOnlyList<Candle> fiveMinuteCandlesSoFar,
@@ -568,6 +656,11 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         if (string.Equals(signal.Pattern, "Engulfing", StringComparison.OrdinalIgnoreCase))
         {
             return EvaluateEngulfingBacktestFilters(signal, btc15m);
+        }
+
+        if (string.Equals(signal.Pattern, "Pinbar", StringComparison.OrdinalIgnoreCase))
+        {
+            return EvaluatePinbarBacktestFilters(signal, btc15m);
         }
 
         if (signal.SweepDepthPercent < _strategyOptions.MinSweepDepthPercent)
@@ -601,6 +694,30 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         }
 
         if (signal.BreakoutVolumeRatio >= _strategyOptions.HighBreakoutVolumeRatio)
+        {
+            return new BacktestFilterResult(false, false);
+        }
+
+        var btc15mSoFar = btc15m
+            .Where(candle => candle.OpenTime.AddMinutes(15) <= signal.SignalCandleOpenTime.AddMinutes(5))
+            .OrderBy(candle => candle.OpenTime)
+            .ToArray();
+        if (IsBtcTrendAgainstSignal(signal.Side, btc15mSoFar))
+        {
+            return new BacktestFilterResult(false, false);
+        }
+
+        return new BacktestFilterResult(true, false);
+    }
+
+    private BacktestFilterResult EvaluatePinbarBacktestFilters(
+        NySessionSignal signal,
+        IReadOnlyList<Candle> btc15m)
+    {
+        if (!_strategyOptions.PinbarEnabled ||
+            signal.WickBodyRatio < _strategyOptions.MinPinbarWickBodyRatio ||
+            signal.WickRangePercent < _strategyOptions.MinPinbarWickRangePercent ||
+            signal.StopDistancePercent > _strategyOptions.MaxStopPercent)
         {
             return new BacktestFilterResult(false, false);
         }
@@ -825,7 +942,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         var publicTrades = outOfSampleTrades.Select(ToPublicTrade).ToArray();
         return new FuturesBacktestResult
         {
-            StrategyName = "NY 08:00 4H Sweep Reversal + Engulfing",
+            StrategyName = "NY 08:00 4H Sweep Reversal + Engulfing + Pinbar",
             PeriodStart = periodStart,
             PeriodEnd = periodEnd,
             SymbolsRequested = symbolsRequested,
