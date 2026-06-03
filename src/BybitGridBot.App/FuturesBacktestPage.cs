@@ -88,7 +88,7 @@ public static class FuturesBacktestPage
     <header>
       <div>
         <h1>Backtest 4H NY Strategy</h1>
-        <div class="sub">Тестирует sweep reversal, engulfing, pinbar, 3-bar continuation и 3-bar reversal внутри 4h диапазона 08:00-12:00 New York. Метрики считаются по 30 дням out-of-sample после 60 дней отбора символов.</div>
+        <div class="sub">Тестирует sweep reversal, engulfing, pinbar, 3-bar continuation, 3-bar reversal и breakout candle. Метрики считаются по 30 дням out-of-sample после 60 дней отбора символов.</div>
       </div>
       <div class="actions">
         <a class="link secondary" href="/futures">Futures bot</a>

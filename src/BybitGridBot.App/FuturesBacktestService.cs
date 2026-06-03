@@ -66,7 +66,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             _status = new FuturesBacktestStatusResponse
             {
                 IsRunning = true,
-                Status = "Starting 4H NY sweep/engulfing/pinbar/3-bar backtest",
+                Status = "Starting 4H NY sweep/engulfing/pinbar/3-bar/breakout backtest",
                 StartedAt = DateTimeOffset.UtcNow,
                 ProgressPercent = 0m
             };
@@ -314,7 +314,8 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                 if (!string.Equals(signal.Pattern, "Engulfing", StringComparison.OrdinalIgnoreCase) &&
                     !string.Equals(signal.Pattern, "Pinbar", StringComparison.OrdinalIgnoreCase) &&
                     !string.Equals(signal.Pattern, "3-Bar Continuation", StringComparison.OrdinalIgnoreCase) &&
-                    !string.Equals(signal.Pattern, "3-Bar Reversal", StringComparison.OrdinalIgnoreCase))
+                    !string.Equals(signal.Pattern, "3-Bar Reversal", StringComparison.OrdinalIgnoreCase) &&
+                    !string.Equals(signal.Pattern, "Breakout Candle", StringComparison.OrdinalIgnoreCase))
                 {
                     falseBreakoutCount++;
                 }
@@ -444,7 +445,8 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         return TryFindEngulfingSignal(closed, upperBoundary, lowerBoundary) ??
             TryFindPinbarSignal(closed, upperBoundary, lowerBoundary) ??
             TryFindThreeBarContinuationSignal(closed, upperBoundary, lowerBoundary) ??
-            TryFindThreeBarReversalSignal(closed, upperBoundary, lowerBoundary);
+            TryFindThreeBarReversalSignal(closed, upperBoundary, lowerBoundary) ??
+            TryFindBreakoutCandleSignal(closed, upperBoundary, lowerBoundary);
     }
 
     private NySessionSignal BuildSignal(
@@ -829,6 +831,102 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         return null;
     }
 
+    private NySessionSignal? TryFindBreakoutCandleSignal(
+        IReadOnlyList<Candle> closed,
+        decimal upperBoundary,
+        decimal lowerBoundary)
+    {
+        var consolidationCount = Math.Max(2, _strategyOptions.BreakoutConsolidationCandles);
+        if (!_strategyOptions.BreakoutCandleEnabled || closed.Count < consolidationCount + 1 || upperBoundary <= lowerBoundary)
+        {
+            return null;
+        }
+
+        var breakout = closed[^1];
+        var consolidation = closed
+            .Skip(closed.Count - consolidationCount - 1)
+            .Take(consolidationCount)
+            .ToArray();
+        if (consolidation.Any(candle =>
+                !IsInsideRange(candle.Close, upperBoundary, lowerBoundary) ||
+                !IsInsideRange(candle.High, upperBoundary, lowerBoundary) ||
+                !IsInsideRange(candle.Low, upperBoundary, lowerBoundary)))
+        {
+            return null;
+        }
+
+        var consolidationHigh = consolidation.Max(candle => candle.High);
+        var consolidationLow = consolidation.Min(candle => candle.Low);
+        var consolidationMid = (consolidationHigh + consolidationLow) / 2m;
+        var consolidationRangePercent = consolidationMid > 0m
+            ? (consolidationHigh - consolidationLow) / consolidationMid * 100m
+            : 0m;
+        if (consolidationHigh <= consolidationLow ||
+            consolidationRangePercent > _strategyOptions.MaxBreakoutConsolidationRangePercent)
+        {
+            return null;
+        }
+
+        var averageBody = consolidation.Average(candle => Math.Abs(candle.Close - candle.Open));
+        var breakoutBody = Math.Abs(breakout.Close - breakout.Open);
+        if (averageBody <= 0m || breakoutBody / averageBody < _strategyOptions.MinBreakoutBodyRatio)
+        {
+            return null;
+        }
+
+        var bullish = breakout.Close > breakout.Open &&
+            breakout.Close > consolidationHigh &&
+            breakout.Open <= consolidationHigh &&
+            IsInsideRange(breakout.Open, upperBoundary, lowerBoundary);
+        if (bullish)
+        {
+            var risk = breakout.Close - consolidationLow;
+            if (risk > 0m)
+            {
+                return BuildSignal(
+                    "Long",
+                    breakout.OpenTime,
+                    breakout.OpenTime,
+                    consolidationHigh,
+                    upperBoundary,
+                    lowerBoundary,
+                    breakout.Close,
+                    consolidationLow,
+                    "Bullish breakout candle after consolidation.",
+                    closed,
+                    "Breakout Candle",
+                    breakoutBody / averageBody);
+            }
+        }
+
+        var bearish = breakout.Close < breakout.Open &&
+            breakout.Close < consolidationLow &&
+            breakout.Open >= consolidationLow &&
+            IsInsideRange(breakout.Open, upperBoundary, lowerBoundary);
+        if (bearish)
+        {
+            var risk = consolidationHigh - breakout.Close;
+            if (risk > 0m)
+            {
+                return BuildSignal(
+                    "Short",
+                    breakout.OpenTime,
+                    breakout.OpenTime,
+                    consolidationLow,
+                    upperBoundary,
+                    lowerBoundary,
+                    breakout.Close,
+                    consolidationHigh,
+                    "Bearish breakout candle after consolidation.",
+                    closed,
+                    "Breakout Candle",
+                    breakoutBody / averageBody);
+            }
+        }
+
+        return null;
+    }
+
     private BacktestFilterResult EvaluateBacktestFilters(
         NySessionSignal signal,
         IReadOnlyList<Candle> fiveMinuteCandlesSoFar,
@@ -853,6 +951,11 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         if (string.Equals(signal.Pattern, "3-Bar Reversal", StringComparison.OrdinalIgnoreCase))
         {
             return EvaluateThreeBarReversalBacktestFilters(signal, btc15m);
+        }
+
+        if (string.Equals(signal.Pattern, "Breakout Candle", StringComparison.OrdinalIgnoreCase))
+        {
+            return EvaluateBreakoutCandleBacktestFilters(signal, btc15m);
         }
 
         if (signal.SweepDepthPercent < _strategyOptions.MinSweepDepthPercent)
@@ -886,6 +989,29 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         }
 
         if (signal.BreakoutVolumeRatio >= _strategyOptions.HighBreakoutVolumeRatio)
+        {
+            return new BacktestFilterResult(false, false);
+        }
+
+        var btc15mSoFar = btc15m
+            .Where(candle => candle.OpenTime.AddMinutes(15) <= signal.SignalCandleOpenTime.AddMinutes(5))
+            .OrderBy(candle => candle.OpenTime)
+            .ToArray();
+        if (IsBtcTrendAgainstSignal(signal.Side, btc15mSoFar))
+        {
+            return new BacktestFilterResult(false, false);
+        }
+
+        return new BacktestFilterResult(true, false);
+    }
+
+    private BacktestFilterResult EvaluateBreakoutCandleBacktestFilters(
+        NySessionSignal signal,
+        IReadOnlyList<Candle> btc15m)
+    {
+        if (!_strategyOptions.BreakoutCandleEnabled ||
+            signal.BodyRatio < _strategyOptions.MinBreakoutBodyRatio ||
+            signal.StopDistancePercent > _strategyOptions.MaxStopPercent)
         {
             return new BacktestFilterResult(false, false);
         }
@@ -1180,7 +1306,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         var publicTrades = outOfSampleTrades.Select(ToPublicTrade).ToArray();
         return new FuturesBacktestResult
         {
-            StrategyName = "NY 08:00 4H Sweep Reversal + Engulfing + Pinbar + 3-Bar Continuation + 3-Bar Reversal",
+            StrategyName = "NY 08:00 4H Sweep Reversal + Engulfing + Pinbar + 3-Bar Continuation + 3-Bar Reversal + Breakout Candle",
             PeriodStart = periodStart,
             PeriodEnd = periodEnd,
             SymbolsRequested = symbolsRequested,

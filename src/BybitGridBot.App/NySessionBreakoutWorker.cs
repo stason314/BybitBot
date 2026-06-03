@@ -682,6 +682,11 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
             return await EvaluateThreeBarReversalFiltersAsync(signal, cancellationToken);
         }
 
+        if (string.Equals(signal.Pattern, "Breakout Candle", StringComparison.OrdinalIgnoreCase))
+        {
+            return await EvaluateBreakoutCandleFiltersAsync(signal, cancellationToken);
+        }
+
         if (signal.SweepDepthPercent < _options.MinSweepDepthPercent)
         {
             return new NySessionEntryFilterResult
@@ -990,6 +995,59 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
         };
     }
 
+    private async Task<NySessionEntryFilterResult> EvaluateBreakoutCandleFiltersAsync(
+        NySessionSignal signal,
+        CancellationToken cancellationToken)
+    {
+        if (!_options.BreakoutCandleEnabled)
+        {
+            return new NySessionEntryFilterResult
+            {
+                IsAllowed = false,
+                Mode = "Breakout Candle",
+                Reason = "Breakout candle pattern is disabled."
+            };
+        }
+
+        if (signal.BodyRatio < _options.MinBreakoutBodyRatio)
+        {
+            return new NySessionEntryFilterResult
+            {
+                IsAllowed = false,
+                Mode = "Breakout Candle",
+                Reason = $"Breakout body ratio {signal.BodyRatio:F2} is below {_options.MinBreakoutBodyRatio:F2}."
+            };
+        }
+
+        if (signal.StopDistancePercent > _options.MaxStopPercent)
+        {
+            return new NySessionEntryFilterResult
+            {
+                IsAllowed = false,
+                Mode = "Breakout Candle",
+                Reason = $"Stop distance {signal.StopDistancePercent:F4}% is above {_options.MaxStopPercent:F4}%."
+            };
+        }
+
+        var btcTrend = await AnalyzeBtcTrendAsync(signal.Side, cancellationToken);
+        if (btcTrend.IsBlocked)
+        {
+            return new NySessionEntryFilterResult
+            {
+                IsAllowed = false,
+                Mode = "Breakout Candle",
+                Reason = btcTrend.Reason
+            };
+        }
+
+        return new NySessionEntryFilterResult
+        {
+            IsAllowed = true,
+            Mode = "Breakout Candle",
+            Reason = "Breakout candle pattern passed filters."
+        };
+    }
+
     private TrueBreakoutAssessment AnalyzeTrueBreakout(
         NySessionSignal signal,
         IReadOnlyList<Candle> fiveMinuteCandles,
@@ -1217,6 +1275,13 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
             return threeBarReversalSignal;
         }
 
+        var breakoutCandleSignal = TryFindBreakoutCandleSignal(closed, upperBoundary, lowerBoundary);
+        if (breakoutCandleSignal is not null &&
+            (latestSignal is null || breakoutCandleSignal.SignalCandleOpenTime > latestSignal.SignalCandleOpenTime))
+        {
+            return breakoutCandleSignal;
+        }
+
         return latestSignal;
     }
 
@@ -1337,6 +1402,102 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
                     closed,
                     "Engulfing",
                     currentBody / previousBody);
+            }
+        }
+
+        return null;
+    }
+
+    private NySessionSignal? TryFindBreakoutCandleSignal(
+        IReadOnlyList<Candle> closed,
+        decimal upperBoundary,
+        decimal lowerBoundary)
+    {
+        var consolidationCount = Math.Max(2, _options.BreakoutConsolidationCandles);
+        if (!_options.BreakoutCandleEnabled || closed.Count < consolidationCount + 1 || upperBoundary <= lowerBoundary)
+        {
+            return null;
+        }
+
+        var breakout = closed[^1];
+        var consolidation = closed
+            .Skip(closed.Count - consolidationCount - 1)
+            .Take(consolidationCount)
+            .ToArray();
+        if (consolidation.Any(candle =>
+                !IsInsideRange(candle.Close, upperBoundary, lowerBoundary) ||
+                !IsInsideRange(candle.High, upperBoundary, lowerBoundary) ||
+                !IsInsideRange(candle.Low, upperBoundary, lowerBoundary)))
+        {
+            return null;
+        }
+
+        var consolidationHigh = consolidation.Max(candle => candle.High);
+        var consolidationLow = consolidation.Min(candle => candle.Low);
+        var consolidationMid = (consolidationHigh + consolidationLow) / 2m;
+        var consolidationRangePercent = consolidationMid > 0m
+            ? (consolidationHigh - consolidationLow) / consolidationMid * 100m
+            : 0m;
+        if (consolidationHigh <= consolidationLow ||
+            consolidationRangePercent > _options.MaxBreakoutConsolidationRangePercent)
+        {
+            return null;
+        }
+
+        var averageBody = consolidation.Average(candle => Math.Abs(candle.Close - candle.Open));
+        var breakoutBody = Math.Abs(breakout.Close - breakout.Open);
+        if (averageBody <= 0m || breakoutBody / averageBody < _options.MinBreakoutBodyRatio)
+        {
+            return null;
+        }
+
+        var bullish = breakout.Close > breakout.Open &&
+            breakout.Close > consolidationHigh &&
+            breakout.Open <= consolidationHigh &&
+            IsInsideRange(breakout.Open, upperBoundary, lowerBoundary);
+        if (bullish)
+        {
+            var risk = breakout.Close - consolidationLow;
+            if (risk > 0m)
+            {
+                return BuildSignal(
+                    "Long",
+                    breakout.OpenTime,
+                    breakout.OpenTime,
+                    consolidationHigh,
+                    upperBoundary,
+                    lowerBoundary,
+                    breakout.Close,
+                    consolidationLow,
+                    "Bullish breakout candle after consolidation.",
+                    closed,
+                    "Breakout Candle",
+                    breakoutBody / averageBody);
+            }
+        }
+
+        var bearish = breakout.Close < breakout.Open &&
+            breakout.Close < consolidationLow &&
+            breakout.Open >= consolidationLow &&
+            IsInsideRange(breakout.Open, upperBoundary, lowerBoundary);
+        if (bearish)
+        {
+            var risk = consolidationHigh - breakout.Close;
+            if (risk > 0m)
+            {
+                return BuildSignal(
+                    "Short",
+                    breakout.OpenTime,
+                    breakout.OpenTime,
+                    consolidationLow,
+                    upperBoundary,
+                    lowerBoundary,
+                    breakout.Close,
+                    consolidationHigh,
+                    "Bearish breakout candle after consolidation.",
+                    closed,
+                    "Breakout Candle",
+                    breakoutBody / averageBody);
             }
         }
 
@@ -1734,6 +1895,11 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
                 return "3-Bar Cont";
             }
 
+            if (string.Equals(signal.Pattern, "Breakout Candle", StringComparison.OrdinalIgnoreCase))
+            {
+                return "Breakout";
+            }
+
             return string.Equals(signal.Pattern, "3-Bar Reversal", StringComparison.OrdinalIgnoreCase)
                 ? "3-Bar Rev"
                 : "Signal";
@@ -1785,6 +1951,7 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
             item.State == "Pinbar" ||
             item.State == "3-Bar Cont" ||
             item.State == "3-Bar Rev" ||
+            item.State == "Breakout" ||
             item.State == "Upper swept" ||
             item.State == "Lower swept" ||
             item.DistanceToUpperPercent <= _options.NearBoundaryPercent ||
@@ -1800,6 +1967,7 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
             "Pinbar" => 85m,
             "3-Bar Rev" => 83m,
             "3-Bar Cont" => 82m,
+            "Breakout" => 81m,
             "Upper swept" or "Lower swept" => 80m,
             _ => 50m
         };
@@ -1989,6 +2157,7 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
                 "Pinbar" => "ny-session-pinbar",
                 "3-Bar Continuation" => "ny-session-3-bar-continuation",
                 "3-Bar Reversal" => "ny-session-3-bar-reversal",
+                "Breakout Candle" => "ny-session-breakout-candle",
                 _ => "ny-session-4h-sweep-reclaim"
             }
         };

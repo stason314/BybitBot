@@ -78,6 +78,21 @@ public sealed class NySessionBreakoutOptions
     [Range(typeof(decimal), "1", "100")]
     public decimal MinThreeBarOuterBodyRatio { get; init; } = 1.25m;
 
+    [ConfigurationKeyName("NY_SESSION_BREAKOUT_CANDLE_ENABLED")]
+    public bool BreakoutCandleEnabled { get; init; } = true;
+
+    [ConfigurationKeyName("NY_SESSION_BREAKOUT_CONSOLIDATION_CANDLES")]
+    [Range(2, 12)]
+    public int BreakoutConsolidationCandles { get; init; } = 3;
+
+    [ConfigurationKeyName("NY_SESSION_MAX_BREAKOUT_CONSOLIDATION_RANGE_PERCENT")]
+    [Range(typeof(decimal), "0.00000001", "100")]
+    public decimal MaxBreakoutConsolidationRangePercent { get; init; } = 0.8m;
+
+    [ConfigurationKeyName("NY_SESSION_MIN_BREAKOUT_BODY_RATIO")]
+    [Range(typeof(decimal), "1", "100")]
+    public decimal MinBreakoutBodyRatio { get; init; } = 2m;
+
     [ConfigurationKeyName("NY_SESSION_MAX_OPEN_POSITIONS")]
     [Range(1, 100)]
     public int MaxOpenPositions { get; init; } = 5;
