@@ -1,0 +1,155 @@
+namespace BybitGridBot.App;
+
+public sealed class FuturesBacktestRequest
+{
+    public int? Days { get; init; }
+
+    public int? Symbols { get; init; }
+
+    public decimal? EntryNotionalUsdt { get; init; }
+
+    public decimal? TakerFeePercent { get; init; }
+
+    public decimal? MakerFeePercent { get; init; }
+
+    public decimal? SlippagePercent { get; init; }
+
+    public decimal? FundingPercentPer8h { get; init; }
+}
+
+public sealed class FuturesBacktestStatusResponse
+{
+    public bool IsRunning { get; init; }
+
+    public string Status { get; init; } = "Not started";
+
+    public decimal ProgressPercent { get; init; }
+
+    public DateTimeOffset? StartedAt { get; init; }
+
+    public DateTimeOffset? CompletedAt { get; init; }
+
+    public FuturesBacktestResult? Result { get; init; }
+}
+
+public sealed class FuturesBacktestResult
+{
+    public DateTimeOffset PeriodStart { get; init; }
+
+    public DateTimeOffset PeriodEnd { get; init; }
+
+    public int SymbolsRequested { get; init; }
+
+    public int SymbolsProcessed { get; init; }
+
+    public int TradesCount { get; init; }
+
+    public int FalseBreakoutCount { get; init; }
+
+    public int TrueBreakoutBlockedCount { get; init; }
+
+    public FuturesBacktestMetrics Metrics { get; init; } = new();
+
+    public IReadOnlyList<FuturesBacktestSymbolPerformance> BestSymbols { get; init; } = [];
+
+    public IReadOnlyList<FuturesBacktestSymbolPerformance> WorstSymbols { get; init; } = [];
+
+    public IReadOnlyList<FuturesBacktestSidePerformance> LongShort { get; init; } = [];
+
+    public IReadOnlyList<FuturesBacktestBucketPerformance> WeekdayPerformance { get; init; } = [];
+
+    public IReadOnlyList<FuturesBacktestBucketPerformance> HourPerformance { get; init; } = [];
+
+    public IReadOnlyList<FuturesBacktestTrade> RecentTrades { get; init; } = [];
+}
+
+public sealed class FuturesBacktestMetrics
+{
+    public decimal NetPnl { get; init; }
+
+    public decimal MaxDrawdown { get; init; }
+
+    public decimal MaxDrawdownPercent { get; init; }
+
+    public decimal WinRate { get; init; }
+
+    public decimal ProfitFactor { get; init; }
+
+    public decimal AverageR { get; init; }
+
+    public decimal TradesPerDay { get; init; }
+}
+
+public sealed class FuturesBacktestSymbolPerformance
+{
+    public string Symbol { get; init; } = string.Empty;
+
+    public int Trades { get; init; }
+
+    public decimal NetPnl { get; init; }
+
+    public decimal WinRate { get; init; }
+
+    public decimal ProfitFactor { get; init; }
+
+    public decimal AverageR { get; init; }
+}
+
+public sealed class FuturesBacktestSidePerformance
+{
+    public string Side { get; init; } = string.Empty;
+
+    public int Trades { get; init; }
+
+    public decimal NetPnl { get; init; }
+
+    public decimal WinRate { get; init; }
+
+    public decimal AverageR { get; init; }
+}
+
+public sealed class FuturesBacktestBucketPerformance
+{
+    public string Bucket { get; init; } = string.Empty;
+
+    public int Trades { get; init; }
+
+    public decimal NetPnl { get; init; }
+
+    public decimal WinRate { get; init; }
+
+    public decimal AverageR { get; init; }
+}
+
+public sealed class FuturesBacktestTrade
+{
+    public string Symbol { get; init; } = string.Empty;
+
+    public string Side { get; init; } = string.Empty;
+
+    public DateTimeOffset EntryTime { get; init; }
+
+    public DateTimeOffset ExitTime { get; init; }
+
+    public decimal EntryPrice { get; init; }
+
+    public decimal ExitPrice { get; init; }
+
+    public decimal StopLoss { get; init; }
+
+    public decimal TakeProfit { get; init; }
+
+    public decimal GrossPnl { get; init; }
+
+    public decimal Fees { get; init; }
+
+    public decimal SlippageCost { get; init; }
+
+    public decimal FundingCost { get; init; }
+
+    public decimal NetPnl { get; init; }
+
+    public decimal RMultiple { get; init; }
+
+    public string ExitReason { get; init; } = string.Empty;
+}

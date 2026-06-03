@@ -41,6 +41,7 @@ builder.Services.AddOptions<FuturesMainnetChecklistOptions>().Bind(builder.Confi
 builder.Services.AddOptions<TelegramOptions>().Bind(builder.Configuration);
 builder.Services.AddOptions<RotationOptions>().Bind(builder.Configuration);
 builder.Services.AddOptions<NySessionBreakoutOptions>().Bind(builder.Configuration);
+builder.Services.AddOptions<FuturesBacktestOptions>().Bind(builder.Configuration);
 
 builder.Services.AddSingleton<BybitSigner>();
 builder.Services.AddSingleton<BybitUserStreamTelemetry>();
@@ -92,6 +93,7 @@ builder.Services.AddSingleton<IFuturesMarketScannerService, FuturesMarketScanner
 builder.Services.AddSingleton<IRotationManagerService, RotationManagerService>();
 builder.Services.AddSingleton<NySessionBreakoutWorker>();
 builder.Services.AddSingleton<INySessionBreakoutRuntime>(serviceProvider => serviceProvider.GetRequiredService<NySessionBreakoutWorker>());
+builder.Services.AddSingleton<IFuturesBacktestService, FuturesBacktestService>();
 
 builder.Services.AddHttpClient<IBybitRestClient, BybitRestClient>(client =>
 {
@@ -175,6 +177,12 @@ app.MapDelete("/api/settings/{symbol}", async (string symbol, IGridDashboardServ
 
 app.MapGet("/api/futures/dashboard", async (INySessionBreakoutRuntime runtime, CancellationToken cancellationToken) =>
     Results.Ok(await runtime.GetDashboardAsync(cancellationToken)));
+
+app.MapGet("/api/futures/backtest", (IFuturesBacktestService backtestService) =>
+    Results.Ok(backtestService.GetStatus()));
+
+app.MapPost("/api/futures/backtest/start", async (FuturesBacktestRequest request, IFuturesBacktestService backtestService, CancellationToken cancellationToken) =>
+    Results.Ok(await backtestService.StartAsync(request, cancellationToken)));
 
 app.MapGet("/api/futures/market-scan", async (int? limit, IFuturesMarketScannerService marketScannerService, CancellationToken cancellationToken) =>
     Results.Ok(await marketScannerService.ScanAsync(limit, cancellationToken)));

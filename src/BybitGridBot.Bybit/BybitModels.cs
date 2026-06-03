@@ -16,6 +16,7 @@ public interface IBybitRestClient
     Task<IReadOnlyList<BybitOrderSnapshot>> GetOrderHistoryAsync(string category, string symbol, string? orderLinkId, CancellationToken cancellationToken);
     Task<IReadOnlyList<BybitExecutionSnapshot>> GetExecutionsAsync(string category, string symbol, string? orderLinkId, string? execType, CancellationToken cancellationToken);
     Task<IReadOnlyList<Candle>> GetKlinesAsync(string category, string symbol, string interval, int limit, CancellationToken cancellationToken);
+    Task<IReadOnlyList<Candle>> GetKlinesAsync(string category, string symbol, string interval, DateTimeOffset start, DateTimeOffset end, int limit, CancellationToken cancellationToken);
     Task<BybitInstrumentInfo> GetInstrumentInfoAsync(string category, string symbol, CancellationToken cancellationToken);
     Task<IReadOnlyList<BybitInstrumentInfo>> GetInstrumentsAsync(string category, CancellationToken cancellationToken);
     Task<BybitPositionSnapshot?> GetPositionAsync(string category, string symbol, CancellationToken cancellationToken);

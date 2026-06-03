@@ -278,6 +278,44 @@ public sealed class BybitRestClient : IBybitRestClient
             .ToArray();
     }
 
+    public async Task<IReadOnlyList<Candle>> GetKlinesAsync(
+        string category,
+        string symbol,
+        string interval,
+        DateTimeOffset start,
+        DateTimeOffset end,
+        int limit,
+        CancellationToken cancellationToken)
+    {
+        var result = await SendAsync<BybitKlineResult>(
+            HttpMethod.Get,
+            "/v5/market/kline",
+            false,
+            new Dictionary<string, string?>
+            {
+                ["category"] = category,
+                ["symbol"] = symbol,
+                ["interval"] = interval,
+                ["start"] = start.ToUnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture),
+                ["end"] = end.ToUnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture),
+                ["limit"] = limit.ToString(CultureInfo.InvariantCulture)
+            },
+            null,
+            cancellationToken);
+
+        return result.List
+            .Select(static row => new Candle(
+                BybitModelMapper.ParseUnixMilliseconds(row[0]),
+                BybitModelMapper.ParseDecimal(row[1]),
+                BybitModelMapper.ParseDecimal(row[2]),
+                BybitModelMapper.ParseDecimal(row[3]),
+                BybitModelMapper.ParseDecimal(row[4]),
+                BybitModelMapper.ParseDecimal(row[5]),
+                BybitModelMapper.ParseDecimal(row[6])))
+            .OrderBy(candle => candle.OpenTime)
+            .ToArray();
+    }
+
     public async Task<BybitPositionSnapshot?> GetPositionAsync(string category, string symbol, CancellationToken cancellationToken)
     {
         var result = await SendAsync<BybitPositionsResult>(

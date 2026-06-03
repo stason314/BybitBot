@@ -509,6 +509,9 @@ public sealed class FuturesIntegrationSafetyTests
         public Task<IReadOnlyList<Candle>> GetKlinesAsync(string category, string symbol, string interval, int limit, CancellationToken cancellationToken) =>
             Task.FromResult<IReadOnlyList<Candle>>(Array.Empty<Candle>());
 
+        public Task<IReadOnlyList<Candle>> GetKlinesAsync(string category, string symbol, string interval, DateTimeOffset start, DateTimeOffset end, int limit, CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<Candle>>(Array.Empty<Candle>());
+
         public Task<BybitInstrumentInfo> GetInstrumentInfoAsync(string category, string symbol, CancellationToken cancellationToken) =>
             Task.FromResult(new BybitInstrumentInfo
             {

@@ -59,9 +59,21 @@ public static class NySessionDashboardPage
     .event { border: 1px solid var(--line); border-radius: 8px; padding: 10px; background: #fbfcfb; }
     .event .top { display: flex; justify-content: space-between; gap: 10px; color: var(--muted); font-size: 12px; margin-bottom: 4px; }
     .empty { padding: 24px 16px; color: var(--muted); }
+    .toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+    .btn { appearance: none; border: 1px solid #1d4ed8; background: var(--accent); color: #fff; min-height: 36px; padding: 7px 12px; border-radius: 7px; font-weight: 720; cursor: pointer; }
+    .btn:disabled { cursor: wait; opacity: .62; }
+    .backtest-metrics { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 1px; background: var(--line); border-bottom: 1px solid var(--line); }
+    .bt-cell { background: #fff; padding: 12px; min-width: 0; }
+    .bt-cell .value { font-size: 18px; }
+    .bt-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0; border-top: 1px solid var(--line); }
+    .bt-grid > div { min-width: 0; border-right: 1px solid var(--line); }
+    .bt-grid > div:nth-child(2n) { border-right: 0; }
     @media (max-width: 1100px) {
       .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .grid { grid-template-columns: 1fr; }
+      .backtest-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .bt-grid { grid-template-columns: 1fr; }
+      .bt-grid > div { border-right: 0; }
     }
     @media (max-width: 720px) {
       .shell { width: min(100% - 18px, 1440px); padding-top: 14px; }
@@ -88,6 +100,51 @@ public static class NySessionDashboardPage
       <div class="metric"><div class="label">PnL за сутки</div><div class="value" id="dailyPnl">-</div></div>
       <div class="metric"><div class="label">Открытый PnL</div><div class="value" id="unrealizedPnl">-</div></div>
       <div class="metric"><div class="label">Режим</div><div class="value" id="mode">-</div></div>
+    </section>
+
+    <section class="panel" style="margin-bottom:14px">
+      <div class="toolbar">
+        <div>
+          <h2 style="padding:0;border:0">Backtest</h2>
+          <div class="muted">90 дней, top 50 Bybit USDT perpetual, 08:00-16:00 New York, 4H/15m/5m, fees/slippage/funding.</div>
+        </div>
+        <button class="btn" id="startBacktest" type="button">Запустить 90d</button>
+      </div>
+      <div class="backtest-metrics">
+        <div class="bt-cell"><div class="label">Status</div><div class="value" id="btStatus">-</div></div>
+        <div class="bt-cell"><div class="label">Net PnL</div><div class="value" id="btNetPnl">-</div></div>
+        <div class="bt-cell"><div class="label">Max DD</div><div class="value" id="btDrawdown">-</div></div>
+        <div class="bt-cell"><div class="label">Win rate</div><div class="value" id="btWinRate">-</div></div>
+        <div class="bt-cell"><div class="label">Profit factor</div><div class="value" id="btProfitFactor">-</div></div>
+        <div class="bt-cell"><div class="label">Average R</div><div class="value" id="btAverageR">-</div></div>
+        <div class="bt-cell"><div class="label">Trades/day</div><div class="value" id="btTradesDay">-</div></div>
+      </div>
+      <div class="bt-grid">
+        <div>
+          <h2>Best symbols</h2>
+          <table><thead><tr><th>Symbol</th><th>Trades</th><th>PnL</th><th>WR</th></tr></thead><tbody id="btBest"><tr><td colspan="4" class="empty">Нет данных</td></tr></tbody></table>
+        </div>
+        <div>
+          <h2>Worst symbols</h2>
+          <table><thead><tr><th>Symbol</th><th>Trades</th><th>PnL</th><th>WR</th></tr></thead><tbody id="btWorst"><tr><td colspan="4" class="empty">Нет данных</td></tr></tbody></table>
+        </div>
+        <div>
+          <h2>Long vs short</h2>
+          <table><thead><tr><th>Side</th><th>Trades</th><th>PnL</th><th>Avg R</th></tr></thead><tbody id="btSides"><tr><td colspan="4" class="empty">Нет данных</td></tr></tbody></table>
+        </div>
+        <div>
+          <h2>Weekday performance</h2>
+          <table><thead><tr><th>Day</th><th>Trades</th><th>PnL</th><th>WR</th></tr></thead><tbody id="btWeekdays"><tr><td colspan="4" class="empty">Нет данных</td></tr></tbody></table>
+        </div>
+        <div>
+          <h2>Hour performance</h2>
+          <table><thead><tr><th>Hour NY</th><th>Trades</th><th>PnL</th><th>WR</th></tr></thead><tbody id="btHours"><tr><td colspan="4" class="empty">Нет данных</td></tr></tbody></table>
+        </div>
+        <div>
+          <h2>Breakouts</h2>
+          <table><tbody id="btBreakouts"><tr><td class="empty">Нет данных</td></tr></tbody></table>
+        </div>
+      </div>
     </section>
 
     <section class="grid">
@@ -185,8 +242,75 @@ public static class NySessionDashboardPage
         </div>`).join('') : '<div class="empty">Событий пока нет</div>';
     }
 
+    async function loadBacktest() {
+      const response = await fetch('/api/futures/backtest', { cache: 'no-store' });
+      if (!response.ok) throw new Error(`Backtest ${response.status}`);
+      renderBacktest(await response.json());
+    }
+
+    function renderBacktest(data) {
+      const result = data.result;
+      byId('startBacktest').disabled = Boolean(data.isRunning);
+      byId('btStatus').textContent = data.isRunning ? `${data.status} ${fmt.format(data.progressPercent || 0)}%` : (data.status || 'Not started');
+      if (!result) return;
+      const m = result.metrics || {};
+      byId('btNetPnl').textContent = pnl(m.netPnl);
+      byId('btNetPnl').className = `value ${cls(m.netPnl)}`;
+      byId('btDrawdown').textContent = `${money.format(m.maxDrawdown || 0)} (${pct(m.maxDrawdownPercent)})`;
+      byId('btWinRate').textContent = pct(m.winRate);
+      byId('btProfitFactor').textContent = fmt.format(m.profitFactor || 0);
+      byId('btAverageR').textContent = fmt.format(m.averageR || 0);
+      byId('btTradesDay').textContent = fmt.format(m.tradesPerDay || 0);
+      byId('btBest').innerHTML = renderPerfRows(result.bestSymbols || [], 'symbol');
+      byId('btWorst').innerHTML = renderPerfRows(result.worstSymbols || [], 'symbol');
+      byId('btSides').innerHTML = renderSideRows(result.longShort || []);
+      byId('btWeekdays').innerHTML = renderPerfRows(result.weekdayPerformance || [], 'bucket');
+      byId('btHours').innerHTML = renderPerfRows(result.hourPerformance || [], 'bucket');
+      byId('btBreakouts').innerHTML = `
+        <tr><th>False breakout count</th><td>${result.falseBreakoutCount || 0}</td></tr>
+        <tr><th>True breakout blocked</th><td>${result.trueBreakoutBlockedCount || 0}</td></tr>
+        <tr><th>Trades</th><td>${result.tradesCount || 0}</td></tr>
+        <tr><th>Symbols</th><td>${result.symbolsProcessed || 0}/${result.symbolsRequested || 0}</td></tr>`;
+    }
+
+    function renderPerfRows(items, key) {
+      return items.length ? items.map(item => `
+        <tr>
+          <td>${item[key] || '-'}</td>
+          <td>${item.trades || 0}</td>
+          <td class="${cls(item.netPnl)}">${pnl(item.netPnl)}</td>
+          <td>${pct(item.winRate)}</td>
+        </tr>`).join('') : '<tr><td colspan="4" class="empty">Нет данных</td></tr>';
+    }
+
+    function renderSideRows(items) {
+      return items.length ? items.map(item => `
+        <tr>
+          <td>${item.side || '-'}</td>
+          <td>${item.trades || 0}</td>
+          <td class="${cls(item.netPnl)}">${pnl(item.netPnl)}</td>
+          <td>${fmt.format(item.averageR || 0)}</td>
+        </tr>`).join('') : '<tr><td colspan="4" class="empty">Нет данных</td></tr>';
+    }
+
+    byId('startBacktest').addEventListener('click', async () => {
+      byId('startBacktest').disabled = true;
+      const response = await fetch('/api/futures/backtest/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ days: 90, symbols: 50 })
+      });
+      if (!response.ok) {
+        byId('startBacktest').disabled = false;
+        throw new Error(`Backtest start ${response.status}`);
+      }
+      renderBacktest(await response.json());
+    });
+
     load().catch(error => { byId('status').textContent = error.message; });
+    loadBacktest().catch(() => {});
     setInterval(() => load().catch(() => {}), 5000);
+    setInterval(() => loadBacktest().catch(() => {}), 5000);
   </script>
 </body>
 </html>
