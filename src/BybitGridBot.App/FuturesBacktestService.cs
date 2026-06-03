@@ -21,6 +21,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
     private const string FiveMinuteInterval = "5";
     private const string FifteenMinuteInterval = "15";
     private const string FourHourInterval = "240";
+    private const int ExpectedNySessionFiveMinuteCandles = 96;
     private const int KlinePageLimit = 1000;
     private const int MaxConcurrency = 2;
 
@@ -252,6 +253,11 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
 
         foreach (var day in groupedByDay)
         {
+            if (!IsNySessionComplete(day.Key, nyZone, periodEnd))
+            {
+                continue;
+            }
+
             var session = day
                 .Where(candle =>
                 {
@@ -260,7 +266,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                 })
                 .OrderBy(candle => candle.OpenTime)
                 .ToArray();
-            if (session.Length < 12)
+            if (session.Length < ExpectedNySessionFiveMinuteCandles)
             {
                 continue;
             }
@@ -269,6 +275,14 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         }
 
         return new SymbolBacktestOutput(symbol, trades, falseBreakoutCount, trueBreakoutBlockedCount);
+    }
+
+    private static bool IsNySessionComplete(DateOnly nyDate, TimeZoneInfo nyZone, DateTimeOffset periodEnd)
+    {
+        var sessionEndLocal = nyDate.ToDateTime(TimeOnly.FromTimeSpan(TimeSpan.FromHours(16)));
+        var sessionEndUtc = new DateTimeOffset(
+            TimeZoneInfo.ConvertTimeToUtc(DateTime.SpecifyKind(sessionEndLocal, DateTimeKind.Unspecified), nyZone));
+        return periodEnd >= sessionEndUtc;
     }
 
     private void BacktestDay(
@@ -1074,7 +1088,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             return new BacktestFilterResult(false, false);
         }
 
-        if (signal.StopDistancePercent > _strategyOptions.MaxStopPercent)
+        if (IsStopDistanceOutsideBounds(signal))
         {
             return new BacktestFilterResult(false, false);
         }
@@ -1117,7 +1131,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
     {
         if (!_strategyOptions.ShrinkingCandlesEnabled ||
             signal.BodyRatio < _strategyOptions.MinShrinkingReversalBodyRatio ||
-            signal.StopDistancePercent > _strategyOptions.MaxStopPercent)
+            IsStopDistanceOutsideBounds(signal))
         {
             return new BacktestFilterResult(false, false);
         }
@@ -1140,7 +1154,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
     {
         if (!_strategyOptions.BreakoutCandleEnabled ||
             signal.BodyRatio < _strategyOptions.MinBreakoutBodyRatio ||
-            signal.StopDistancePercent > _strategyOptions.MaxStopPercent)
+            IsStopDistanceOutsideBounds(signal))
         {
             return new BacktestFilterResult(false, false);
         }
@@ -1163,7 +1177,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
     {
         if (!_strategyOptions.ThreeBarReversalEnabled ||
             signal.BodyRatio < _strategyOptions.MinThreeBarOuterBodyRatio ||
-            signal.StopDistancePercent > _strategyOptions.MaxStopPercent)
+            IsStopDistanceOutsideBounds(signal))
         {
             return new BacktestFilterResult(false, false);
         }
@@ -1186,7 +1200,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
     {
         if (!_strategyOptions.ThreeBarContinuationEnabled ||
             signal.BodyRatio < _strategyOptions.MinThreeBarOuterBodyRatio ||
-            signal.StopDistancePercent > _strategyOptions.MaxStopPercent)
+            IsStopDistanceOutsideBounds(signal))
         {
             return new BacktestFilterResult(false, false);
         }
@@ -1210,7 +1224,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         if (!_strategyOptions.PinbarEnabled ||
             signal.WickBodyRatio < _strategyOptions.MinPinbarWickBodyRatio ||
             signal.WickRangePercent < _strategyOptions.MinPinbarWickRangePercent ||
-            signal.StopDistancePercent > _strategyOptions.MaxStopPercent)
+            IsStopDistanceOutsideBounds(signal))
         {
             return new BacktestFilterResult(false, false);
         }
@@ -1233,7 +1247,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
     {
         if (!_strategyOptions.EngulfingEnabled ||
             signal.BodyRatio < _strategyOptions.MinEngulfingBodyRatio ||
-            signal.StopDistancePercent > _strategyOptions.MaxStopPercent)
+            IsStopDistanceOutsideBounds(signal))
         {
             return new BacktestFilterResult(false, false);
         }
@@ -1249,6 +1263,10 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
 
         return new BacktestFilterResult(true, false);
     }
+
+    private bool IsStopDistanceOutsideBounds(NySessionSignal signal) =>
+        signal.StopDistancePercent < _strategyOptions.MinStopPercent ||
+        signal.StopDistancePercent > _strategyOptions.MaxStopPercent;
 
     private bool AnalyzeTrueBreakout(
         NySessionSignal signal,
@@ -1375,6 +1393,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         return new BacktestTradeInternal(
             symbol,
             signal.Side,
+            signal.Pattern,
             signal.SignalCandleOpenTime,
             exitTime,
             entryPrice,
@@ -1455,6 +1474,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             BestSymbols = BuildSymbolPerformance(outOfSampleTrades).OrderByDescending(item => item.NetPnl).Take(10).ToArray(),
             WorstSymbols = BuildSymbolPerformance(outOfSampleTrades).OrderBy(item => item.NetPnl).Take(10).ToArray(),
             LongShort = BuildSidePerformance(outOfSampleTrades),
+            PatternPerformance = BuildBucketPerformance(outOfSampleTrades, trade => trade.Pattern),
             WeekdayPerformance = BuildBucketPerformance(outOfSampleTrades, trade => trade.EntryTime.DayOfWeek.ToString()),
             HourPerformance = BuildBucketPerformance(outOfSampleTrades, trade => TimeZoneInfo.ConvertTime(trade.EntryTime, ResolveNewYorkTimeZone()).Hour.ToString("00")),
             RecentTrades = publicTrades.OrderByDescending(trade => trade.EntryTime).Take(100).ToArray()
@@ -1523,6 +1543,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                 Trades = group.Count(),
                 NetPnl = group.Sum(trade => trade.NetPnl),
                 WinRate = group.Any() ? (decimal)group.Count(trade => trade.NetPnl > 0m) / group.Count() * 100m : 0m,
+                ProfitFactor = CalculateProfitFactor(group),
                 AverageR = group.Any() ? group.Average(trade => trade.RMultiple) : 0m
             })
             .OrderBy(item => item.Side)
@@ -1539,6 +1560,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                 Trades = group.Count(),
                 NetPnl = group.Sum(trade => trade.NetPnl),
                 WinRate = group.Any() ? (decimal)group.Count(trade => trade.NetPnl > 0m) / group.Count() * 100m : 0m,
+                ProfitFactor = CalculateProfitFactor(group),
                 AverageR = group.Any() ? group.Average(trade => trade.RMultiple) : 0m
             })
             .OrderBy(item => item.Bucket)
@@ -1556,6 +1578,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
     {
         Symbol = trade.Symbol,
         Side = trade.Side,
+        Pattern = trade.Pattern,
         EntryTime = trade.EntryTime,
         ExitTime = trade.ExitTime,
         EntryPrice = trade.EntryPrice,
@@ -1809,6 +1832,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
     private sealed record BacktestTradeInternal(
         string Symbol,
         string Side,
+        string Pattern,
         DateTimeOffset EntryTime,
         DateTimeOffset ExitTime,
         decimal EntryPrice,

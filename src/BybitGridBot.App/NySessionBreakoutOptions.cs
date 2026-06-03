@@ -124,6 +124,10 @@ public sealed class NySessionBreakoutOptions
     [Range(typeof(decimal), "0.00000001", "100")]
     public decimal MaxStopPercent { get; init; } = 0.8m;
 
+    [ConfigurationKeyName("NY_SESSION_MIN_STOP_PERCENT")]
+    [Range(typeof(decimal), "0", "100")]
+    public decimal MinStopPercent { get; init; } = 0.10m;
+
     [ConfigurationKeyName("NY_SESSION_MIN_MIDLINE_ROOM_R")]
     [Range(typeof(decimal), "0", "100")]
     public decimal MinMidlineRoomR { get; init; } = 1.0m;

@@ -712,14 +712,10 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
             };
         }
 
-        if (signal.StopDistancePercent > _options.MaxStopPercent)
+        var stopDistanceGuard = EvaluateStopDistanceGuard(signal, "Failed Sweep Filter");
+        if (stopDistanceGuard is not null)
         {
-            return new NySessionEntryFilterResult
-            {
-                IsAllowed = false,
-                Mode = "Failed Sweep Filter",
-                Reason = $"Stop distance {signal.StopDistancePercent:F4}% is above {_options.MaxStopPercent:F4}%."
-            };
+            return stopDistanceGuard;
         }
 
         if (signal.MidlineRoomR < _options.MinMidlineRoomR)
@@ -802,14 +798,10 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
             };
         }
 
-        if (signal.StopDistancePercent > _options.MaxStopPercent)
+        var stopDistanceGuard = EvaluateStopDistanceGuard(signal, "Engulfing");
+        if (stopDistanceGuard is not null)
         {
-            return new NySessionEntryFilterResult
-            {
-                IsAllowed = false,
-                Mode = "Engulfing",
-                Reason = $"Stop distance {signal.StopDistancePercent:F4}% is above {_options.MaxStopPercent:F4}%."
-            };
+            return stopDistanceGuard;
         }
 
         var btcTrend = await AnalyzeBtcTrendAsync(signal.Side, cancellationToken);
@@ -865,14 +857,10 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
             };
         }
 
-        if (signal.StopDistancePercent > _options.MaxStopPercent)
+        var stopDistanceGuard = EvaluateStopDistanceGuard(signal, "Pinbar");
+        if (stopDistanceGuard is not null)
         {
-            return new NySessionEntryFilterResult
-            {
-                IsAllowed = false,
-                Mode = "Pinbar",
-                Reason = $"Stop distance {signal.StopDistancePercent:F4}% is above {_options.MaxStopPercent:F4}%."
-            };
+            return stopDistanceGuard;
         }
 
         var btcTrend = await AnalyzeBtcTrendAsync(signal.Side, cancellationToken);
@@ -918,14 +906,10 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
             };
         }
 
-        if (signal.StopDistancePercent > _options.MaxStopPercent)
+        var stopDistanceGuard = EvaluateStopDistanceGuard(signal, "3-Bar Continuation");
+        if (stopDistanceGuard is not null)
         {
-            return new NySessionEntryFilterResult
-            {
-                IsAllowed = false,
-                Mode = "3-Bar Continuation",
-                Reason = $"Stop distance {signal.StopDistancePercent:F4}% is above {_options.MaxStopPercent:F4}%."
-            };
+            return stopDistanceGuard;
         }
 
         var btcTrend = await AnalyzeBtcTrendAsync(signal.Side, cancellationToken);
@@ -971,14 +955,10 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
             };
         }
 
-        if (signal.StopDistancePercent > _options.MaxStopPercent)
+        var stopDistanceGuard = EvaluateStopDistanceGuard(signal, "3-Bar Reversal");
+        if (stopDistanceGuard is not null)
         {
-            return new NySessionEntryFilterResult
-            {
-                IsAllowed = false,
-                Mode = "3-Bar Reversal",
-                Reason = $"Stop distance {signal.StopDistancePercent:F4}% is above {_options.MaxStopPercent:F4}%."
-            };
+            return stopDistanceGuard;
         }
 
         var btcTrend = await AnalyzeBtcTrendAsync(signal.Side, cancellationToken);
@@ -1024,14 +1004,10 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
             };
         }
 
-        if (signal.StopDistancePercent > _options.MaxStopPercent)
+        var stopDistanceGuard = EvaluateStopDistanceGuard(signal, "Breakout Candle");
+        if (stopDistanceGuard is not null)
         {
-            return new NySessionEntryFilterResult
-            {
-                IsAllowed = false,
-                Mode = "Breakout Candle",
-                Reason = $"Stop distance {signal.StopDistancePercent:F4}% is above {_options.MaxStopPercent:F4}%."
-            };
+            return stopDistanceGuard;
         }
 
         var btcTrend = await AnalyzeBtcTrendAsync(signal.Side, cancellationToken);
@@ -1077,14 +1053,10 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
             };
         }
 
-        if (signal.StopDistancePercent > _options.MaxStopPercent)
+        var stopDistanceGuard = EvaluateStopDistanceGuard(signal, "Shrinking Candles");
+        if (stopDistanceGuard is not null)
         {
-            return new NySessionEntryFilterResult
-            {
-                IsAllowed = false,
-                Mode = "Shrinking Candles",
-                Reason = $"Stop distance {signal.StopDistancePercent:F4}% is above {_options.MaxStopPercent:F4}%."
-            };
+            return stopDistanceGuard;
         }
 
         var btcTrend = await AnalyzeBtcTrendAsync(signal.Side, cancellationToken);
@@ -1104,6 +1076,31 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
             Mode = "Shrinking Candles",
             Reason = "Shrinking candles pattern passed filters."
         };
+    }
+
+    private NySessionEntryFilterResult? EvaluateStopDistanceGuard(NySessionSignal signal, string mode)
+    {
+        if (signal.StopDistancePercent < _options.MinStopPercent)
+        {
+            return new NySessionEntryFilterResult
+            {
+                IsAllowed = false,
+                Mode = mode,
+                Reason = $"Stop distance {signal.StopDistancePercent:F4}% is below {_options.MinStopPercent:F4}%."
+            };
+        }
+
+        if (signal.StopDistancePercent > _options.MaxStopPercent)
+        {
+            return new NySessionEntryFilterResult
+            {
+                IsAllowed = false,
+                Mode = mode,
+                Reason = $"Stop distance {signal.StopDistancePercent:F4}% is above {_options.MaxStopPercent:F4}%."
+            };
+        }
+
+        return null;
     }
 
     private TrueBreakoutAssessment AnalyzeTrueBreakout(

@@ -141,6 +141,10 @@ public static class FuturesBacktestPage
         <table><thead><tr><th>Side</th><th>Trades</th><th>PnL</th><th>Avg R</th></tr></thead><tbody id="sides"><tr><td colspan="4" class="empty">Нет данных</td></tr></tbody></table>
       </div>
       <div class="panel">
+        <h2>Pattern performance</h2>
+        <table><thead><tr><th>Pattern</th><th>Trades</th><th>PnL</th><th>WR</th></tr></thead><tbody id="patterns"><tr><td colspan="4" class="empty">Нет данных</td></tr></tbody></table>
+      </div>
+      <div class="panel">
         <h2>Weekday performance</h2>
         <table><thead><tr><th>Day</th><th>Trades</th><th>PnL</th><th>WR</th></tr></thead><tbody id="weekdays"><tr><td colspan="4" class="empty">Нет данных</td></tr></tbody></table>
       </div>
@@ -150,7 +154,7 @@ public static class FuturesBacktestPage
       </div>
       <div class="panel">
         <h2>Recent trades</h2>
-        <table><thead><tr><th>Symbol</th><th>Side</th><th>Exit</th><th>PnL</th><th>R</th></tr></thead><tbody id="trades"><tr><td colspan="5" class="empty">Нет данных</td></tr></tbody></table>
+        <table><thead><tr><th>Symbol</th><th>Side</th><th>Pattern</th><th>Exit</th><th>PnL</th><th>R</th></tr></thead><tbody id="trades"><tr><td colspan="6" class="empty">Нет данных</td></tr></tbody></table>
       </div>
     </section>
   </main>
@@ -217,6 +221,7 @@ public static class FuturesBacktestPage
       byId('best').innerHTML = perfRows(result.bestSymbols || [], 'symbol');
       byId('worst').innerHTML = perfRows(result.worstSymbols || [], 'symbol');
       byId('sides').innerHTML = sideRows(result.longShort || []);
+      byId('patterns').innerHTML = perfRows(result.patternPerformance || [], 'bucket');
       byId('weekdays').innerHTML = perfRows(result.weekdayPerformance || [], 'bucket');
       byId('hours').innerHTML = perfRows(result.hourPerformance || [], 'bucket');
       byId('trades').innerHTML = tradeRows(result.recentTrades || []);
@@ -310,6 +315,7 @@ public static class FuturesBacktestPage
         tableBlock('BEST_SYMBOLS', result.bestSymbols || []),
         tableBlock('WORST_SYMBOLS', result.worstSymbols || []),
         tableBlock('LONG_SHORT', result.longShort || []),
+        tableBlock('PATTERN', result.patternPerformance || []),
         tableBlock('WEEKDAY', result.weekdayPerformance || []),
         tableBlock('HOUR_NY', result.hourPerformance || []),
         tableBlock('RECENT_TRADES', result.recentTrades || [])
@@ -350,10 +356,11 @@ public static class FuturesBacktestPage
         <tr>
           <td>${item.symbol}</td>
           <td>${item.side}</td>
+          <td>${item.pattern || '-'}</td>
           <td>${item.exitReason}</td>
           <td class="${cls(item.netPnl)}">${pnl(item.netPnl)}</td>
           <td>${fmt.format(item.rMultiple || 0)}</td>
-        </tr>`).join('') : '<tr><td colspan="5" class="empty">Нет данных</td></tr>';
+        </tr>`).join('') : '<tr><td colspan="6" class="empty">Нет данных</td></tr>';
     }
 
     byId('start').addEventListener('click', () => start().catch(error => { byId('status').textContent = error.message; }));

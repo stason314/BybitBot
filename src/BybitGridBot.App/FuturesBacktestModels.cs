@@ -70,6 +70,8 @@ public sealed class FuturesBacktestResult
 
     public IReadOnlyList<FuturesBacktestSidePerformance> LongShort { get; init; } = [];
 
+    public IReadOnlyList<FuturesBacktestBucketPerformance> PatternPerformance { get; init; } = [];
+
     public IReadOnlyList<FuturesBacktestBucketPerformance> WeekdayPerformance { get; init; } = [];
 
     public IReadOnlyList<FuturesBacktestBucketPerformance> HourPerformance { get; init; } = [];
@@ -119,6 +121,8 @@ public sealed class FuturesBacktestSidePerformance
 
     public decimal WinRate { get; init; }
 
+    public decimal ProfitFactor { get; init; }
+
     public decimal AverageR { get; init; }
 }
 
@@ -132,6 +136,8 @@ public sealed class FuturesBacktestBucketPerformance
 
     public decimal WinRate { get; init; }
 
+    public decimal ProfitFactor { get; init; }
+
     public decimal AverageR { get; init; }
 }
 
@@ -140,6 +146,8 @@ public sealed class FuturesBacktestTrade
     public string Symbol { get; init; } = string.Empty;
 
     public string Side { get; init; } = string.Empty;
+
+    public string Pattern { get; init; } = string.Empty;
 
     public DateTimeOffset EntryTime { get; init; }
 
