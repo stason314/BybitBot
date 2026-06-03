@@ -25,6 +25,7 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
     private const int MaxConcurrency = 6;
 
     private readonly AppOptions _appOptions;
+    private readonly IFuturesBacktestService _backtestService;
     private readonly IBybitRestClient _bybitRestClient;
     private readonly FuturesExecutionService _executionService;
     private readonly FuturesOptions _futuresOptions;
@@ -48,6 +49,7 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
         IOptions<AppOptions> appOptions,
         IOptions<FuturesOptions> futuresOptions,
         IOptions<NySessionBreakoutOptions> options,
+        IFuturesBacktestService backtestService,
         IBybitRestClient bybitRestClient,
         FuturesExecutionService executionService,
         IGridRepository repository,
@@ -55,6 +57,7 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
         ILogger<NySessionBreakoutWorker> logger)
     {
         _appOptions = appOptions.Value;
+        _backtestService = backtestService;
         _futuresOptions = futuresOptions.Value;
         _options = options.Value;
         _bybitRestClient = bybitRestClient;
@@ -308,6 +311,10 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
         var orderedCandidates = evaluated
             .Where(item => IsPoolEligible(item) || openSymbols.Contains(item.Symbol))
             .Where(item => !manuallyRemovedSymbols.Contains(item.Symbol) || manualSymbols.Contains(item.Symbol))
+            .Where(item =>
+                openSymbols.Contains(item.Symbol) ||
+                manualSymbols.Contains(item.Symbol) ||
+                _backtestService.IsSymbolAllowedForTrading(item.Symbol, _options.RequireBacktestSymbolFilter))
             .OrderByDescending(item => openSymbols.Contains(item.Symbol))
             .ThenByDescending(item => ScorePoolItem(item))
             .ThenByDescending(item => item.Turnover24h)
@@ -504,6 +511,13 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
                 continue;
             }
 
+            if (!_backtestService.IsSymbolAllowedForTrading(item.Symbol, _options.RequireBacktestSymbolFilter))
+            {
+                MarkSignalHandled(item.Symbol, signal.SignalCandleOpenTime);
+                AddEvent(item.Symbol, "warning", "Symbol skipped by walk-forward backtest filter.");
+                continue;
+            }
+
             var filter = await EvaluateEntryFiltersAsync(item.Symbol, signal, candles, cancellationToken);
             if (!filter.IsAllowed)
             {
@@ -648,6 +662,16 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
         IReadOnlyList<Candle> fiveMinuteCandles,
         CancellationToken cancellationToken)
     {
+        if (signal.SweepDepthPercent < _options.MinSweepDepthPercent)
+        {
+            return new NySessionEntryFilterResult
+            {
+                IsAllowed = false,
+                Mode = "Failed Sweep Filter",
+                Reason = $"Sweep depth {signal.SweepDepthPercent:F4}% is below {_options.MinSweepDepthPercent:F4}%."
+            };
+        }
+
         if (signal.ReclaimPercent < _options.MinReclaimPercent)
         {
             return new NySessionEntryFilterResult
@@ -655,6 +679,26 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
                 IsAllowed = false,
                 Mode = "Failed Sweep Filter",
                 Reason = $"Weak reclaim {signal.ReclaimPercent:F4}% is below {_options.MinReclaimPercent:F4}%."
+            };
+        }
+
+        if (signal.StopDistancePercent > _options.MaxStopPercent)
+        {
+            return new NySessionEntryFilterResult
+            {
+                IsAllowed = false,
+                Mode = "Failed Sweep Filter",
+                Reason = $"Stop distance {signal.StopDistancePercent:F4}% is above {_options.MaxStopPercent:F4}%."
+            };
+        }
+
+        if (signal.MidlineRoomR < _options.MinMidlineRoomR)
+        {
+            return new NySessionEntryFilterResult
+            {
+                IsAllowed = false,
+                Mode = "Failed Sweep Filter",
+                Reason = $"Room to 4H midline is {signal.MidlineRoomR:F2}R, below {_options.MinMidlineRoomR:F2}R."
             };
         }
 
@@ -709,14 +753,14 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
         IReadOnlyList<Candle> fiveMinuteCandles,
         IReadOnlyList<Candle> fifteenMinuteCandles)
     {
+        var signalClosedAt = signal.SignalCandleOpenTime.AddMinutes(5);
         var closed5m = fiveMinuteCandles
-            .Where(candle => candle.OpenTime.AddMinutes(5) <= DateTimeOffset.UtcNow)
-            .Where(candle => candle.OpenTime >= signal.SignalCandleOpenTime)
+            .Where(candle => candle.OpenTime.AddMinutes(5) <= signalClosedAt)
+            .Where(candle => candle.OpenTime >= signal.BreakoutCandleOpenTime && candle.OpenTime < signal.SignalCandleOpenTime)
             .OrderBy(candle => candle.OpenTime)
-            .TakeLast(4)
             .ToArray();
         var closed15m = fifteenMinuteCandles
-            .Where(candle => candle.OpenTime.AddMinutes(15) <= DateTimeOffset.UtcNow)
+            .Where(candle => candle.OpenTime.AddMinutes(15) <= signalClosedAt)
             .OrderBy(candle => candle.OpenTime)
             .ToArray();
         var last15m = closed15m.LastOrDefault();
@@ -725,13 +769,13 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
         var adxRising = adx >= _options.TrueBreakoutAdx && adx > previousAdx;
         var highVolume = signal.BreakoutVolumeRatio >= _options.HighBreakoutVolumeRatio;
         var fiveMinuteHeld = signal.Side == "Short"
-            ? closed5m.Count(candle => candle.Close > signal.Boundary) >= 2
-            : closed5m.Count(candle => candle.Close < signal.Boundary) >= 2;
+            ? closed5m.Count(candle => candle.Close > signal.Boundary) >= 1
+            : closed5m.Count(candle => candle.Close < signal.Boundary) >= 1;
         var fifteenMinuteOutside = last15m is not null && (signal.Side == "Short"
             ? last15m.Close > signal.Boundary
             : last15m.Close < signal.Boundary);
 
-        if (highVolume && adxRising && (fiveMinuteHeld || fifteenMinuteOutside))
+        if ((highVolume || adxRising) && (fiveMinuteHeld || fifteenMinuteOutside))
         {
             var direction = signal.Side == "Short" ? "upper" : "lower";
             return new TrueBreakoutAssessment(
@@ -813,19 +857,17 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
                 var risk = candle.High - candle.Close;
                 if (risk > 0m)
                 {
-                    latestSignal = new NySessionSignal
-                    {
-                        Side = "Short",
-                        SignalCandleOpenTime = candle.OpenTime,
-                        Boundary = upperBoundary,
-                        EntryPrice = candle.Close,
-                        SweepExtreme = candle.High,
-                        StopLoss = candle.High,
-                        TakeProfit = candle.Close - risk * _options.RewardRisk,
-                        ReclaimPercent = CalculateReclaimPercent("Short", upperBoundary, candle.Close),
-                        BreakoutVolumeRatio = CalculateBreakoutVolumeRatio(closed, candle.OpenTime),
-                        Reason = "Swept above the active 08:00 NY 4h high and closed back below."
-                    };
+                    latestSignal = BuildSignal(
+                        "Short",
+                        candle.OpenTime,
+                        candle.OpenTime,
+                        upperBoundary,
+                        upperBoundary,
+                        lowerBoundary,
+                        candle.Close,
+                        candle.High,
+                        "Swept above the active 08:00 NY 4h high and closed back below.",
+                        closed);
                     upperStop = null;
                     upperSweepAt = null;
                     upperReturnLevel = null;
@@ -848,19 +890,17 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
                 var risk = upperStop.Value - candle.Close;
                 if (risk > 0m)
                 {
-                    latestSignal = new NySessionSignal
-                    {
-                        Side = "Short",
-                        SignalCandleOpenTime = candle.OpenTime,
-                        Boundary = upperReturnLevel.Value,
-                        EntryPrice = candle.Close,
-                        SweepExtreme = upperStop.Value,
-                        StopLoss = upperStop.Value,
-                        TakeProfit = candle.Close - risk * _options.RewardRisk,
-                        ReclaimPercent = CalculateReclaimPercent("Short", upperReturnLevel.Value, candle.Close),
-                        BreakoutVolumeRatio = CalculateBreakoutVolumeRatio(closed, upperSweepAt.Value),
-                        Reason = "Swept above the active 08:00 NY 4h high and reclaimed back below."
-                    };
+                    latestSignal = BuildSignal(
+                        "Short",
+                        candle.OpenTime,
+                        upperSweepAt.Value,
+                        upperReturnLevel.Value,
+                        upperBoundary,
+                        lowerBoundary,
+                        candle.Close,
+                        upperStop.Value,
+                        "Swept above the active 08:00 NY 4h high and reclaimed back below.",
+                        closed);
                     upperStop = null;
                     upperSweepAt = null;
                     upperReturnLevel = null;
@@ -883,19 +923,17 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
                 var risk = candle.Close - lowerStop.Value;
                 if (risk > 0m)
                 {
-                    latestSignal = new NySessionSignal
-                    {
-                        Side = "Long",
-                        SignalCandleOpenTime = candle.OpenTime,
-                        Boundary = lowerReturnLevel.Value,
-                        EntryPrice = candle.Close,
-                        SweepExtreme = lowerStop.Value,
-                        StopLoss = lowerStop.Value,
-                        TakeProfit = candle.Close + risk * _options.RewardRisk,
-                        ReclaimPercent = CalculateReclaimPercent("Long", lowerReturnLevel.Value, candle.Close),
-                        BreakoutVolumeRatio = CalculateBreakoutVolumeRatio(closed, lowerSweepAt.Value),
-                        Reason = "Swept below the active 08:00 NY 4h low and reclaimed back above."
-                    };
+                    latestSignal = BuildSignal(
+                        "Long",
+                        candle.OpenTime,
+                        lowerSweepAt.Value,
+                        lowerReturnLevel.Value,
+                        upperBoundary,
+                        lowerBoundary,
+                        candle.Close,
+                        lowerStop.Value,
+                        "Swept below the active 08:00 NY 4h low and reclaimed back above.",
+                        closed);
                     lowerStop = null;
                     lowerSweepAt = null;
                     lowerReturnLevel = null;
@@ -912,6 +950,43 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
         return latestSignal;
     }
 
+    private NySessionSignal BuildSignal(
+        string side,
+        DateTimeOffset signalCandleOpenTime,
+        DateTimeOffset breakoutCandleOpenTime,
+        decimal boundary,
+        decimal rangeHigh,
+        decimal rangeLow,
+        decimal entryPrice,
+        decimal sweepExtreme,
+        string reason,
+        IReadOnlyList<Candle> candles)
+    {
+        var risk = Math.Abs(sweepExtreme - entryPrice);
+        var takeProfit = side == "Short"
+            ? entryPrice - risk * _options.RewardRisk
+            : entryPrice + risk * _options.RewardRisk;
+        return new NySessionSignal
+        {
+            Side = side,
+            SignalCandleOpenTime = signalCandleOpenTime,
+            BreakoutCandleOpenTime = breakoutCandleOpenTime,
+            Boundary = boundary,
+            RangeHigh = rangeHigh,
+            RangeLow = rangeLow,
+            EntryPrice = entryPrice,
+            SweepExtreme = sweepExtreme,
+            StopLoss = sweepExtreme,
+            TakeProfit = takeProfit,
+            ReclaimPercent = CalculateReclaimPercent(side, boundary, entryPrice),
+            SweepDepthPercent = CalculateSweepDepthPercent(side, boundary, sweepExtreme),
+            StopDistancePercent = entryPrice > 0m ? risk / entryPrice * 100m : 0m,
+            MidlineRoomR = CalculateMidlineRoomR(side, rangeHigh, rangeLow, entryPrice, risk),
+            BreakoutVolumeRatio = CalculateBreakoutVolumeRatio(candles, breakoutCandleOpenTime),
+            Reason = reason
+        };
+    }
+
     private static decimal CalculateReclaimPercent(string side, decimal boundary, decimal close)
     {
         if (boundary <= 0m)
@@ -923,6 +998,33 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
             ? boundary - close
             : close - boundary;
         return decimal.Max(0m, distance / boundary * 100m);
+    }
+
+    private static decimal CalculateSweepDepthPercent(string side, decimal boundary, decimal sweepExtreme)
+    {
+        if (boundary <= 0m)
+        {
+            return 0m;
+        }
+
+        var distance = side == "Short"
+            ? sweepExtreme - boundary
+            : boundary - sweepExtreme;
+        return decimal.Max(0m, distance / boundary * 100m);
+    }
+
+    private static decimal CalculateMidlineRoomR(string side, decimal rangeHigh, decimal rangeLow, decimal entryPrice, decimal risk)
+    {
+        if (risk <= 0m || rangeHigh <= rangeLow)
+        {
+            return 0m;
+        }
+
+        var midline = (rangeHigh + rangeLow) / 2m;
+        var room = side == "Short"
+            ? entryPrice - midline
+            : midline - entryPrice;
+        return decimal.Max(0m, room / risk);
     }
 
     private static decimal CalculateBreakoutVolumeRatio(IReadOnlyList<Candle> candles, DateTimeOffset breakoutOpenTime)

@@ -11,6 +11,8 @@ public interface IFuturesBacktestService
     Task<FuturesBacktestStatusResponse> StartAsync(FuturesBacktestRequest request, CancellationToken cancellationToken);
 
     FuturesBacktestStatusResponse Stop();
+
+    bool IsSymbolAllowedForTrading(string symbol, bool requireCompletedBacktest);
 }
 
 public sealed class FuturesBacktestService : IFuturesBacktestService
@@ -94,6 +96,20 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                 Result = _status.Result
             };
             return _status;
+        }
+    }
+
+    public bool IsSymbolAllowedForTrading(string symbol, bool requireCompletedBacktest)
+    {
+        lock (_sync)
+        {
+            var eligible = _status.Result?.EligibleSymbols;
+            if (eligible is null || eligible.Count == 0)
+            {
+                return !requireCompletedBacktest;
+            }
+
+            return eligible.Contains(symbol, StringComparer.OrdinalIgnoreCase);
         }
     }
 
@@ -357,19 +373,17 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             var risk = candle.High - candle.Close;
             if (risk > 0m)
             {
-                return new NySessionSignal
-                {
-                    Side = "Short",
-                    SignalCandleOpenTime = candle.OpenTime,
-                    Boundary = upperBoundary,
-                    EntryPrice = candle.Close,
-                    SweepExtreme = candle.High,
-                    StopLoss = candle.High,
-                    TakeProfit = candle.Close - risk * _strategyOptions.RewardRisk,
-                    ReclaimPercent = CalculateReclaimPercent("Short", upperBoundary, candle.Close),
-                    BreakoutVolumeRatio = CalculateBreakoutVolumeRatio(session.Take(index + 1).ToArray(), candle.OpenTime),
-                    Reason = "Upper sweep reclaimed."
-                };
+                return BuildSignal(
+                    "Short",
+                    candle.OpenTime,
+                    candle.OpenTime,
+                    upperBoundary,
+                    upperBoundary,
+                    lowerBoundary,
+                    candle.Close,
+                    candle.High,
+                    "Upper sweep reclaimed.",
+                    session.Take(index + 1).ToArray());
             }
         }
 
@@ -382,19 +396,17 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             var risk = upperStop.Value - candle.Close;
             if (risk > 0m)
             {
-                return new NySessionSignal
-                {
-                    Side = "Short",
-                    SignalCandleOpenTime = candle.OpenTime,
-                    Boundary = upperReturnLevel.Value,
-                    EntryPrice = candle.Close,
-                    SweepExtreme = upperStop.Value,
-                    StopLoss = upperStop.Value,
-                    TakeProfit = candle.Close - risk * _strategyOptions.RewardRisk,
-                    ReclaimPercent = CalculateReclaimPercent("Short", upperReturnLevel.Value, candle.Close),
-                    BreakoutVolumeRatio = CalculateBreakoutVolumeRatio(session.Take(index + 1).ToArray(), upperSweepAt.Value),
-                    Reason = "Upper breakout failed."
-                };
+                return BuildSignal(
+                    "Short",
+                    candle.OpenTime,
+                    upperSweepAt.Value,
+                    upperReturnLevel.Value,
+                    upperBoundary,
+                    lowerBoundary,
+                    candle.Close,
+                    upperStop.Value,
+                    "Upper breakout failed.",
+                    session.Take(index + 1).ToArray());
             }
         }
 
@@ -407,23 +419,58 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             var risk = candle.Close - lowerStop.Value;
             if (risk > 0m)
             {
-                return new NySessionSignal
-                {
-                    Side = "Long",
-                    SignalCandleOpenTime = candle.OpenTime,
-                    Boundary = lowerReturnLevel.Value,
-                    EntryPrice = candle.Close,
-                    SweepExtreme = lowerStop.Value,
-                    StopLoss = lowerStop.Value,
-                    TakeProfit = candle.Close + risk * _strategyOptions.RewardRisk,
-                    ReclaimPercent = CalculateReclaimPercent("Long", lowerReturnLevel.Value, candle.Close),
-                    BreakoutVolumeRatio = CalculateBreakoutVolumeRatio(session.Take(index + 1).ToArray(), lowerSweepAt.Value),
-                    Reason = "Lower breakout failed."
-                };
+                return BuildSignal(
+                    "Long",
+                    candle.OpenTime,
+                    lowerSweepAt.Value,
+                    lowerReturnLevel.Value,
+                    upperBoundary,
+                    lowerBoundary,
+                    candle.Close,
+                    lowerStop.Value,
+                    "Lower breakout failed.",
+                    session.Take(index + 1).ToArray());
             }
         }
 
         return null;
+    }
+
+    private NySessionSignal BuildSignal(
+        string side,
+        DateTimeOffset signalCandleOpenTime,
+        DateTimeOffset breakoutCandleOpenTime,
+        decimal boundary,
+        decimal rangeHigh,
+        decimal rangeLow,
+        decimal entryPrice,
+        decimal sweepExtreme,
+        string reason,
+        IReadOnlyList<Candle> candles)
+    {
+        var risk = Math.Abs(sweepExtreme - entryPrice);
+        var takeProfit = side == "Short"
+            ? entryPrice - risk * _strategyOptions.RewardRisk
+            : entryPrice + risk * _strategyOptions.RewardRisk;
+        return new NySessionSignal
+        {
+            Side = side,
+            SignalCandleOpenTime = signalCandleOpenTime,
+            BreakoutCandleOpenTime = breakoutCandleOpenTime,
+            Boundary = boundary,
+            RangeHigh = rangeHigh,
+            RangeLow = rangeLow,
+            EntryPrice = entryPrice,
+            SweepExtreme = sweepExtreme,
+            StopLoss = sweepExtreme,
+            TakeProfit = takeProfit,
+            ReclaimPercent = CalculateReclaimPercent(side, boundary, entryPrice),
+            SweepDepthPercent = CalculateSweepDepthPercent(side, boundary, sweepExtreme),
+            StopDistancePercent = entryPrice > 0m ? risk / entryPrice * 100m : 0m,
+            MidlineRoomR = CalculateMidlineRoomR(side, rangeHigh, rangeLow, entryPrice, risk),
+            BreakoutVolumeRatio = CalculateBreakoutVolumeRatio(candles, breakoutCandleOpenTime),
+            Reason = reason
+        };
     }
 
     private BacktestFilterResult EvaluateBacktestFilters(
@@ -432,12 +479,22 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         IReadOnlyList<Candle> fifteenMinuteCandles,
         IReadOnlyList<Candle> btc15m)
     {
+        if (signal.SweepDepthPercent < _strategyOptions.MinSweepDepthPercent)
+        {
+            return new BacktestFilterResult(false, false);
+        }
+
         if (signal.ReclaimPercent < _strategyOptions.MinReclaimPercent)
         {
             return new BacktestFilterResult(false, false);
         }
 
-        if (signal.BreakoutVolumeRatio >= _strategyOptions.HighBreakoutVolumeRatio)
+        if (signal.StopDistancePercent > _strategyOptions.MaxStopPercent)
+        {
+            return new BacktestFilterResult(false, false);
+        }
+
+        if (signal.MidlineRoomR < _strategyOptions.MinMidlineRoomR)
         {
             return new BacktestFilterResult(false, false);
         }
@@ -450,6 +507,11 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         if (trueBreakout)
         {
             return new BacktestFilterResult(false, true);
+        }
+
+        if (signal.BreakoutVolumeRatio >= _strategyOptions.HighBreakoutVolumeRatio)
+        {
+            return new BacktestFilterResult(false, false);
         }
 
         var btc15mSoFar = btc15m
@@ -469,21 +531,29 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         IReadOnlyList<Candle> fiveMinuteCandlesSoFar,
         IReadOnlyList<Candle> fifteenMinuteCandlesSoFar)
     {
-        var closed5m = fiveMinuteCandlesSoFar.TakeLast(4).ToArray();
-        var closed15m = fifteenMinuteCandlesSoFar.TakeLast(45).ToArray();
+        var signalClosedAt = signal.SignalCandleOpenTime.AddMinutes(5);
+        var closed5m = fiveMinuteCandlesSoFar
+            .Where(candle => candle.OpenTime.AddMinutes(5) <= signalClosedAt)
+            .Where(candle => candle.OpenTime >= signal.BreakoutCandleOpenTime && candle.OpenTime < signal.SignalCandleOpenTime)
+            .OrderBy(candle => candle.OpenTime)
+            .ToArray();
+        var closed15m = fifteenMinuteCandlesSoFar
+            .Where(candle => candle.OpenTime.AddMinutes(15) <= signalClosedAt)
+            .OrderBy(candle => candle.OpenTime)
+            .ToArray();
         var last15m = closed15m.LastOrDefault();
         var adx = CalculateAdx(closed15m.TakeLast(40).ToArray(), 14);
         var previousAdx = CalculateAdx(closed15m.TakeLast(45).SkipLast(5).ToArray(), 14);
         var adxRising = adx >= _strategyOptions.TrueBreakoutAdx && adx > previousAdx;
         var highVolume = signal.BreakoutVolumeRatio >= _strategyOptions.HighBreakoutVolumeRatio;
         var fiveMinuteHeld = signal.Side == "Short"
-            ? closed5m.Count(candle => candle.Close > signal.Boundary) >= 2
-            : closed5m.Count(candle => candle.Close < signal.Boundary) >= 2;
+            ? closed5m.Count(candle => candle.Close > signal.Boundary) >= 1
+            : closed5m.Count(candle => candle.Close < signal.Boundary) >= 1;
         var fifteenMinuteOutside = last15m is not null && (signal.Side == "Short"
             ? last15m.Close > signal.Boundary
             : last15m.Close < signal.Boundary);
 
-        return highVolume && adxRising && (fiveMinuteHeld || fifteenMinuteOutside);
+        return (highVolume || adxRising) && (fiveMinuteHeld || fifteenMinuteOutside);
     }
 
     private bool IsBtcTrendAgainstSignal(string signalSide, IReadOnlyList<Candle> btc15mSoFar)
@@ -607,7 +677,38 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         int trueBreakoutBlockedCount,
         BacktestRunSettings settings)
     {
-        var publicTrades = trades.Select(ToPublicTrade).ToArray();
+        var splitAt = periodEnd.AddDays(-30);
+        if (splitAt <= periodStart)
+        {
+            splitAt = periodStart.AddTicks((periodEnd - periodStart).Ticks * 2 / 3);
+        }
+
+        var optimizationTrades = trades
+            .Where(trade => trade.EntryTime < splitAt)
+            .OrderBy(trade => trade.EntryTime)
+            .ToArray();
+        var optimizationSymbols = BuildSymbolPerformance(optimizationTrades);
+        var eligibleSymbols = optimizationSymbols
+            .Where(item => item.Trades >= 3)
+            .Where(item => item.ProfitFactor > 1m && item.AverageR > 0m && item.NetPnl > 0m)
+            .Select(item => item.Symbol)
+            .OrderBy(symbol => symbol)
+            .ToArray();
+        var eligibleSet = eligibleSymbols.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var outOfSampleTrades = trades
+            .Where(trade => trade.EntryTime >= splitAt)
+            .Where(trade => eligibleSet.Contains(trade.Symbol))
+            .OrderBy(trade => trade.EntryTime)
+            .ToArray();
+        var tradedSymbols = trades
+            .Select(trade => trade.Symbol)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        var excludedSymbols = tradedSymbols
+            .Where(symbol => !eligibleSet.Contains(symbol))
+            .OrderBy(symbol => symbol)
+            .ToArray();
+        var publicTrades = outOfSampleTrades.Select(ToPublicTrade).ToArray();
         return new FuturesBacktestResult
         {
             StrategyName = "NY 08:00 4H Sweep Reversal",
@@ -615,15 +716,19 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             PeriodEnd = periodEnd,
             SymbolsRequested = symbolsRequested,
             SymbolsProcessed = symbolsProcessed,
-            TradesCount = trades.Count,
+            TradesCount = outOfSampleTrades.Length,
             FalseBreakoutCount = falseBreakoutCount,
             TrueBreakoutBlockedCount = trueBreakoutBlockedCount,
-            Metrics = BuildMetrics(trades, periodStart, periodEnd, settings.InitialEquityUsdt),
-            BestSymbols = BuildSymbolPerformance(trades).OrderByDescending(item => item.NetPnl).Take(10).ToArray(),
-            WorstSymbols = BuildSymbolPerformance(trades).OrderBy(item => item.NetPnl).Take(10).ToArray(),
-            LongShort = BuildSidePerformance(trades),
-            WeekdayPerformance = BuildBucketPerformance(trades, trade => trade.EntryTime.DayOfWeek.ToString()),
-            HourPerformance = BuildBucketPerformance(trades, trade => TimeZoneInfo.ConvertTime(trade.EntryTime, ResolveNewYorkTimeZone()).Hour.ToString("00")),
+            Metrics = BuildMetrics(outOfSampleTrades, splitAt, periodEnd, settings.InitialEquityUsdt),
+            OptimizationMetrics = BuildMetrics(optimizationTrades, periodStart, splitAt, settings.InitialEquityUsdt),
+            OutOfSampleMetrics = BuildMetrics(outOfSampleTrades, splitAt, periodEnd, settings.InitialEquityUsdt),
+            EligibleSymbols = eligibleSymbols,
+            ExcludedSymbols = excludedSymbols,
+            BestSymbols = BuildSymbolPerformance(outOfSampleTrades).OrderByDescending(item => item.NetPnl).Take(10).ToArray(),
+            WorstSymbols = BuildSymbolPerformance(outOfSampleTrades).OrderBy(item => item.NetPnl).Take(10).ToArray(),
+            LongShort = BuildSidePerformance(outOfSampleTrades),
+            WeekdayPerformance = BuildBucketPerformance(outOfSampleTrades, trade => trade.EntryTime.DayOfWeek.ToString()),
+            HourPerformance = BuildBucketPerformance(outOfSampleTrades, trade => TimeZoneInfo.ConvertTime(trade.EntryTime, ResolveNewYorkTimeZone()).Hour.ToString("00")),
             RecentTrades = publicTrades.OrderByDescending(trade => trade.EntryTime).Take(100).ToArray()
         };
     }
@@ -845,6 +950,33 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
 
         var distance = side == "Short" ? boundary - close : close - boundary;
         return decimal.Max(0m, distance / boundary * 100m);
+    }
+
+    private static decimal CalculateSweepDepthPercent(string side, decimal boundary, decimal sweepExtreme)
+    {
+        if (boundary <= 0m)
+        {
+            return 0m;
+        }
+
+        var distance = side == "Short"
+            ? sweepExtreme - boundary
+            : boundary - sweepExtreme;
+        return decimal.Max(0m, distance / boundary * 100m);
+    }
+
+    private static decimal CalculateMidlineRoomR(string side, decimal rangeHigh, decimal rangeLow, decimal entryPrice, decimal risk)
+    {
+        if (risk <= 0m || rangeHigh <= rangeLow)
+        {
+            return 0m;
+        }
+
+        var midline = (rangeHigh + rangeLow) / 2m;
+        var room = side == "Short"
+            ? entryPrice - midline
+            : midline - entryPrice;
+        return decimal.Max(0m, room / risk);
     }
 
     private static decimal CalculateBreakoutVolumeRatio(IReadOnlyList<Candle> candles, DateTimeOffset breakoutOpenTime)

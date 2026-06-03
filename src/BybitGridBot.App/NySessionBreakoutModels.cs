@@ -111,7 +111,13 @@ internal sealed class NySessionSignal
 
     public DateTimeOffset SignalCandleOpenTime { get; init; }
 
+    public DateTimeOffset BreakoutCandleOpenTime { get; init; }
+
     public decimal Boundary { get; init; }
+
+    public decimal RangeHigh { get; init; }
+
+    public decimal RangeLow { get; init; }
 
     public decimal EntryPrice { get; init; }
 
@@ -122,6 +128,12 @@ internal sealed class NySessionSignal
     public decimal TakeProfit { get; init; }
 
     public decimal ReclaimPercent { get; init; }
+
+    public decimal SweepDepthPercent { get; init; }
+
+    public decimal StopDistancePercent { get; init; }
+
+    public decimal MidlineRoomR { get; init; }
 
     public decimal BreakoutVolumeRatio { get; init; }
 

@@ -55,7 +55,7 @@ public static class FuturesBacktestPage
     .metric { padding: 14px; min-width: 0; }
     .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
     .value { margin-top: 7px; font-size: 22px; font-weight: 720; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
-    .metrics { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 12px; margin-bottom: 14px; }
+    .metrics { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 12px; margin-bottom: 14px; }
     .progress-wrap { padding: 14px 16px; border-bottom: 1px solid var(--line); }
     .progress-top { display: flex; justify-content: space-between; gap: 12px; color: var(--muted); margin-bottom: 9px; flex-wrap: wrap; }
     .bar { height: 12px; background: #e8ece8; border-radius: 999px; overflow: hidden; }
@@ -88,7 +88,7 @@ public static class FuturesBacktestPage
     <header>
       <div>
         <h1>Backtest 4H NY Sweep Strategy</h1>
-        <div class="sub">Тестирует текущую стратегию 4h свечи 08:00-12:00 New York с входами в сессии 08:00-16:00 NY.</div>
+        <div class="sub">Тестирует текущую стратегию 4h свечи 08:00-12:00 New York. Метрики считаются по 30 дням out-of-sample после 60 дней отбора символов.</div>
       </div>
       <div class="actions">
         <a class="link secondary" href="/futures">Futures bot</a>
@@ -115,9 +115,18 @@ public static class FuturesBacktestPage
       <div class="metric"><div class="label">Average R</div><div class="value" id="averageR">-</div></div>
       <div class="metric"><div class="label">Trades/day</div><div class="value" id="tradesDay">-</div></div>
       <div class="metric"><div class="label">Breakouts</div><div class="value" id="breakouts">-</div></div>
+      <div class="metric"><div class="label">Eligible</div><div class="value" id="eligibleCount">-</div></div>
     </section>
 
     <section class="grid">
+      <div class="panel">
+        <h2>Walk-forward symbols</h2>
+        <table><thead><tr><th>Allowed after 60d optimization</th><th>Excluded</th></tr></thead><tbody id="wfSymbols"><tr><td colspan="2" class="empty">Нет данных</td></tr></tbody></table>
+      </div>
+      <div class="panel">
+        <h2>Walk-forward metrics</h2>
+        <table><thead><tr><th>Window</th><th>Trades/day</th><th>PnL</th><th>PF</th></tr></thead><tbody id="wfMetrics"><tr><td colspan="4" class="empty">Нет данных</td></tr></tbody></table>
+      </div>
       <div class="panel">
         <h2>Best symbols</h2>
         <table><thead><tr><th>Symbol</th><th>Trades</th><th>PnL</th><th>WR</th></tr></thead><tbody id="best"><tr><td colspan="4" class="empty">Нет данных</td></tr></tbody></table>
@@ -198,6 +207,9 @@ public static class FuturesBacktestPage
       byId('averageR').textContent = fmt.format(m.averageR || 0);
       byId('tradesDay').textContent = fmt.format(m.tradesPerDay || 0);
       byId('breakouts').textContent = `${result.falseBreakoutCount || 0} / ${result.trueBreakoutBlockedCount || 0}`;
+      byId('eligibleCount').textContent = `${(result.eligibleSymbols || []).length} / ${(result.excludedSymbols || []).length}`;
+      byId('wfSymbols').innerHTML = walkForwardSymbolRows(result.eligibleSymbols || [], result.excludedSymbols || []);
+      byId('wfMetrics').innerHTML = walkForwardMetricRows(result.optimizationMetrics || {}, result.outOfSampleMetrics || {});
       byId('best').innerHTML = perfRows(result.bestSymbols || [], 'symbol');
       byId('worst').innerHTML = perfRows(result.worstSymbols || [], 'symbol');
       byId('sides').innerHTML = sideRows(result.longShort || []);
@@ -214,6 +226,24 @@ public static class FuturesBacktestPage
           <td class="${cls(item.netPnl)}">${pnl(item.netPnl)}</td>
           <td>${pct(item.winRate)}</td>
         </tr>`).join('') : '<tr><td colspan="4" class="empty">Нет данных</td></tr>';
+    }
+
+    function walkForwardSymbolRows(eligible, excluded) {
+      if (!eligible.length && !excluded.length) return '<tr><td colspan="2" class="empty">Нет данных</td></tr>';
+      return `<tr><td>${eligible.slice(0, 60).join(', ') || '-'}</td><td>${excluded.slice(0, 60).join(', ') || '-'}</td></tr>`;
+    }
+
+    function walkForwardMetricRows(optimization, outOfSample) {
+      return [
+        ['60d optimization', optimization],
+        ['30d out-of-sample', outOfSample]
+      ].map(([label, item]) => `
+        <tr>
+          <td>${label}</td>
+          <td>${fmt.format(item.tradesPerDay || 0)}/day</td>
+          <td class="${cls(item.netPnl)}">${pnl(item.netPnl)}</td>
+          <td>${fmt.format(item.profitFactor || 0)}</td>
+        </tr>`).join('');
     }
 
     function sideRows(items) {

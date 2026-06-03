@@ -54,6 +54,14 @@ public sealed class FuturesBacktestResult
 
     public FuturesBacktestMetrics Metrics { get; init; } = new();
 
+    public FuturesBacktestMetrics OptimizationMetrics { get; init; } = new();
+
+    public FuturesBacktestMetrics OutOfSampleMetrics { get; init; } = new();
+
+    public IReadOnlyList<string> EligibleSymbols { get; init; } = [];
+
+    public IReadOnlyList<string> ExcludedSymbols { get; init; } = [];
+
     public IReadOnlyList<FuturesBacktestSymbolPerformance> BestSymbols { get; init; } = [];
 
     public IReadOnlyList<FuturesBacktestSymbolPerformance> WorstSymbols { get; init; } = [];
