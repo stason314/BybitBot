@@ -28,6 +28,10 @@ public sealed class FuturesBacktestRequest
 
     public decimal? FundingPercentPer8h { get; init; }
 
+    public decimal? Leverage { get; init; }
+
+    public decimal? MinLiquidationBufferPercent { get; init; }
+
     public decimal? MaxTradeLossEquityPercent { get; init; }
 
     public decimal? MaxProjectedDrawdownEquityPercent { get; init; }
@@ -70,9 +74,15 @@ public sealed class FuturesBacktestResult
 
     public int HardRiskCapBlockedCount { get; init; }
 
+    public int LiquidationCount { get; init; }
+
     public decimal MaxTradeLossEquityPercent { get; init; }
 
     public decimal MaxProjectedDrawdownEquityPercent { get; init; }
+
+    public decimal Leverage { get; init; }
+
+    public decimal MinLiquidationBufferPercent { get; init; }
 
     public int OpenAtBacktestEndCount { get; init; }
 
@@ -147,6 +157,10 @@ public sealed class FuturesBacktestMetrics
 
     public decimal MarkToMarketNetPnl { get; init; }
 
+    public decimal ForcedClosedNetPnl { get; init; }
+
+    public decimal ForcedClosedExitCost { get; init; }
+
     public decimal MaxDrawdown { get; init; }
 
     public decimal MaxDrawdownPercent { get; init; }
@@ -154,6 +168,10 @@ public sealed class FuturesBacktestMetrics
     public decimal MarkToMarketMaxDrawdown { get; init; }
 
     public decimal MarkToMarketMaxDrawdownPercent { get; init; }
+
+    public decimal ForcedClosedMaxDrawdown { get; init; }
+
+    public decimal ForcedClosedMaxDrawdownPercent { get; init; }
 
     public decimal WinRate { get; init; }
 
@@ -209,6 +227,14 @@ public sealed class FuturesBacktestGateDiagnostic
     public decimal OosMarkToMarketNetPnl { get; init; }
 
     public decimal OosMarkToMarketAverageR { get; init; }
+
+    public int OosForcedClosedTrades { get; init; }
+
+    public decimal OosForcedClosedNetPnl { get; init; }
+
+    public decimal OosForcedClosedAverageR { get; init; }
+
+    public decimal OosForcedClosedMaxDrawdownPercent { get; init; }
 }
 
 public sealed class FuturesBacktestGateWalkForwardPerformance

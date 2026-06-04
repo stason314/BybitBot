@@ -146,9 +146,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                 return !requireCompletedBacktest;
             }
 
-            return result.EligibleSymbols.Count == 0
-                ? !requireCompletedBacktest
-                : result.EligibleSymbols.Contains(symbol, StringComparer.OrdinalIgnoreCase);
+            return !requireCompletedBacktest;
         }
     }
 
@@ -1882,6 +1880,12 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         var quantity = settings.EntryNotionalUsdt / entryPrice;
         var stopExecutionPrice = ApplySlippage(signal.StopLoss, isShort, isEntry: false, settings.SlippagePercent);
         var initialRiskUsdt = CalculateFixedStopRisk(entryPrice, stopExecutionPrice, quantity, isShort);
+        var liquidationPrice = EstimateBacktestLiquidationPrice(entryPrice, settings.Leverage, isShort);
+        if (!IsBacktestLiquidationBufferAllowed(entryPrice, liquidationPrice, settings))
+        {
+            return null;
+        }
+
         if (!IsBacktestHardRiskAllowed(initialRiskUsdt, accountEquityUsdt, settings))
         {
             return null;
@@ -1898,6 +1902,15 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             var candle = session[i];
             if (isShort)
             {
+                if (liquidationPrice > 0m && candle.High >= liquidationPrice)
+                {
+                    exitPrice = liquidationPrice;
+                    exitTime = candle.OpenTime;
+                    exitReason = "Liquidation";
+                    exitIndex = i;
+                    break;
+                }
+
                 if (candle.High >= signal.StopLoss)
                 {
                     exitPrice = signal.StopLoss;
@@ -1918,6 +1931,15 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             }
             else
             {
+                if (liquidationPrice > 0m && candle.Low <= liquidationPrice)
+                {
+                    exitPrice = liquidationPrice;
+                    exitTime = candle.OpenTime;
+                    exitReason = "Liquidation";
+                    exitIndex = i;
+                    break;
+                }
+
                 if (candle.Low <= signal.StopLoss)
                 {
                     exitPrice = signal.StopLoss;
@@ -1938,7 +1960,10 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             }
         }
 
-        exitPrice = ApplySlippage(exitPrice, isShort, isEntry: false, settings.SlippagePercent);
+        if (!string.Equals(exitReason, "Liquidation", StringComparison.OrdinalIgnoreCase))
+        {
+            exitPrice = ApplySlippage(exitPrice, isShort, isEntry: false, settings.SlippagePercent);
+        }
         var grossPnl = isShort
             ? (entryPrice - exitPrice) * quantity
             : (exitPrice - entryPrice) * quantity;
@@ -1946,7 +1971,8 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         var exitNotional = exitPrice * quantity;
         var exitFeePercent = exitReason == "TakeProfit" ? settings.MakerFeePercent : settings.TakerFeePercent;
         var fees = entryNotional * settings.TakerFeePercent / 100m + exitNotional * exitFeePercent / 100m;
-        var slippageCost = settings.EntryNotionalUsdt * settings.SlippagePercent / 100m * 2m;
+        var slippageCost = entryNotional * settings.SlippagePercent / 100m +
+            (string.Equals(exitReason, "Liquidation", StringComparison.OrdinalIgnoreCase) ? 0m : exitNotional * settings.SlippagePercent / 100m);
         var holdingHours = decimal.Max(0m, (decimal)(exitTime - signal.SignalCandleOpenTime).TotalHours);
         var fundingCost = settings.EntryNotionalUsdt * settings.FundingPercentPer8h / 100m * holdingHours / 8m;
         var netPnl = grossPnl - fees - fundingCost;
@@ -1962,6 +1988,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             exitPrice,
             signal.StopLoss,
             signal.TakeProfit,
+            quantity,
             grossPnl,
             fees,
             slippageCost,
@@ -2024,6 +2051,14 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         var entryFees = firstEntryPrice * unitQuantity * settings.TakerFeePercent / 100m;
         var totalEntryNotional = firstEntryPrice * unitQuantity;
         var totalSlippageNotional = totalEntryNotional;
+        var totalQuantity = quantities.Sum();
+        var averageEntryPrice = totalQuantity > 0m ? totalEntryNotional / totalQuantity : firstEntryPrice;
+        var liquidationPrice = EstimateBacktestLiquidationPrice(averageEntryPrice, settings.Leverage, isShort);
+        if (!IsBacktestLiquidationBufferAllowed(averageEntryPrice, liquidationPrice, settings))
+        {
+            return null;
+        }
+
         var exitPrice = candles[startIndex].Close;
         var exitTime = candles[startIndex].OpenTime;
         var exitReason = "BacktestEnd";
@@ -2036,6 +2071,15 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             var candle = candles[i];
             if (isShort)
             {
+                if (liquidationPrice > 0m && candle.High >= liquidationPrice)
+                {
+                    exitPrice = liquidationPrice;
+                    exitTime = candle.OpenTime;
+                    exitReason = "Liquidation";
+                    exitIndex = ResolveSessionExitIndex(session, exitTime);
+                    break;
+                }
+
                 if (candle.High >= protectedStop)
                 {
                     exitPrice = protectedStop;
@@ -2070,6 +2114,18 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                     totalEntryNotional += addPrice * unitQuantity;
                     totalSlippageNotional += addPrice * unitQuantity;
                     units++;
+                    totalQuantity = quantities.Sum();
+                    averageEntryPrice = totalQuantity > 0m ? totalEntryNotional / totalQuantity : addPrice;
+                    liquidationPrice = EstimateBacktestLiquidationPrice(averageEntryPrice, settings.Leverage, isShort);
+                    if (!IsBacktestLiquidationBufferAllowed(averageEntryPrice, liquidationPrice, settings))
+                    {
+                        exitPrice = liquidationPrice;
+                        exitTime = candle.OpenTime;
+                        exitReason = "Liquidation";
+                        exitIndex = ResolveSessionExitIndex(session, exitTime);
+                        break;
+                    }
+
                     protectedStop = nextStop;
                     var stopExecutionPrice = ApplySlippage(protectedStop, isShort, isEntry: false, settings.SlippagePercent);
                     maxRiskUsdt = decimal.Max(maxRiskUsdt, CalculateTurtleAggregateRisk(entryPrices, quantities, stopExecutionPrice, isShort));
@@ -2078,6 +2134,15 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             }
             else
             {
+                if (liquidationPrice > 0m && candle.Low <= liquidationPrice)
+                {
+                    exitPrice = liquidationPrice;
+                    exitTime = candle.OpenTime;
+                    exitReason = "Liquidation";
+                    exitIndex = ResolveSessionExitIndex(session, exitTime);
+                    break;
+                }
+
                 if (candle.Low <= protectedStop)
                 {
                     exitPrice = protectedStop;
@@ -2112,6 +2177,18 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                     totalEntryNotional += addPrice * unitQuantity;
                     totalSlippageNotional += addPrice * unitQuantity;
                     units++;
+                    totalQuantity = quantities.Sum();
+                    averageEntryPrice = totalQuantity > 0m ? totalEntryNotional / totalQuantity : addPrice;
+                    liquidationPrice = EstimateBacktestLiquidationPrice(averageEntryPrice, settings.Leverage, isShort);
+                    if (!IsBacktestLiquidationBufferAllowed(averageEntryPrice, liquidationPrice, settings))
+                    {
+                        exitPrice = liquidationPrice;
+                        exitTime = candle.OpenTime;
+                        exitReason = "Liquidation";
+                        exitIndex = ResolveSessionExitIndex(session, exitTime);
+                        break;
+                    }
+
                     protectedStop = nextStop;
                     var stopExecutionPrice = ApplySlippage(protectedStop, isShort, isEntry: false, settings.SlippagePercent);
                     maxRiskUsdt = decimal.Max(maxRiskUsdt, CalculateTurtleAggregateRisk(entryPrices, quantities, stopExecutionPrice, isShort));
@@ -2127,6 +2204,8 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         var isOpenAtBacktestEnd = exitReason == "BacktestEnd";
         exitPrice = isOpenAtBacktestEnd
             ? exitPrice
+            : string.Equals(exitReason, "Liquidation", StringComparison.OrdinalIgnoreCase)
+            ? exitPrice
             : ApplySlippage(exitPrice, isShort, isEntry: false, settings.SlippagePercent);
         var grossPnl = 0m;
         for (var unitIndex = 0; unitIndex < entryPrices.Count; unitIndex++)
@@ -2136,12 +2215,12 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                 : (exitPrice - entryPrices[unitIndex]) * quantities[unitIndex];
         }
 
-        var totalQuantity = quantities.Sum();
-        var averageEntryPrice = totalQuantity > 0m ? totalEntryNotional / totalQuantity : firstEntryPrice;
         var exitNotional = exitPrice * totalQuantity;
         var fees = entryFees +
             (isOpenAtBacktestEnd ? 0m : exitNotional * settings.TakerFeePercent / 100m);
-        var slippageCost = (totalSlippageNotional + (isOpenAtBacktestEnd ? 0m : exitNotional)) * settings.SlippagePercent / 100m;
+        var slippageCost = (totalSlippageNotional +
+            (isOpenAtBacktestEnd || string.Equals(exitReason, "Liquidation", StringComparison.OrdinalIgnoreCase) ? 0m : exitNotional)) *
+            settings.SlippagePercent / 100m;
         var holdingHours = decimal.Max(0m, (decimal)(exitTime - signal.SignalCandleOpenTime).TotalHours);
         var fundingCost = totalEntryNotional * settings.FundingPercentPer8h / 100m * holdingHours / 8m;
         var netPnl = grossPnl - fees - fundingCost;
@@ -2165,6 +2244,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             exitPrice,
             protectedStop,
             signal.TakeProfit,
+            totalQuantity,
             grossPnl,
             fees,
             slippageCost,
@@ -2243,6 +2323,32 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             : 0m;
         return settings.MaxProjectedDrawdownEquityPercent <= 0m ||
             projectedDrawdownPercent <= settings.MaxProjectedDrawdownEquityPercent;
+    }
+
+    private static decimal EstimateBacktestLiquidationPrice(decimal entryPrice, decimal leverage, bool isShort)
+    {
+        if (entryPrice <= 0m || leverage <= 0m)
+        {
+            return 0m;
+        }
+
+        return isShort
+            ? entryPrice * (1m + 1m / leverage)
+            : decimal.Max(0m, entryPrice * (1m - 1m / leverage));
+    }
+
+    private static bool IsBacktestLiquidationBufferAllowed(
+        decimal entryPrice,
+        decimal liquidationPrice,
+        BacktestRunSettings settings)
+    {
+        if (settings.MinLiquidationBufferPercent <= 0m || entryPrice <= 0m || liquidationPrice <= 0m)
+        {
+            return true;
+        }
+
+        var bufferPercent = Math.Abs(entryPrice - liquidationPrice) / entryPrice * 100m;
+        return bufferPercent >= settings.MinLiquidationBufferPercent;
     }
 
     private bool IsBacktestTurtleChannelExit(
@@ -2398,18 +2504,24 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             .Where(trade => trade.EntryTime >= splitAt)
             .OrderBy(trade => trade.EntryTime)
             .ToArray();
+        var outOfSampleForcedClosedTrades = ForceCloseOpenTradesAtBacktestEnd(outOfSampleOpenTrades, settings);
         var outOfSampleOpenStrategyGates = BuildStrategyGatePerformance(outOfSampleOpenTrades, settings.InitialEquityUsdt);
         var outOfSampleMarkToMarketStrategyGates = BuildStrategyGatePerformance(outOfSampleTrades.Concat(outOfSampleOpenTrades).ToArray(), settings.InitialEquityUsdt);
+        var outOfSampleForcedClosedStrategyGates = BuildStrategyGatePerformance(outOfSampleTrades.Concat(outOfSampleForcedClosedTrades).ToArray(), settings.InitialEquityUsdt);
         var outOfSampleOpenStrategyGateMap = outOfSampleOpenStrategyGates.ToDictionary(
             item => BuildStrategyGateKey(item.StrategyName, item.Symbol, item.Direction),
             StringComparer.OrdinalIgnoreCase);
         var outOfSampleMarkToMarketStrategyGateMap = outOfSampleMarkToMarketStrategyGates.ToDictionary(
             item => BuildStrategyGateKey(item.StrategyName, item.Symbol, item.Direction),
             StringComparer.OrdinalIgnoreCase);
+        var outOfSampleForcedClosedStrategyGateMap = outOfSampleForcedClosedStrategyGates.ToDictionary(
+            item => BuildStrategyGateKey(item.StrategyName, item.Symbol, item.Direction),
+            StringComparer.OrdinalIgnoreCase);
         var outOfSampleStrategyGates = BuildStrategyGatePerformance(outOfSampleTrades, settings.InitialEquityUsdt)
             .ToDictionary(
                 item => BuildStrategyGateKey(item.StrategyName, item.Symbol, item.Direction),
                 StringComparer.OrdinalIgnoreCase);
+        var robustnessPassedWindows = BuildRobustnessPassedWindowCounts(outOfSampleTrades, splitAt, periodEnd, settings.InitialEquityUsdt);
         var eligibleStrategySymbolDirections = optimizationStrategyGates
             .Where(item => IsLiveGateStrategyEnabled(item.StrategyName))
             .Where(item => IsLiveDirectionAllowed(item.Direction))
@@ -2419,6 +2531,9 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                 item.AverageR >= _strategyRoutingOptions.MinAverageRToEnable &&
                 item.NetPnl > 0m)
             .Where(item => IsOosGateConfirmed(item, outOfSampleStrategyGates))
+            .Where(item =>
+                robustnessPassedWindows.TryGetValue(BuildStrategyGateKey(item.StrategyName, item.Symbol, item.Direction), out var passedWindows) &&
+                passedWindows >= _strategyRoutingOptions.MinRobustnessWindowsToEnable)
             .Select(item => BuildStrategyGateKey(item.StrategyName, item.Symbol, item.Direction))
             .OrderBy(key => key)
             .ToArray();
@@ -2432,6 +2547,8 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             outOfSampleStrategyGates,
             outOfSampleOpenStrategyGateMap,
             outOfSampleMarkToMarketStrategyGateMap,
+            outOfSampleForcedClosedStrategyGateMap,
+            robustnessPassedWindows,
             eligibleStrategyGateSet);
         var walkForwardStrategyGates = BuildWalkForwardStrategyGates(
             optimizationTrades,
@@ -2482,16 +2599,25 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             FalseBreakoutCount = falseBreakoutCount,
             TrueBreakoutBlockedCount = trueBreakoutBlockedCount,
             HardRiskCapBlockedCount = hardRiskCapBlockedCount,
+            LiquidationCount = trades.Count(IsLiquidationTrade),
             MaxTradeLossEquityPercent = settings.MaxTradeLossEquityPercent,
             MaxProjectedDrawdownEquityPercent = settings.MaxProjectedDrawdownEquityPercent,
+            Leverage = settings.Leverage,
+            MinLiquidationBufferPercent = settings.MinLiquidationBufferPercent,
             OpenAtBacktestEndCount = openAtBacktestEndTrades.Length,
             OpenAtBacktestEndUnrealizedPnl = openAtBacktestEndTrades.Sum(trade => trade.NetPnl),
             OptimizationWindowLabel = optimizationWindowLabel,
             OutOfSampleWindowLabel = outOfSampleWindowLabel,
-            Metrics = BuildMetrics(outOfSampleTrades, splitAt, periodEnd, settings.InitialEquityUsdt, outOfSampleOpenTrades),
+            Metrics = BuildMetrics(outOfSampleTrades, splitAt, periodEnd, settings.InitialEquityUsdt, outOfSampleOpenTrades, outOfSampleForcedClosedTrades),
             OptimizationMetrics = BuildMetrics(optimizationTrades, periodStart, splitAt, settings.InitialEquityUsdt),
-            OutOfSampleMetrics = BuildMetrics(outOfSampleTrades, splitAt, periodEnd, settings.InitialEquityUsdt, outOfSampleOpenTrades),
-            FilteredOutOfSampleMetrics = BuildMetrics(filteredOutOfSampleTrades, splitAt, periodEnd, settings.InitialEquityUsdt, filteredOutOfSampleOpenTrades),
+            OutOfSampleMetrics = BuildMetrics(outOfSampleTrades, splitAt, periodEnd, settings.InitialEquityUsdt, outOfSampleOpenTrades, outOfSampleForcedClosedTrades),
+            FilteredOutOfSampleMetrics = BuildMetrics(
+                filteredOutOfSampleTrades,
+                splitAt,
+                periodEnd,
+                settings.InitialEquityUsdt,
+                filteredOutOfSampleOpenTrades,
+                ForceCloseOpenTradesAtBacktestEnd(filteredOutOfSampleOpenTrades, settings)),
             LiveUseEligibleStrategyGatesOnly = _strategyRoutingOptions.LiveUseEligibleStrategyGatesOnly,
             LiveEligibleGateSizeMultiplier = _strategyRoutingOptions.LiveEligibleGateSizeMultiplier,
             LiveIneligibleGateSizeMultiplier = _strategyRoutingOptions.LiveIneligibleGateSizeMultiplier,
@@ -2540,6 +2666,45 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                 CalculateMedianR(group)))
             .ToArray();
 
+    private IReadOnlyDictionary<string, int> BuildRobustnessPassedWindowCounts(
+        IReadOnlyList<BacktestTradeInternal> trades,
+        DateTimeOffset periodStart,
+        DateTimeOffset periodEnd,
+        decimal initialEquity)
+    {
+        var windowDays = Math.Max(1, _strategyRoutingOptions.RobustnessWindowDays);
+        var windows = new List<(DateTimeOffset Start, DateTimeOffset End)>();
+        for (var start = periodStart; start < periodEnd; start = start.AddDays(windowDays))
+        {
+            var end = start.AddDays(windowDays);
+            windows.Add((start, end < periodEnd ? end : periodEnd));
+        }
+
+        var counts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (var window in windows)
+        {
+            var windowTrades = trades
+                .Where(trade => trade.EntryTime >= window.Start && trade.EntryTime < window.End)
+                .OrderBy(trade => trade.EntryTime)
+                .ToArray();
+            foreach (var gate in BuildStrategyGatePerformance(windowTrades, initialEquity))
+            {
+                if (gate.TradesCount < _strategyRoutingOptions.MinRobustnessTradesPerWindow ||
+                    gate.ProfitFactor < _strategyRoutingOptions.MinRobustnessProfitFactorToEnable ||
+                    gate.AverageR < _strategyRoutingOptions.MinRobustnessAverageRToEnable ||
+                    gate.NetPnl <= 0m)
+                {
+                    continue;
+                }
+
+                var key = BuildStrategyGateKey(gate.StrategyName, gate.Symbol, gate.Direction);
+                counts[key] = counts.TryGetValue(key, out var current) ? current + 1 : 1;
+            }
+        }
+
+        return counts;
+    }
+
     private IReadOnlyList<string> BuildProfitableDiagnosticGateKeys(
         IReadOnlyList<StrategyGatePerformance> gates,
         int minTrades) =>
@@ -2556,12 +2721,15 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         IReadOnlyDictionary<string, StrategyGatePerformance> oosClosedGates,
         IReadOnlyDictionary<string, StrategyGatePerformance> oosOpenGates,
         IReadOnlyDictionary<string, StrategyGatePerformance> oosMarkToMarketGates,
+        IReadOnlyDictionary<string, StrategyGatePerformance> oosForcedClosedGates,
+        IReadOnlyDictionary<string, int> robustnessPassedWindows,
         IReadOnlySet<string> liveAllowedKeys)
     {
         var keys = optimizationGates.Keys
             .Concat(oosClosedGates.Keys)
             .Concat(oosOpenGates.Keys)
             .Concat(oosMarkToMarketGates.Keys)
+            .Concat(oosForcedClosedGates.Keys)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .OrderBy(key => key)
             .ToArray();
@@ -2573,8 +2741,10 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                 oosClosedGates.TryGetValue(key, out var oosClosed);
                 oosOpenGates.TryGetValue(key, out var oosOpen);
                 oosMarkToMarketGates.TryGetValue(key, out var oosMarkToMarket);
-                var identity = optimization ?? oosClosed ?? oosOpen ?? oosMarkToMarket;
+                oosForcedClosedGates.TryGetValue(key, out var oosForcedClosed);
+                var identity = optimization ?? oosClosed ?? oosOpen ?? oosMarkToMarket ?? oosForcedClosed;
                 var isLiveAllowed = liveAllowedKeys.Contains(key);
+                robustnessPassedWindows.TryGetValue(key, out var passedWindows);
                 return new FuturesBacktestGateDiagnostic
                 {
                     Key = key,
@@ -2582,7 +2752,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                     Symbol = identity?.Symbol ?? string.Empty,
                     Direction = identity?.Direction ?? string.Empty,
                     IsLiveAllowed = isLiveAllowed,
-                    Reason = isLiveAllowed ? "Allowed by closed optimization and closed OOS edge." : BuildGateRejectReason(optimization, oosClosed),
+                    Reason = isLiveAllowed ? "Allowed by closed optimization, closed OOS edge, and robustness windows." : BuildGateRejectReason(optimization, oosClosed, passedWindows),
                     OptimizationTrades = optimization?.TradesCount ?? 0,
                     OptimizationNetPnl = optimization?.NetPnl ?? 0m,
                     OptimizationProfitFactor = optimization?.ProfitFactor ?? 0m,
@@ -2598,7 +2768,11 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                     OosOpenNetPnl = oosOpen?.NetPnl ?? 0m,
                     OosMarkToMarketTrades = oosMarkToMarket?.TradesCount ?? 0,
                     OosMarkToMarketNetPnl = oosMarkToMarket?.NetPnl ?? 0m,
-                    OosMarkToMarketAverageR = oosMarkToMarket?.AverageR ?? 0m
+                    OosMarkToMarketAverageR = oosMarkToMarket?.AverageR ?? 0m,
+                    OosForcedClosedTrades = oosForcedClosed?.TradesCount ?? 0,
+                    OosForcedClosedNetPnl = oosForcedClosed?.NetPnl ?? 0m,
+                    OosForcedClosedAverageR = oosForcedClosed?.AverageR ?? 0m,
+                    OosForcedClosedMaxDrawdownPercent = oosForcedClosed?.MaxDrawdownPercent ?? 0m
                 };
             })
             .ToArray();
@@ -2652,7 +2826,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             .GroupBy(trade => BuildStrategyGateKey(trade.Pattern, trade.Symbol, trade.Side), StringComparer.OrdinalIgnoreCase)
             .ToDictionary(group => group.Key, group => group.OrderBy(trade => trade.EntryTime).ToArray(), StringComparer.OrdinalIgnoreCase);
 
-    private string BuildGateRejectReason(StrategyGatePerformance? optimization, StrategyGatePerformance? oosClosed)
+    private string BuildGateRejectReason(StrategyGatePerformance? optimization, StrategyGatePerformance? oosClosed, int robustnessPassedWindows)
     {
         if (optimization is null)
         {
@@ -2726,10 +2900,14 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         }
 
         if (_strategyRoutingOptions.MaxOosLargestWinGrossProfitPercentToEnable > 0m &&
-            oosClosed.LargestWinGrossProfitPercent > _strategyRoutingOptions.MaxOosLargestWinGrossProfitPercentToEnable &&
-            oosClosed.MedianR <= _strategyRoutingOptions.MinOosMedianRToEnable)
+            oosClosed.LargestWinGrossProfitPercent > _strategyRoutingOptions.MaxOosLargestWinGrossProfitPercentToEnable)
         {
-            return $"OOS largest win {oosClosed.LargestWinGrossProfitPercent:0.####}% of gross profit > {_strategyRoutingOptions.MaxOosLargestWinGrossProfitPercentToEnable:0.####}% and median R is not positive.";
+            return $"OOS largest win {oosClosed.LargestWinGrossProfitPercent:0.####}% of gross profit > {_strategyRoutingOptions.MaxOosLargestWinGrossProfitPercentToEnable:0.####}%.";
+        }
+
+        if (robustnessPassedWindows < _strategyRoutingOptions.MinRobustnessWindowsToEnable)
+        {
+            return $"Robustness windows passed {robustnessPassedWindows} < {_strategyRoutingOptions.MinRobustnessWindowsToEnable}.";
         }
 
         return "Rejected by closed-edge gate.";
@@ -2737,6 +2915,46 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
 
     private static bool IsOpenAtBacktestEnd(BacktestTradeInternal trade) =>
         string.Equals(trade.ExitReason, "BacktestEnd", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsLiquidationTrade(BacktestTradeInternal trade) =>
+        string.Equals(trade.ExitReason, "Liquidation", StringComparison.OrdinalIgnoreCase);
+
+    private static BacktestTradeInternal[] ForceCloseOpenTradesAtBacktestEnd(
+        IReadOnlyList<BacktestTradeInternal> trades,
+        BacktestRunSettings settings) =>
+        trades
+            .Where(IsOpenAtBacktestEnd)
+            .Select(trade => ForceCloseOpenTradeAtBacktestEnd(trade, settings))
+            .OrderBy(trade => trade.EntryTime)
+            .ToArray();
+
+    private static BacktestTradeInternal ForceCloseOpenTradeAtBacktestEnd(
+        BacktestTradeInternal trade,
+        BacktestRunSettings settings)
+    {
+        var isShort = string.Equals(trade.Side, "Short", StringComparison.OrdinalIgnoreCase);
+        var forcedExitPrice = ApplySlippage(trade.ExitPrice, isShort, isEntry: false, settings.SlippagePercent);
+        var forcedGrossPnl = isShort
+            ? (trade.EntryPrice - forcedExitPrice) * trade.Quantity
+            : (forcedExitPrice - trade.EntryPrice) * trade.Quantity;
+        var exitNotional = forcedExitPrice * trade.Quantity;
+        var forcedFees = trade.Fees + exitNotional * settings.TakerFeePercent / 100m;
+        var forcedSlippageCost = trade.SlippageCost + exitNotional * settings.SlippagePercent / 100m;
+        var forcedNetPnl = forcedGrossPnl - forcedFees - trade.FundingCost;
+        var initialRiskUsdt = trade.RMultiple == 0m ? 0m : trade.NetPnl / trade.RMultiple;
+        var forcedRMultiple = initialRiskUsdt > 0m ? forcedNetPnl / initialRiskUsdt : trade.RMultiple;
+
+        return trade with
+        {
+            ExitPrice = forcedExitPrice,
+            GrossPnl = forcedGrossPnl,
+            Fees = forcedFees,
+            SlippageCost = forcedSlippageCost,
+            NetPnl = forcedNetPnl,
+            RMultiple = forcedRMultiple,
+            ExitReason = "ForcedBacktestEnd"
+        };
+    }
 
     private bool IsBacktestLiveEntryAllowed(StrategyCandidate candidate, DateTimeOffset signalTime, TimeZoneInfo nyZone) =>
         IsLiveGateStrategyEnabled(candidate.StrategyName) &&
@@ -2769,8 +2987,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                 outOfSampleGate.MaxDrawdownPercent <= _strategyRoutingOptions.MaxOosDrawdownPercentToEnable) &&
             outOfSampleGate.MedianR >= _strategyRoutingOptions.MinOosMedianRToEnable &&
             (_strategyRoutingOptions.MaxOosLargestWinGrossProfitPercentToEnable <= 0m ||
-                outOfSampleGate.LargestWinGrossProfitPercent <= _strategyRoutingOptions.MaxOosLargestWinGrossProfitPercentToEnable ||
-                outOfSampleGate.MedianR > _strategyRoutingOptions.MinOosMedianRToEnable);
+                outOfSampleGate.LargestWinGrossProfitPercent <= _strategyRoutingOptions.MaxOosLargestWinGrossProfitPercentToEnable);
     }
 
     private static string BuildWindowLabel(string suffix, DateTimeOffset start, DateTimeOffset end)
@@ -2867,11 +3084,15 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         DateTimeOffset periodStart,
         DateTimeOffset periodEnd,
         decimal initialEquity,
-        IReadOnlyList<BacktestTradeInternal>? openTrades = null)
+        IReadOnlyList<BacktestTradeInternal>? openTrades = null,
+        IReadOnlyList<BacktestTradeInternal>? forcedClosedTrades = null)
     {
         var closedNetPnl = trades.Sum(trade => trade.NetPnl);
         var openUnrealizedPnl = openTrades?.Sum(trade => trade.NetPnl) ?? 0m;
         var markToMarketNetPnl = closedNetPnl + openUnrealizedPnl;
+        var forcedClosedNetPnl = closedNetPnl + (forcedClosedTrades?.Sum(trade => trade.NetPnl) ?? 0m);
+        var forcedClosedExitCost = (openTrades?.Sum(trade => trade.NetPnl) ?? 0m) -
+            (forcedClosedTrades?.Sum(trade => trade.NetPnl) ?? 0m);
         var wins = trades.Count(trade => trade.NetPnl > 0m);
         var grossProfit = trades.Where(trade => trade.NetPnl > 0m).Sum(trade => trade.NetPnl);
         var grossLoss = Math.Abs(trades.Where(trade => trade.NetPnl < 0m).Sum(trade => trade.NetPnl));
@@ -2881,6 +3102,10 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             ? trades.Concat(openTrades).ToArray()
             : trades;
         var markToMarketMaxDrawdown = CalculateMaxDrawdown(markToMarketTrades, initialEquity);
+        var forcedClosedMetricTrades = forcedClosedTrades is { Count: > 0 }
+            ? trades.Concat(forcedClosedTrades).ToArray()
+            : trades;
+        var forcedClosedMaxDrawdown = CalculateMaxDrawdown(forcedClosedMetricTrades, initialEquity);
         return new FuturesBacktestMetrics
         {
             TradesCount = trades.Count,
@@ -2888,10 +3113,14 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             ClosedNetPnl = closedNetPnl,
             OpenUnrealizedPnl = openUnrealizedPnl,
             MarkToMarketNetPnl = markToMarketNetPnl,
+            ForcedClosedNetPnl = forcedClosedNetPnl,
+            ForcedClosedExitCost = forcedClosedExitCost,
             MaxDrawdown = maxDrawdown,
             MaxDrawdownPercent = initialEquity > 0m ? maxDrawdown / initialEquity * 100m : 0m,
             MarkToMarketMaxDrawdown = markToMarketMaxDrawdown,
             MarkToMarketMaxDrawdownPercent = initialEquity > 0m ? markToMarketMaxDrawdown / initialEquity * 100m : 0m,
+            ForcedClosedMaxDrawdown = forcedClosedMaxDrawdown,
+            ForcedClosedMaxDrawdownPercent = initialEquity > 0m ? forcedClosedMaxDrawdown / initialEquity * 100m : 0m,
             WinRate = trades.Count > 0 ? (decimal)wins / trades.Count * 100m : 0m,
             ProfitFactor = grossLoss > 0m ? grossProfit / grossLoss : grossProfit > 0m ? 999m : 0m,
             AverageR = trades.Count > 0 ? trades.Average(trade => trade.RMultiple) : 0m,
@@ -3237,6 +3466,8 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         request.SlippagePercent ?? _backtestOptions.SlippagePercent,
         request.FundingPercentPer8h ?? _backtestOptions.FundingPercentPer8h,
         _backtestOptions.InitialEquityUsdt,
+        request.Leverage ?? _backtestOptions.Leverage,
+        request.MinLiquidationBufferPercent ?? _backtestOptions.MinLiquidationBufferPercent,
         request.MaxTradeLossEquityPercent ?? _backtestOptions.MaxTradeLossEquityPercent,
         request.MaxProjectedDrawdownEquityPercent ?? _backtestOptions.MaxProjectedDrawdownEquityPercent);
 
@@ -3572,6 +3803,8 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         decimal SlippagePercent,
         decimal FundingPercentPer8h,
         decimal InitialEquityUsdt,
+        decimal Leverage,
+        decimal MinLiquidationBufferPercent,
         decimal MaxTradeLossEquityPercent,
         decimal MaxProjectedDrawdownEquityPercent);
 
@@ -3909,6 +4142,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         decimal ExitPrice,
         decimal StopLoss,
         decimal TakeProfit,
+        decimal Quantity,
         decimal GrossPnl,
         decimal Fees,
         decimal SlippageCost,

@@ -65,6 +65,26 @@ public sealed class StrategyRoutingOptions
     [Range(1, 10000)]
     public int MinOosTradesForStrategySymbolGating { get; init; } = 5;
 
+    [ConfigurationKeyName("MIN_ROBUSTNESS_WINDOWS_TO_ENABLE")]
+    [Range(1, 12)]
+    public int MinRobustnessWindowsToEnable { get; init; } = 2;
+
+    [ConfigurationKeyName("ROBUSTNESS_WINDOW_DAYS")]
+    [Range(1, 365)]
+    public int RobustnessWindowDays { get; init; } = 15;
+
+    [ConfigurationKeyName("MIN_ROBUSTNESS_TRADES_PER_WINDOW")]
+    [Range(1, 10000)]
+    public int MinRobustnessTradesPerWindow { get; init; } = 2;
+
+    [ConfigurationKeyName("MIN_ROBUSTNESS_PROFIT_FACTOR_TO_ENABLE")]
+    [Range(typeof(decimal), "0", "1000")]
+    public decimal MinRobustnessProfitFactorToEnable { get; init; } = 1m;
+
+    [ConfigurationKeyName("MIN_ROBUSTNESS_AVERAGE_R_TO_ENABLE")]
+    [Range(typeof(decimal), "-100", "100")]
+    public decimal MinRobustnessAverageRToEnable { get; init; } = 0m;
+
     [ConfigurationKeyName("MIN_OOS_PROFIT_FACTOR_TO_ENABLE")]
     [Range(typeof(decimal), "0", "1000")]
     public decimal MinOosProfitFactorToEnable { get; init; } = 1.05m;

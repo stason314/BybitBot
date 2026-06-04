@@ -146,6 +146,7 @@ public static class FuturesBacktestPage
     <section class="metrics">
       <div class="metric"><div class="label">MTM PnL</div><div class="value" id="netPnl">-</div></div>
       <div class="metric"><div class="label">Closed PnL</div><div class="value" id="closedPnl">-</div></div>
+      <div class="metric"><div class="label">Forced-close PnL</div><div class="value" id="forcedClosedPnl">-</div></div>
       <div class="metric"><div class="label">MTM drawdown</div><div class="value" id="drawdown">-</div></div>
       <div class="metric"><div class="label">Win rate</div><div class="value" id="winRate">-</div></div>
       <div class="metric"><div class="label">Profit factor</div><div class="value" id="profitFactor">-</div></div>
@@ -163,7 +164,7 @@ public static class FuturesBacktestPage
       </div>
       <div class="panel">
         <h2>Gate diagnostics</h2>
-        <table><thead><tr><th>Gate</th><th>Live</th><th>Reason</th><th>Opt</th><th>OOS closed</th><th>OOS open</th></tr></thead><tbody id="gateDiagnostics"><tr><td colspan="6" class="empty">Нет данных</td></tr></tbody></table>
+        <table><thead><tr><th>Gate</th><th>Live</th><th>Reason</th><th>Opt</th><th>OOS closed</th><th>OOS open</th><th>OOS forced</th></tr></thead><tbody id="gateDiagnostics"><tr><td colspan="7" class="empty">Нет данных</td></tr></tbody></table>
       </div>
       <div class="panel">
         <h2>Walk-forward metrics</h2>
@@ -287,12 +288,15 @@ public static class FuturesBacktestPage
       const closedNetPnl = Number(m.closedNetPnl ?? m.netPnl ?? 0);
       const openUnrealizedPnl = Number(m.openUnrealizedPnl ?? result.openAtBacktestEndUnrealizedPnl ?? 0);
       const markToMarketNetPnl = Number(m.markToMarketNetPnl ?? (closedNetPnl + openUnrealizedPnl));
+      const forcedClosedNetPnl = Number(m.forcedClosedNetPnl ?? markToMarketNetPnl);
       const markToMarketDrawdown = Number(m.markToMarketMaxDrawdown ?? m.maxDrawdown ?? 0);
       const markToMarketDrawdownPercent = Number(m.markToMarketMaxDrawdownPercent ?? m.maxDrawdownPercent ?? 0);
       byId('netPnl').textContent = pnl(markToMarketNetPnl);
       byId('netPnl').className = `value ${cls(markToMarketNetPnl)}`;
       byId('closedPnl').textContent = pnl(closedNetPnl);
       byId('closedPnl').className = `value ${cls(closedNetPnl)}`;
+      byId('forcedClosedPnl').textContent = `${pnl(forcedClosedNetPnl)} / cost ${pnl(m.forcedClosedExitCost || 0)}`;
+      byId('forcedClosedPnl').className = `value ${cls(forcedClosedNetPnl)}`;
       byId('drawdown').textContent = `${money.format(markToMarketDrawdown)} (${pct(markToMarketDrawdownPercent)})`;
       byId('winRate').textContent = pct(m.winRate);
       byId('profitFactor').textContent = fmt.format(m.profitFactor || 0);
@@ -360,7 +364,8 @@ public static class FuturesBacktestPage
           <td>${item.optimizationTrades || 0} / ${pnl(item.optimizationNetPnl)} / PF ${fmt.format(item.optimizationProfitFactor || 0)}</td>
           <td>${item.oosClosedTrades || 0} / ${pnl(item.oosClosedNetPnl)} / PF ${fmt.format(item.oosClosedProfitFactor || 0)} / DD ${pct(item.oosClosedMaxDrawdownPercent)} / medR ${fmt.format(item.oosClosedMedianR || 0)}</td>
           <td>${item.oosOpenTrades || 0} / ${pnl(item.oosOpenNetPnl)} / MTM ${pnl(item.oosMarkToMarketNetPnl)}</td>
-        </tr>`).join('') : '<tr><td colspan="6" class="empty">Нет данных</td></tr>';
+          <td>${item.oosForcedClosedTrades || 0} / ${pnl(item.oosForcedClosedNetPnl)} / DD ${pct(item.oosForcedClosedMaxDrawdownPercent)}</td>
+        </tr>`).join('') : '<tr><td colspan="7" class="empty">Нет данных</td></tr>';
     }
 
     async function copyDiagnostics() {
@@ -411,8 +416,11 @@ public static class FuturesBacktestPage
         `openAtBacktestEndCount=${result.openAtBacktestEndCount || 0}`,
         `openAtBacktestEndUnrealizedPnl=${Number(result.openAtBacktestEndUnrealizedPnl || 0)}`,
         `hardRiskCapBlockedCount=${result.hardRiskCapBlockedCount || 0}`,
+        `liquidationCount=${result.liquidationCount || 0}`,
         `maxTradeLossEquityPercent=${Number(result.maxTradeLossEquityPercent || 0)}`,
         `maxProjectedDrawdownEquityPercent=${Number(result.maxProjectedDrawdownEquityPercent || 0)}`,
+        `leverage=${Number(result.leverage || 0)}`,
+        `minLiquidationBufferPercent=${Number(result.minLiquidationBufferPercent || 0)}`,
         `optimizationWindow=${result.optimizationWindowLabel || '-'}`,
         `outOfSampleWindow=${result.outOfSampleWindowLabel || '-'}`,
         `liveUseEligibleStrategyGatesOnly=${Boolean(result.liveUseEligibleStrategyGatesOnly)}`,
@@ -459,10 +467,14 @@ public static class FuturesBacktestPage
         `closedNetPnl=${Number(item.closedNetPnl ?? item.netPnl ?? 0)}`,
         `openUnrealizedPnl=${Number(item.openUnrealizedPnl || 0)}`,
         `markToMarketNetPnl=${Number(item.markToMarketNetPnl ?? item.netPnl ?? 0)}`,
+        `forcedClosedNetPnl=${Number(item.forcedClosedNetPnl ?? item.markToMarketNetPnl ?? item.netPnl ?? 0)}`,
+        `forcedClosedExitCost=${Number(item.forcedClosedExitCost || 0)}`,
         `maxDrawdown=${Number(item.maxDrawdown || 0)}`,
         `maxDrawdownPercent=${Number(item.maxDrawdownPercent || 0)}`,
         `markToMarketMaxDrawdown=${Number(item.markToMarketMaxDrawdown ?? item.maxDrawdown ?? 0)}`,
         `markToMarketMaxDrawdownPercent=${Number(item.markToMarketMaxDrawdownPercent ?? item.maxDrawdownPercent ?? 0)}`,
+        `forcedClosedMaxDrawdown=${Number(item.forcedClosedMaxDrawdown ?? item.markToMarketMaxDrawdown ?? item.maxDrawdown ?? 0)}`,
+        `forcedClosedMaxDrawdownPercent=${Number(item.forcedClosedMaxDrawdownPercent ?? item.markToMarketMaxDrawdownPercent ?? item.maxDrawdownPercent ?? 0)}`,
         `winRate=${Number(item.winRate || 0)}`,
         `profitFactor=${Number(item.profitFactor || 0)}`,
         `averageR=${Number(item.averageR || 0)}`,

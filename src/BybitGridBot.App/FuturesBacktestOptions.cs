@@ -50,6 +50,14 @@ public sealed class FuturesBacktestOptions
     [Range(typeof(decimal), "0.00000001", "999999999")]
     public decimal InitialEquityUsdt { get; init; } = 10000m;
 
+    [ConfigurationKeyName("FUTURES_BACKTEST_LEVERAGE")]
+    [Range(typeof(decimal), "1", "1000")]
+    public decimal Leverage { get; init; } = 2m;
+
+    [ConfigurationKeyName("FUTURES_BACKTEST_MIN_LIQUIDATION_BUFFER_PERCENT")]
+    [Range(typeof(decimal), "0", "100")]
+    public decimal MinLiquidationBufferPercent { get; init; } = 15m;
+
     [ConfigurationKeyName("FUTURES_BACKTEST_MAX_TRADE_LOSS_EQUITY_PERCENT")]
     [Range(typeof(decimal), "0", "100")]
     public decimal MaxTradeLossEquityPercent { get; init; } = 2m;
