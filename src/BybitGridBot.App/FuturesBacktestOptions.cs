@@ -13,6 +13,13 @@ public sealed class FuturesBacktestOptions
     [Range(1, 200)]
     public int Symbols { get; init; } = 20;
 
+    [ConfigurationKeyName("FUTURES_BACKTEST_MAX_CONCURRENCY")]
+    [Range(1, 20)]
+    public int MaxConcurrency { get; init; } = 2;
+
+    [ConfigurationKeyName("FUTURES_BACKTEST_MODE")]
+    public string Mode { get; init; } = "ScoreBasedRouter";
+
     [ConfigurationKeyName("FUTURES_BACKTEST_ENTRY_NOTIONAL_USDT")]
     [Range(typeof(decimal), "0.00000001", "999999999")]
     public decimal EntryNotionalUsdt { get; init; } = 100m;

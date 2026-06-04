@@ -24,21 +24,26 @@ public sealed class TurtleTrendStrategy
             return null;
         }
 
-        var candles = context.TurtleCandles.OrderBy(candle => candle.OpenTime).ToArray();
+        var snapshot = context.TurtleIndicators;
+        Candle[] candles = snapshot is null
+            ? context.TurtleCandles.OrderBy(candle => candle.OpenTime).ToArray()
+            : [];
         var minCandles = Math.Max(_options.EntrySlowPeriod, _options.AtrPeriod) + 1;
-        if (candles.Length < minCandles)
+        if (snapshot is null && candles.Length < minCandles)
         {
             return null;
         }
 
-        var current = candles[^1];
-        var signal = ResolveSignal(candles, current);
+        var current = snapshot?.Current ?? candles[^1];
+        var signal = snapshot is not null
+            ? ResolveSignal(snapshot, current)
+            : ResolveSignal(candles, current);
         if (signal.Side == StrategySide.None)
         {
             return null;
         }
 
-        var nValue = TradingIndicatorMath.TurtleN(candles, _options.AtrPeriod);
+        var nValue = snapshot?.TurtleN ?? TradingIndicatorMath.TurtleN(candles, _options.AtrPeriod);
         if (nValue <= 0m)
         {
             return null;
@@ -53,10 +58,7 @@ public sealed class TurtleTrendStrategy
             return null;
         }
 
-        var exitPeriod = signal.System == "S2" ? _options.ExitSlowPeriod : _options.ExitFastPeriod;
-        var channelExit = signal.Side == StrategySide.Long
-            ? TradingIndicatorMath.DonchianLow(candles, exitPeriod)
-            : TradingIndicatorMath.DonchianHigh(candles, exitPeriod);
+        var channelExit = ResolveChannelExit(candles, snapshot, signal);
         var score = signal.System == "S2" ? 100m : 90m;
         var confidence = signal.System == "S2" ? 0.95m : 0.9m;
         var reason = $"Turtle {signal.System} Donchian {signal.Side} breakout. Close={current.Close:F8}, breakoutLevel={signal.BreakoutLevel:F8}, N={nValue:F8}, channelExit={channelExit:F8}.";
@@ -116,6 +118,52 @@ public sealed class TurtleTrendStrategy
         }
 
         return new TurtleSignalCandidate(string.Empty, StrategySide.None, 0m);
+    }
+
+    private TurtleSignalCandidate ResolveSignal(TurtleIndicatorSnapshot snapshot, Candle current)
+    {
+        if (snapshot.EntrySlowHigh > 0m && current.Close > snapshot.EntrySlowHigh)
+        {
+            return new TurtleSignalCandidate("S2", StrategySide.Long, snapshot.EntrySlowHigh);
+        }
+
+        if (snapshot.EntrySlowLow > 0m && current.Close < snapshot.EntrySlowLow)
+        {
+            return new TurtleSignalCandidate("S2", StrategySide.Short, snapshot.EntrySlowLow);
+        }
+
+        if (snapshot.EntryFastHigh > 0m && current.Close > snapshot.EntryFastHigh)
+        {
+            return new TurtleSignalCandidate("S1", StrategySide.Long, snapshot.EntryFastHigh);
+        }
+
+        if (snapshot.EntryFastLow > 0m && current.Close < snapshot.EntryFastLow)
+        {
+            return new TurtleSignalCandidate("S1", StrategySide.Short, snapshot.EntryFastLow);
+        }
+
+        return new TurtleSignalCandidate(string.Empty, StrategySide.None, 0m);
+    }
+
+    private decimal ResolveChannelExit(
+        IReadOnlyList<Candle> candles,
+        TurtleIndicatorSnapshot? snapshot,
+        TurtleSignalCandidate signal)
+    {
+        if (snapshot is not null)
+        {
+            if (signal.Side == StrategySide.Long)
+            {
+                return signal.System == "S2" ? snapshot.ExitSlowLow : snapshot.ExitFastLow;
+            }
+
+            return signal.System == "S2" ? snapshot.ExitSlowHigh : snapshot.ExitFastHigh;
+        }
+
+        var exitPeriod = signal.System == "S2" ? _options.ExitSlowPeriod : _options.ExitFastPeriod;
+        return signal.Side == StrategySide.Long
+            ? TradingIndicatorMath.DonchianLow(candles, exitPeriod)
+            : TradingIndicatorMath.DonchianHigh(candles, exitPeriod);
     }
 
     private readonly record struct TurtleSignalCandidate(string System, StrategySide Side, decimal BreakoutLevel);

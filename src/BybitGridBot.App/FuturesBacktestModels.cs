@@ -1,10 +1,18 @@
 namespace BybitGridBot.App;
 
+public enum FuturesBacktestMode
+{
+    ScoreBasedRouter,
+    TurtleOnly
+}
+
 public sealed class FuturesBacktestRequest
 {
     public int? Days { get; init; }
 
     public int? Symbols { get; init; }
+
+    public string? Mode { get; init; }
 
     public decimal? EntryNotionalUsdt { get; init; }
 
