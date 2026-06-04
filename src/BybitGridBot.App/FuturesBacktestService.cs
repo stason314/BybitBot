@@ -393,6 +393,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         decimal? lowerReturnLevel = null;
         var processedScoreSignals = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var processedBreakoutClassifications = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        bool? previousS1WasProfitable = null;
 
         for (var i = 1; i < session.Count; i++)
         {
@@ -421,8 +422,21 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                     }
 
                     var scoreSignal = ToBacktestSignal(decision.SelectedCandidate, session, i);
-                    var trade = SimulateTrade(symbol, scoreSignal, session, allFiveMinuteCandles, i + 1, settings);
+                    if (IsTurtleBacktestSignal(scoreSignal) &&
+                        scoreSignal.TurtleSystem == "S1" &&
+                        previousS1WasProfitable == true)
+                    {
+                        continue;
+                    }
+
+                    var accountEquity = settings.InitialEquityUsdt + trades.Sum(trade => trade.NetPnl);
+                    var trade = SimulateTrade(symbol, scoreSignal, session, allFiveMinuteCandles, i + 1, settings, accountEquity);
                     trades.Add(trade);
+                    if (IsTurtleBacktestSignal(scoreSignal) && scoreSignal.TurtleSystem == "S1")
+                    {
+                        previousS1WasProfitable = trade.NetPnl > 0m;
+                    }
+
                     i = trade.ExitIndex;
                     continue;
                 }
@@ -469,7 +483,8 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
 
                 if (filter.IsAllowed)
                 {
-                    var trade = SimulateTrade(symbol, signal, session, allFiveMinuteCandles, i + 1, settings);
+                    var accountEquity = settings.InitialEquityUsdt + trades.Sum(trade => trade.NetPnl);
+                    var trade = SimulateTrade(symbol, signal, session, allFiveMinuteCandles, i + 1, settings, accountEquity);
                     trades.Add(trade);
                     i = trade.ExitIndex;
                     upperStop = null;
@@ -639,6 +654,12 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             BreakoutCandleOpenTime = current.OpenTime,
             SignalCandleOpenTime = current.OpenTime,
             BreakoutVolumeRatio = 1m,
+            TurtleSystem = intent.TurtleSystem,
+            TurtleSignalId = string.Equals(candidate.StrategyName, TurtleTrendStrategy.Name, StringComparison.OrdinalIgnoreCase)
+                ? $"{candidate.Symbol}:{intent.TurtleSystem}:{candidate.Side}:{candidate.CreatedAt.UtcDateTime:yyyyMMddHHmm}:{intent.TurtleBreakoutLevel:0.########}"
+                : string.Empty,
+            TurtleN = intent.TurtleN,
+            TurtleBreakoutLevel = intent.TurtleBreakoutLevel,
             Reason = $"{candidate.StrategyName}: score={candidate.Score:F0}, confidence={candidate.Confidence:F2}, {candidate.Reason}"
         };
     }
@@ -657,6 +678,9 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             FormatSignalPrice(intent?.StopLoss),
             FormatSignalPrice(intent?.TakeProfit));
     }
+
+    private static bool IsTurtleBacktestSignal(NySessionSignal signal) =>
+        string.Equals(signal.Pattern, TurtleTrendStrategy.Name, StringComparison.OrdinalIgnoreCase);
 
     private static string FormatSignalPrice(decimal? value) =>
         value.HasValue ? value.Value.ToString("0.########") : string.Empty;
@@ -1611,13 +1635,14 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         IReadOnlyList<Candle> session,
         IReadOnlyList<Candle> allFiveMinuteCandles,
         int startIndex,
-        BacktestRunSettings settings)
+        BacktestRunSettings settings,
+        decimal accountEquityUsdt)
     {
         var useTurtleChannelExit = string.Equals(signal.Pattern, TurtleTrendStrategy.Name, StringComparison.OrdinalIgnoreCase) &&
             signal.TakeProfit <= 0m;
         if (useTurtleChannelExit)
         {
-            return SimulateTurtleTrade(symbol, signal, session, allFiveMinuteCandles, settings);
+            return SimulateTurtleTrade(symbol, signal, session, allFiveMinuteCandles, settings, accountEquityUsdt);
         }
 
         var isShort = signal.Side == "Short";
@@ -1714,7 +1739,8 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         NySessionSignal signal,
         IReadOnlyList<Candle> session,
         IReadOnlyList<Candle> allFiveMinuteCandles,
-        BacktestRunSettings settings)
+        BacktestRunSettings settings,
+        decimal accountEquityUsdt)
     {
         var candles = allFiveMinuteCandles.OrderBy(candle => candle.OpenTime).ToArray();
         var startIndex = Array.FindIndex(candles, candle => candle.OpenTime > signal.SignalCandleOpenTime);
@@ -1724,14 +1750,37 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         }
 
         var isShort = signal.Side == "Short";
-        var entryPrice = ApplySlippage(signal.EntryPrice, isShort, isEntry: true, settings.SlippagePercent);
-        var quantity = settings.EntryNotionalUsdt / entryPrice;
-        var riskPerUnit = Math.Abs(entryPrice - signal.StopLoss);
+        var nValue = signal.TurtleN > 0m ? signal.TurtleN : Math.Abs(signal.EntryPrice - signal.StopLoss) / _turtleOptions.StopAtrMultiplier;
+        var dollarVolatility = nValue * _turtleOptions.PointValueUsdt;
+        var unitQuantity = dollarVolatility > 0m
+            ? Math.Floor(accountEquityUsdt * _turtleOptions.RiskPerUnitPercent / 100m / dollarVolatility * 1_000_000m) / 1_000_000m
+            : 0m;
+        if (unitQuantity <= 0m)
+        {
+            unitQuantity = settings.EntryNotionalUsdt / signal.EntryPrice;
+        }
+
+        var firstEntryPrice = ApplySlippage(
+            signal.TurtleBreakoutLevel > 0m ? signal.TurtleBreakoutLevel : signal.EntryPrice,
+            isShort,
+            isEntry: true,
+            settings.SlippagePercent);
+        var entryPrices = new List<decimal> { firstEntryPrice };
+        var quantities = new List<decimal> { unitQuantity };
+        var protectedStop = isShort
+            ? firstEntryPrice + nValue * _turtleOptions.StopAtrMultiplier
+            : firstEntryPrice - nValue * _turtleOptions.StopAtrMultiplier;
+        var nextAddLevel = isShort
+            ? firstEntryPrice - nValue * _turtleOptions.AddAtrInterval
+            : firstEntryPrice + nValue * _turtleOptions.AddAtrInterval;
+        var entryFees = firstEntryPrice * unitQuantity * settings.TakerFeePercent / 100m;
+        var totalEntryNotional = firstEntryPrice * unitQuantity;
+        var totalSlippageNotional = totalEntryNotional;
         var exitPrice = candles[startIndex].Close;
         var exitTime = candles[startIndex].OpenTime;
         var exitReason = "BacktestEnd";
         var exitIndex = ResolveSessionExitIndex(session, exitTime);
-        var protectedStop = signal.StopLoss;
+        var units = 1;
 
         for (var i = startIndex; i < candles.Length; i++)
         {
@@ -1747,13 +1796,26 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                     break;
                 }
 
-                if (IsBacktestTurtleChannelExit(candles, i, StrategySide.Short))
+                if (IsBacktestTurtleChannelExit(candles, i, StrategySide.Short, signal.TurtleSystem))
                 {
                     exitPrice = candle.Close;
                     exitTime = candle.OpenTime;
                     exitReason = "ChannelExit";
                     exitIndex = ResolveSessionExitIndex(session, exitTime);
                     break;
+                }
+
+                if (_turtleOptions.UsePyramiding && units < _turtleOptions.MaxUnits && candle.Low <= nextAddLevel)
+                {
+                    var addPrice = ApplySlippage(nextAddLevel, isShort, isEntry: true, settings.SlippagePercent);
+                    entryPrices.Add(addPrice);
+                    quantities.Add(unitQuantity);
+                    entryFees += addPrice * unitQuantity * settings.TakerFeePercent / 100m;
+                    totalEntryNotional += addPrice * unitQuantity;
+                    totalSlippageNotional += addPrice * unitQuantity;
+                    units++;
+                    protectedStop = addPrice + nValue * _turtleOptions.StopAtrMultiplier;
+                    nextAddLevel = addPrice - nValue * _turtleOptions.AddAtrInterval;
                 }
             }
             else
@@ -1767,7 +1829,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                     break;
                 }
 
-                if (IsBacktestTurtleChannelExit(candles, i, StrategySide.Long))
+                if (IsBacktestTurtleChannelExit(candles, i, StrategySide.Long, signal.TurtleSystem))
                 {
                     exitPrice = candle.Close;
                     exitTime = candle.OpenTime;
@@ -1775,31 +1837,48 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                     exitIndex = ResolveSessionExitIndex(session, exitTime);
                     break;
                 }
+
+                if (_turtleOptions.UsePyramiding && units < _turtleOptions.MaxUnits && candle.High >= nextAddLevel)
+                {
+                    var addPrice = ApplySlippage(nextAddLevel, isShort, isEntry: true, settings.SlippagePercent);
+                    entryPrices.Add(addPrice);
+                    quantities.Add(unitQuantity);
+                    entryFees += addPrice * unitQuantity * settings.TakerFeePercent / 100m;
+                    totalEntryNotional += addPrice * unitQuantity;
+                    totalSlippageNotional += addPrice * unitQuantity;
+                    units++;
+                    protectedStop = addPrice - nValue * _turtleOptions.StopAtrMultiplier;
+                    nextAddLevel = addPrice + nValue * _turtleOptions.AddAtrInterval;
+                }
             }
 
             exitPrice = candle.Close;
             exitTime = candle.OpenTime;
             exitIndex = ResolveSessionExitIndex(session, exitTime);
-            protectedStop = UpdateTurtleProtectedStop(candles, i, isShort, entryPrice, riskPerUnit, protectedStop);
         }
 
         var isOpenAtBacktestEnd = exitReason == "BacktestEnd";
         exitPrice = isOpenAtBacktestEnd
             ? exitPrice
             : ApplySlippage(exitPrice, isShort, isEntry: false, settings.SlippagePercent);
-        var grossPnl = isShort
-            ? (entryPrice - exitPrice) * quantity
-            : (exitPrice - entryPrice) * quantity;
-        var entryNotional = entryPrice * quantity;
-        var exitNotional = exitPrice * quantity;
-        var fees = entryNotional * settings.TakerFeePercent / 100m +
+        var grossPnl = 0m;
+        for (var unitIndex = 0; unitIndex < entryPrices.Count; unitIndex++)
+        {
+            grossPnl += isShort
+                ? (entryPrices[unitIndex] - exitPrice) * quantities[unitIndex]
+                : (exitPrice - entryPrices[unitIndex]) * quantities[unitIndex];
+        }
+
+        var totalQuantity = quantities.Sum();
+        var averageEntryPrice = totalQuantity > 0m ? totalEntryNotional / totalQuantity : firstEntryPrice;
+        var exitNotional = exitPrice * totalQuantity;
+        var fees = entryFees +
             (isOpenAtBacktestEnd ? 0m : exitNotional * settings.TakerFeePercent / 100m);
-        var slippageCost = settings.EntryNotionalUsdt * settings.SlippagePercent / 100m *
-            (isOpenAtBacktestEnd ? 1m : 2m);
+        var slippageCost = (totalSlippageNotional + (isOpenAtBacktestEnd ? 0m : exitNotional)) * settings.SlippagePercent / 100m;
         var holdingHours = decimal.Max(0m, (decimal)(exitTime - signal.SignalCandleOpenTime).TotalHours);
-        var fundingCost = settings.EntryNotionalUsdt * settings.FundingPercentPer8h / 100m * holdingHours / 8m;
+        var fundingCost = totalEntryNotional * settings.FundingPercentPer8h / 100m * holdingHours / 8m;
         var netPnl = grossPnl - fees - fundingCost;
-        var initialRiskUsdt = riskPerUnit * quantity;
+        var initialRiskUsdt = nValue * _turtleOptions.StopAtrMultiplier * unitQuantity;
         var rMultiple = initialRiskUsdt > 0m ? netPnl / initialRiskUsdt : 0m;
 
         return new BacktestTradeInternal(
@@ -1808,9 +1887,9 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             signal.Pattern,
             signal.SignalCandleOpenTime,
             exitTime,
-            entryPrice,
+            averageEntryPrice,
             exitPrice,
-            signal.StopLoss,
+            protectedStop,
             signal.TakeProfit,
             grossPnl,
             fees,
@@ -1822,16 +1901,19 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             exitIndex);
     }
 
-    private bool IsBacktestTurtleChannelExit(IReadOnlyList<Candle> candles, int index, StrategySide side)
+    private bool IsBacktestTurtleChannelExit(IReadOnlyList<Candle> candles, int index, StrategySide side, string turtleSystem)
     {
         if (!_turtleOptions.UseChannelExit)
         {
             return false;
         }
 
+        var exitPeriod = string.Equals(turtleSystem, "S2", StringComparison.OrdinalIgnoreCase)
+            ? _turtleOptions.ExitSlowPeriod
+            : _turtleOptions.ExitFastPeriod;
         var exitBars = Math.Max(
-            _turtleOptions.ExitFastPeriod,
-            _turtleOptions.ExitFastPeriod * ParseIntervalMinutes(_turtleOptions.Timeframe, 60) / 5);
+            exitPeriod,
+            exitPeriod * ParseIntervalMinutes(_turtleOptions.Timeframe, 60) / 5);
         if (index + 1 < exitBars + 2)
         {
             return false;
