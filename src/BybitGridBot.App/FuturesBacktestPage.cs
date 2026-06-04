@@ -233,13 +233,15 @@ public static class FuturesBacktestPage
     function render(data) {
       latestStatus = data;
       const progress = Number(data.progressPercent || 0);
+      const statusText = data.status || 'Not started';
+      const isStopping = statusText.toLowerCase().startsWith('stopping');
       byId('bar').style.width = `${Math.max(0, Math.min(100, progress))}%`;
-      byId('status').textContent = `${data.status || 'Not started'} (${fmt.format(progress)}%)`;
+      byId('status').textContent = `${statusText} (${fmt.format(progress)}%)`;
       byId('eta').textContent = data.isRunning && data.estimatedCompletedAt
         ? `ETA: ${new Date(data.estimatedCompletedAt).toLocaleString()}`
         : data.completedAt ? `Completed: ${new Date(data.completedAt).toLocaleString()}` : 'ETA: -';
       byId('start').disabled = Boolean(data.isRunning);
-      byId('stop').disabled = !data.isRunning;
+      byId('stop').disabled = !data.isRunning || isStopping;
       byId('daysInput').disabled = Boolean(data.isRunning);
       byId('symbolsInput').disabled = Boolean(data.isRunning);
       byId('modeInput').disabled = Boolean(data.isRunning);

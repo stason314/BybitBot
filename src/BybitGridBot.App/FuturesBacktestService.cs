@@ -254,6 +254,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             var trueBreakoutBlockedCount = 0;
             foreach (var output in outputs)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 allTrades.AddRange(output.Trades);
                 falseBreakoutCount += output.FalseBreakoutCount;
                 trueBreakoutBlockedCount += output.TrueBreakoutBlockedCount;
@@ -339,12 +340,12 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             ? await FetchHistoricalCandlesAsync(symbol, _turtleOptions.Timeframe, periodStart.AddDays(-10), periodEnd, cancellationToken)
             : Array.Empty<Candle>();
         var turtleSeries = BacktestCandleSeries.Create(turtleCandles, ResolveIntervalMinutes(_turtleOptions.Timeframe));
-        var turtleIndicators = PrecomputedTurtleIndicators.Build(turtleSeries.Candles, _turtleOptions);
-        var fiveMinuteTurtleExits = PrecomputedTurtleChannelExits.Build(fiveMinuteSeries.Candles, _turtleOptions);
+        var turtleIndicators = PrecomputedTurtleIndicators.Build(turtleSeries.Candles, _turtleOptions, cancellationToken);
+        var fiveMinuteTurtleExits = PrecomputedTurtleChannelExits.Build(fiveMinuteSeries.Candles, _turtleOptions, cancellationToken);
 
         if (settings.Mode == FuturesBacktestMode.TurtleOnly)
         {
-            return BacktestTurtleOnlySymbol(symbol, periodStart, fiveMinuteSeries, turtleSeries, turtleIndicators, fiveMinuteTurtleExits, settings);
+            return BacktestTurtleOnlySymbol(symbol, periodStart, fiveMinuteSeries, turtleSeries, turtleIndicators, fiveMinuteTurtleExits, settings, cancellationToken);
         }
 
         var fifteenMinuteCandles = await FetchHistoricalCandlesAsync(symbol, FifteenMinuteInterval, periodStart, periodEnd, cancellationToken);
@@ -364,6 +365,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
 
         foreach (var day in groupedByDay)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             if (!IsNySessionComplete(day.Key, nyZone, periodEnd))
             {
                 continue;
@@ -395,7 +397,8 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                 nyZone,
                 trades,
                 ref falseBreakoutCount,
-                ref trueBreakoutBlockedCount);
+                ref trueBreakoutBlockedCount,
+                cancellationToken);
         }
 
         return new SymbolBacktestOutput(symbol, trades, falseBreakoutCount, trueBreakoutBlockedCount);
@@ -408,7 +411,8 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         BacktestCandleSeries turtleCandles,
         PrecomputedTurtleIndicators indicators,
         PrecomputedTurtleChannelExits turtleExits,
-        BacktestRunSettings settings)
+        BacktestRunSettings settings,
+        CancellationToken cancellationToken)
     {
         var minCandles = Math.Max(_turtleOptions.EntrySlowPeriod, _turtleOptions.AtrPeriod) + 1;
         if (turtleCandles.Count < minCandles || fiveMinuteCandles.Count < 2)
@@ -421,6 +425,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         bool? previousS1WasProfitable = null;
         for (var index = minCandles; index < turtleCandles.Count; index++)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var current = turtleCandles.Candles[index];
             if (current.OpenTime < periodStart)
             {
@@ -451,7 +456,8 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                 turtleExits,
                 0,
                 settings,
-                equity);
+                equity,
+                cancellationToken);
             trades.Add(trade);
             equity += trade.NetPnl;
             if (signal.TurtleSystem == "S1")
@@ -563,7 +569,8 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         TimeZoneInfo nyZone,
         List<BacktestTradeInternal> trades,
         ref int falseBreakoutCount,
-        ref int trueBreakoutBlockedCount)
+        ref int trueBreakoutBlockedCount,
+        CancellationToken cancellationToken)
     {
         var upperBoundary = session[0].High;
         var lowerBoundary = session[0].Low;
@@ -580,6 +587,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
 
         for (var i = 1; i < session.Count; i++)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var candle = session[i];
             var ny = TimeZoneInfo.ConvertTime(candle.OpenTime, nyZone);
             var isRangeBuilding = ny.TimeOfDay < TimeSpan.FromHours(12);
@@ -613,7 +621,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                     }
 
                     var accountEquity = settings.InitialEquityUsdt + realizedPnl;
-                    var trade = SimulateTrade(symbol, scoreSignal, session, allFiveMinuteCandles.Candles, turtleExits, i + 1, settings, accountEquity);
+                    var trade = SimulateTrade(symbol, scoreSignal, session, allFiveMinuteCandles.Candles, turtleExits, i + 1, settings, accountEquity, cancellationToken);
                     trades.Add(trade);
                     realizedPnl += trade.NetPnl;
                     if (IsTurtleBacktestSignal(scoreSignal) && scoreSignal.TurtleSystem == "S1")
@@ -668,7 +676,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                 if (filter.IsAllowed)
                 {
                     var accountEquity = settings.InitialEquityUsdt + realizedPnl;
-                    var trade = SimulateTrade(symbol, signal, session, allFiveMinuteCandles.Candles, turtleExits, i + 1, settings, accountEquity);
+                    var trade = SimulateTrade(symbol, signal, session, allFiveMinuteCandles.Candles, turtleExits, i + 1, settings, accountEquity, cancellationToken);
                     trades.Add(trade);
                     realizedPnl += trade.NetPnl;
                     i = trade.ExitIndex;
@@ -1828,13 +1836,14 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         PrecomputedTurtleChannelExits turtleExits,
         int startIndex,
         BacktestRunSettings settings,
-        decimal accountEquityUsdt)
+        decimal accountEquityUsdt,
+        CancellationToken cancellationToken)
     {
         var useTurtleChannelExit = string.Equals(signal.Pattern, TurtleTrendStrategy.Name, StringComparison.OrdinalIgnoreCase) &&
             signal.TakeProfit <= 0m;
         if (useTurtleChannelExit)
         {
-            return SimulateTurtleTrade(symbol, signal, session, allFiveMinuteCandles, turtleExits, settings, accountEquityUsdt);
+            return SimulateTurtleTrade(symbol, signal, session, allFiveMinuteCandles, turtleExits, settings, accountEquityUsdt, cancellationToken);
         }
 
         var isShort = signal.Side == "Short";
@@ -1848,6 +1857,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
 
         for (var i = startIndex; i < session.Count; i++)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var candle = session[i];
             if (isShort)
             {
@@ -1933,7 +1943,8 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         IReadOnlyList<Candle> allFiveMinuteCandles,
         PrecomputedTurtleChannelExits turtleExits,
         BacktestRunSettings settings,
-        decimal accountEquityUsdt)
+        decimal accountEquityUsdt,
+        CancellationToken cancellationToken)
     {
         var candles = allFiveMinuteCandles;
         var startIndex = FindFirstOpenTimeAfter(candles, signal.SignalCandleOpenTime);
@@ -1977,6 +1988,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
 
         for (var i = startIndex; i < candles.Count; i++)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var candle = candles[i];
             if (isShort)
             {
@@ -3183,18 +3195,21 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
 
         public decimal[] TurtleN { get; }
 
-        public static PrecomputedTurtleIndicators Build(IReadOnlyList<Candle> candles, TurtleTrendOptions options)
+        public static PrecomputedTurtleIndicators Build(
+            IReadOnlyList<Candle> candles,
+            TurtleTrendOptions options,
+            CancellationToken cancellationToken)
         {
             return new PrecomputedTurtleIndicators(
-                ComputeDonchianHigh(candles, options.EntryFastPeriod),
-                ComputeDonchianLow(candles, options.EntryFastPeriod),
-                ComputeDonchianHigh(candles, options.EntrySlowPeriod),
-                ComputeDonchianLow(candles, options.EntrySlowPeriod),
-                ComputeDonchianHigh(candles, options.ExitFastPeriod),
-                ComputeDonchianLow(candles, options.ExitFastPeriod),
-                ComputeDonchianHigh(candles, options.ExitSlowPeriod),
-                ComputeDonchianLow(candles, options.ExitSlowPeriod),
-                ComputeTurtleN(candles, options.AtrPeriod));
+                ComputeDonchianHigh(candles, options.EntryFastPeriod, cancellationToken: cancellationToken),
+                ComputeDonchianLow(candles, options.EntryFastPeriod, cancellationToken: cancellationToken),
+                ComputeDonchianHigh(candles, options.EntrySlowPeriod, cancellationToken: cancellationToken),
+                ComputeDonchianLow(candles, options.EntrySlowPeriod, cancellationToken: cancellationToken),
+                ComputeDonchianHigh(candles, options.ExitFastPeriod, cancellationToken: cancellationToken),
+                ComputeDonchianLow(candles, options.ExitFastPeriod, cancellationToken: cancellationToken),
+                ComputeDonchianHigh(candles, options.ExitSlowPeriod, cancellationToken: cancellationToken),
+                ComputeDonchianLow(candles, options.ExitSlowPeriod, cancellationToken: cancellationToken),
+                ComputeTurtleN(candles, options.AtrPeriod, cancellationToken));
         }
     }
 
@@ -3220,16 +3235,19 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
 
         private decimal[] SlowLow { get; }
 
-        public static PrecomputedTurtleChannelExits Build(IReadOnlyList<Candle> fiveMinuteCandles, TurtleTrendOptions options)
+        public static PrecomputedTurtleChannelExits Build(
+            IReadOnlyList<Candle> fiveMinuteCandles,
+            TurtleTrendOptions options,
+            CancellationToken cancellationToken)
         {
             var turtleInterval = ParseIntervalMinutes(options.Timeframe, 60);
             var fastBars = Math.Max(options.ExitFastPeriod, options.ExitFastPeriod * turtleInterval / 5);
             var slowBars = Math.Max(options.ExitSlowPeriod, options.ExitSlowPeriod * turtleInterval / 5);
             return new PrecomputedTurtleChannelExits(
-                ComputeDonchianHigh(fiveMinuteCandles, fastBars, requireFullWarmup: true),
-                ComputeDonchianLow(fiveMinuteCandles, fastBars, requireFullWarmup: true),
-                ComputeDonchianHigh(fiveMinuteCandles, slowBars, requireFullWarmup: true),
-                ComputeDonchianLow(fiveMinuteCandles, slowBars, requireFullWarmup: true));
+                ComputeDonchianHigh(fiveMinuteCandles, fastBars, requireFullWarmup: true, cancellationToken: cancellationToken),
+                ComputeDonchianLow(fiveMinuteCandles, fastBars, requireFullWarmup: true, cancellationToken: cancellationToken),
+                ComputeDonchianHigh(fiveMinuteCandles, slowBars, requireFullWarmup: true, cancellationToken: cancellationToken),
+                ComputeDonchianLow(fiveMinuteCandles, slowBars, requireFullWarmup: true, cancellationToken: cancellationToken));
         }
 
         public decimal GetHigh(int index, bool slow) =>
@@ -3242,7 +3260,8 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
     private static decimal[] ComputeDonchianHigh(
         IReadOnlyList<Candle> candles,
         int period,
-        bool requireFullWarmup = false)
+        bool requireFullWarmup = false,
+        CancellationToken cancellationToken = default)
     {
         var result = new decimal[candles.Count];
         if (period <= 0)
@@ -3252,6 +3271,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
 
         for (var index = 0; index < candles.Count; index++)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             if (index == 0 || requireFullWarmup && index + 1 < period + 2)
             {
                 continue;
@@ -3273,7 +3293,8 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
     private static decimal[] ComputeDonchianLow(
         IReadOnlyList<Candle> candles,
         int period,
-        bool requireFullWarmup = false)
+        bool requireFullWarmup = false,
+        CancellationToken cancellationToken = default)
     {
         var result = new decimal[candles.Count];
         if (period <= 0)
@@ -3283,6 +3304,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
 
         for (var index = 0; index < candles.Count; index++)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             if (index == 0 || requireFullWarmup && index + 1 < period + 2)
             {
                 continue;
@@ -3301,7 +3323,10 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         return result;
     }
 
-    private static decimal[] ComputeTurtleN(IReadOnlyList<Candle> candles, int period)
+    private static decimal[] ComputeTurtleN(
+        IReadOnlyList<Candle> candles,
+        int period,
+        CancellationToken cancellationToken)
     {
         var result = new decimal[candles.Count];
         if (period <= 0 || candles.Count < period + 1)
@@ -3312,6 +3337,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         var trueRanges = new decimal[candles.Count];
         for (var index = 1; index < candles.Count; index++)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var current = candles[index];
             var previous = candles[index - 1];
             trueRanges[index] = decimal.Max(
@@ -3329,6 +3355,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         result[period] = n;
         for (var index = period + 1; index < candles.Count; index++)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             n = ((period - 1m) * n + trueRanges[index]) / period;
             result[index] = n;
         }
