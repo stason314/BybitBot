@@ -55,6 +55,8 @@ public static class FuturesBacktestPage
     .run-field label { color: var(--muted); font-size: 11px; font-weight: 650; text-transform: uppercase; letter-spacing: .04em; }
     .run-field input { width: 100%; min-height: 36px; border: 1px solid var(--line); border-radius: 7px; padding: 7px 9px; font: inherit; font-variant-numeric: tabular-nums; }
     .run-field select { width: 100%; min-height: 36px; border: 1px solid var(--line); border-radius: 7px; padding: 7px 9px; font: inherit; background: #fff; }
+    .run-field.check { min-width: 92px; }
+    .run-field.check input { width: 18px; min-height: 18px; align-self: center; }
     .panel, .metric { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
     .metric { padding: 14px; min-width: 0; }
     .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
@@ -110,6 +112,30 @@ public static class FuturesBacktestPage
             <option value="ScoreBasedRouter">Router</option>
             <option value="TurtleOnly">Turtle only</option>
           </select>
+        </div>
+        <div class="run-field check">
+          <label for="nyBounceInput">NY bounce</label>
+          <input id="nyBounceInput" type="checkbox" checked />
+        </div>
+        <div class="run-field">
+          <label for="turtleDirectionsInput">Turtle side</label>
+          <select id="turtleDirectionsInput">
+            <option value="">Long+Short</option>
+            <option value="Long">Long</option>
+            <option value="Short">Short</option>
+          </select>
+        </div>
+        <div class="run-field">
+          <label for="turtleSystemsInput">Turtle sys</label>
+          <select id="turtleSystemsInput">
+            <option value="">S1+S2</option>
+            <option value="S1">S1</option>
+            <option value="S2">S2</option>
+          </select>
+        </div>
+        <div class="run-field">
+          <label for="turtleRiskInput">Turtle risk %</label>
+          <input id="turtleRiskInput" type="number" min="0" max="100" step="0.05" value="0" />
         </div>
         <div class="run-field">
           <label for="weekdaysInput">Weekdays</label>
@@ -233,6 +259,10 @@ public static class FuturesBacktestPage
       const days = clampInt(byId('daysInput').value, 1, 365, 90);
       const symbols = clampInt(byId('symbolsInput').value, 1, 200, 20);
       const mode = byId('modeInput').value || 'ScoreBasedRouter';
+      const runNyBounceRouter = byId('nyBounceInput').checked;
+      const turtleAllowedDirections = byId('turtleDirectionsInput').value || '';
+      const turtleAllowedSystems = byId('turtleSystemsInput').value || '';
+      const turtleRiskPerUnitPercent = clampDecimal(byId('turtleRiskInput').value, 0, 100, 0);
       const turtleAllowedWeekdays = byId('weekdaysInput').value || '';
       const turtleAllowedNyHours = byId('hoursInput').value || '';
       const maxTradeLossEquityPercent = clampDecimal(byId('maxTradeLossInput').value, 0, 100, 0);
@@ -240,7 +270,7 @@ public static class FuturesBacktestPage
       const response = await fetch('/api/futures/backtest/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ days, symbols, mode, turtleAllowedWeekdays, turtleAllowedNyHours, maxTradeLossEquityPercent, maxProjectedDrawdownEquityPercent })
+        body: JSON.stringify({ days, symbols, mode, runNyBounceRouter, turtleAllowedDirections, turtleAllowedSystems, turtleRiskPerUnitPercent, turtleAllowedWeekdays, turtleAllowedNyHours, maxTradeLossEquityPercent, maxProjectedDrawdownEquityPercent })
       });
       if (!response.ok) throw new Error(`Start ${response.status}`);
       render(await response.json());
@@ -280,6 +310,10 @@ public static class FuturesBacktestPage
       byId('daysInput').disabled = Boolean(data.isRunning);
       byId('symbolsInput').disabled = Boolean(data.isRunning);
       byId('modeInput').disabled = Boolean(data.isRunning);
+      byId('nyBounceInput').disabled = Boolean(data.isRunning);
+      byId('turtleDirectionsInput').disabled = Boolean(data.isRunning);
+      byId('turtleSystemsInput').disabled = Boolean(data.isRunning);
+      byId('turtleRiskInput').disabled = Boolean(data.isRunning);
       byId('weekdaysInput').disabled = Boolean(data.isRunning);
       byId('hoursInput').disabled = Boolean(data.isRunning);
       byId('maxTradeLossInput').disabled = Boolean(data.isRunning);
@@ -436,6 +470,10 @@ public static class FuturesBacktestPage
         `maxProjectedDrawdownEquityPercent=${Number(result.maxProjectedDrawdownEquityPercent || 0)}`,
         `leverage=${Number(result.leverage || 0)}`,
         `minLiquidationBufferPercent=${Number(result.minLiquidationBufferPercent || 0)}`,
+        `runNyBounceRouter=${Boolean(result.runNyBounceRouter)}`,
+        `turtleAllowedDirections=${result.turtleAllowedDirections || '-'}`,
+        `turtleAllowedSystems=${result.turtleAllowedSystems || '-'}`,
+        `turtleRiskPerUnitPercent=${Number(result.turtleRiskPerUnitPercent || 0)}`,
         `optimizationWindow=${result.optimizationWindowLabel || '-'}`,
         `outOfSampleWindow=${result.outOfSampleWindowLabel || '-'}`,
         `liveUseEligibleStrategyGatesOnly=${Boolean(result.liveUseEligibleStrategyGatesOnly)}`,

@@ -18,6 +18,14 @@ public sealed class FuturesBacktestRequest
 
     public string? TurtleAllowedNyHours { get; init; }
 
+    public bool? RunNyBounceRouter { get; init; }
+
+    public string? TurtleAllowedDirections { get; init; }
+
+    public string? TurtleAllowedSystems { get; init; }
+
+    public decimal? TurtleRiskPerUnitPercent { get; init; }
+
     public decimal? EntryNotionalUsdt { get; init; }
 
     public decimal? TakerFeePercent { get; init; }
@@ -83,6 +91,14 @@ public sealed class FuturesBacktestResult
     public decimal Leverage { get; init; }
 
     public decimal MinLiquidationBufferPercent { get; init; }
+
+    public bool RunNyBounceRouter { get; init; }
+
+    public string TurtleAllowedDirections { get; init; } = string.Empty;
+
+    public string TurtleAllowedSystems { get; init; } = string.Empty;
+
+    public decimal TurtleRiskPerUnitPercent { get; init; }
 
     public int OpenAtBacktestEndCount { get; init; }
 

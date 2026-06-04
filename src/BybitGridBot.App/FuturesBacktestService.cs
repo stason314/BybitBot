@@ -223,11 +223,11 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                 .Select(ticker => ticker.Symbol)
                 .ToArray();
 
-            var btc15m = settings.Mode == FuturesBacktestMode.TurtleOnly
-                ? Array.Empty<Candle>()
-                : await timings.MeasureAsync(
+            var btc15m = ShouldRunNyBounceRouter(settings)
+                ? await timings.MeasureAsync(
                     "load.btc_15m",
-                    () => FetchHistoricalCandlesAsync("BTCUSDT", FifteenMinuteInterval, periodStart, periodEnd, cancellationToken));
+                    () => FetchHistoricalCandlesAsync("BTCUSDT", FifteenMinuteInterval, periodStart, periodEnd, cancellationToken))
+                : Array.Empty<Candle>();
             var btc15mSeries = BacktestCandleSeries.Create(btc15m, 15);
             var outputs = new ConcurrentBag<SymbolBacktestOutput>();
             var processed = 0;
@@ -373,16 +373,6 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                 () => BacktestTurtleOnlySymbol(symbol, periodStart, fiveMinuteSeries, turtleSeries, turtleIndicators, fiveMinuteTurtleExits, settings, cancellationToken));
         }
 
-        var fifteenMinuteCandles = await timings.MeasureAsync(
-            "symbol.fetch_15m",
-            () => FetchHistoricalCandlesAsync(symbol, FifteenMinuteInterval, periodStart, periodEnd, cancellationToken));
-        var fifteenMinuteSeries = BacktestCandleSeries.Create(fifteenMinuteCandles, 15);
-        if (fifteenMinuteSeries.Count < 200)
-        {
-            return new SymbolBacktestOutput(symbol, [], 0, 0, 0);
-        }
-
-        var nyZone = ResolveNewYorkTimeZone();
         var trades = new List<BacktestTradeInternal>();
         var hardRiskCapBlockedCount = 0;
         if (_strategyRoutingOptions.SignalSelectionMode == SignalSelectionMode.ScoreBased)
@@ -410,6 +400,21 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
 
         var falseBreakoutCount = 0;
         var trueBreakoutBlockedCount = 0;
+        if (!ShouldRunNyBounceRouter(settings))
+        {
+            return new SymbolBacktestOutput(symbol, trades.OrderBy(trade => trade.EntryTime).ToArray(), falseBreakoutCount, trueBreakoutBlockedCount, hardRiskCapBlockedCount);
+        }
+
+        var fifteenMinuteCandles = await timings.MeasureAsync(
+            "symbol.fetch_15m",
+            () => FetchHistoricalCandlesAsync(symbol, FifteenMinuteInterval, periodStart, periodEnd, cancellationToken));
+        var fifteenMinuteSeries = BacktestCandleSeries.Create(fifteenMinuteCandles, 15);
+        if (fifteenMinuteSeries.Count < 200)
+        {
+            return new SymbolBacktestOutput(symbol, trades.OrderBy(trade => trade.EntryTime).ToArray(), falseBreakoutCount, trueBreakoutBlockedCount, hardRiskCapBlockedCount);
+        }
+
+        var nyZone = ResolveNewYorkTimeZone();
         var groupedByDay = fiveMinuteSeries.Candles
             .GroupBy(candle => DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(candle.OpenTime, nyZone).Date))
             .OrderBy(group => group.Key);
@@ -535,7 +540,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                 continue;
             }
 
-            var signal = TryBuildTurtleOnlySignal(symbol, current, indicators, index);
+            var signal = TryBuildTurtleOnlySignal(symbol, current, indicators, index, settings);
             if (signal is null)
             {
                 continue;
@@ -575,9 +580,10 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         string symbol,
         Candle current,
         PrecomputedTurtleIndicators indicators,
-        int index)
+        int index,
+        BacktestRunSettings settings)
     {
-        var candidate = ResolvePrecomputedTurtleSignal(current, indicators, index);
+        var candidate = ResolvePrecomputedTurtleSignal(current, indicators, index, settings);
         if (candidate.Side == StrategySide.None)
         {
             return null;
@@ -621,28 +627,41 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
     private static PrecomputedTurtleSignal ResolvePrecomputedTurtleSignal(
         Candle current,
         PrecomputedTurtleIndicators indicators,
-        int index)
+        int index,
+        BacktestRunSettings settings)
     {
         var slowHigh = indicators.EntrySlowHigh[index];
         var slowLow = indicators.EntrySlowLow[index];
-        if (slowHigh > 0m && current.Close > slowHigh)
+        if (slowHigh > 0m &&
+            current.Close > slowHigh &&
+            IsTurtleBacktestSystemAllowed("S2", settings) &&
+            IsTurtleBacktestDirectionAllowed(StrategySide.Long, settings))
         {
             return new PrecomputedTurtleSignal("S2", StrategySide.Long, slowHigh);
         }
 
-        if (slowLow > 0m && current.Close < slowLow)
+        if (slowLow > 0m &&
+            current.Close < slowLow &&
+            IsTurtleBacktestSystemAllowed("S2", settings) &&
+            IsTurtleBacktestDirectionAllowed(StrategySide.Short, settings))
         {
             return new PrecomputedTurtleSignal("S2", StrategySide.Short, slowLow);
         }
 
         var fastHigh = indicators.EntryFastHigh[index];
         var fastLow = indicators.EntryFastLow[index];
-        if (fastHigh > 0m && current.Close > fastHigh)
+        if (fastHigh > 0m &&
+            current.Close > fastHigh &&
+            IsTurtleBacktestSystemAllowed("S1", settings) &&
+            IsTurtleBacktestDirectionAllowed(StrategySide.Long, settings))
         {
             return new PrecomputedTurtleSignal("S1", StrategySide.Long, fastHigh);
         }
 
-        if (fastLow > 0m && current.Close < fastLow)
+        if (fastLow > 0m &&
+            current.Close < fastLow &&
+            IsTurtleBacktestSystemAllowed("S1", settings) &&
+            IsTurtleBacktestDirectionAllowed(StrategySide.Short, settings))
         {
             return new PrecomputedTurtleSignal("S1", StrategySide.Short, fastLow);
         }
@@ -2092,8 +2111,9 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         var isShort = signal.Side == "Short";
         var nValue = signal.TurtleN > 0m ? signal.TurtleN : Math.Abs(signal.EntryPrice - signal.StopLoss) / _turtleOptions.StopAtrMultiplier;
         var dollarVolatility = nValue * _turtleOptions.PointValueUsdt;
+        var riskPerUnitPercent = ResolveTurtleRiskPerUnitPercent(settings);
         var unitQuantity = dollarVolatility > 0m
-            ? Math.Floor(accountEquityUsdt * _turtleOptions.RiskPerUnitPercent / 100m / dollarVolatility * 1_000_000m) / 1_000_000m
+            ? Math.Floor(accountEquityUsdt * riskPerUnitPercent / 100m / dollarVolatility * 1_000_000m) / 1_000_000m
             : 0m;
         if (unitQuantity <= 0m)
         {
@@ -2663,7 +2683,9 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             StrategyName = settings.Mode == FuturesBacktestMode.TurtleOnly
                 ? "Turtle-only Donchian S1/S2 trend backtest"
                 : _strategyRoutingOptions.SignalSelectionMode == SignalSelectionMode.ScoreBased
-                ? "Independent Turtle Trend + NY 08:00 Bounce Router: Sweep Reversal + Breakout Retest"
+                ? ShouldRunNyBounceRouter(settings)
+                    ? "Independent Turtle Trend + NY 08:00 Bounce Router: Sweep Reversal + Breakout Retest"
+                    : "Independent Turtle Trend backtest"
                 : "NY 08:00 4H Sweep Reversal + Engulfing + Pinbar + 3-Bar Continuation + 3-Bar Reversal + Breakout Candle + Shrinking Candles",
             PeriodStart = periodStart,
             PeriodEnd = periodEnd,
@@ -2678,6 +2700,10 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             MaxProjectedDrawdownEquityPercent = settings.MaxProjectedDrawdownEquityPercent,
             Leverage = settings.Leverage,
             MinLiquidationBufferPercent = settings.MinLiquidationBufferPercent,
+            RunNyBounceRouter = ShouldRunNyBounceRouter(settings),
+            TurtleAllowedDirections = FormatAllowedTexts(settings.TurtleAllowedDirections, "Long,Short"),
+            TurtleAllowedSystems = FormatAllowedTexts(settings.TurtleAllowedSystems, "S1,S2"),
+            TurtleRiskPerUnitPercent = ResolveTurtleRiskPerUnitPercent(settings),
             OpenAtBacktestEndCount = openAtBacktestEndTrades.Length,
             OpenAtBacktestEndUnrealizedPnl = openAtBacktestEndTrades.Sum(trade => trade.NetPnl),
             OptimizationWindowLabel = optimizationWindowLabel,
@@ -3535,6 +3561,10 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         ResolveBacktestMode(request.Mode, _backtestOptions.Mode),
         ParseAllowedWeekdays(request.TurtleAllowedWeekdays ?? _backtestOptions.TurtleAllowedWeekdays),
         ParseAllowedHours(request.TurtleAllowedNyHours ?? _backtestOptions.TurtleAllowedNyHours),
+        request.RunNyBounceRouter ?? _backtestOptions.RunNyBounceRouter,
+        ParseAllowedTexts(request.TurtleAllowedDirections ?? _backtestOptions.TurtleAllowedDirections),
+        ParseAllowedTexts(request.TurtleAllowedSystems ?? _backtestOptions.TurtleAllowedSystems),
+        request.TurtleRiskPerUnitPercent ?? _backtestOptions.TurtleRiskPerUnitPercent,
         request.EntryNotionalUsdt ?? _backtestOptions.EntryNotionalUsdt,
         request.TakerFeePercent ?? _backtestOptions.TakerFeePercent,
         request.MakerFeePercent ?? _backtestOptions.MakerFeePercent,
@@ -3637,6 +3667,24 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         return (settings.TurtleAllowedWeekdays.Count == 0 || settings.TurtleAllowedWeekdays.Contains(nyTime.DayOfWeek)) &&
             (settings.TurtleAllowedNyHours.Count == 0 || settings.TurtleAllowedNyHours.Contains(nyTime.Hour));
     }
+
+    private static bool IsTurtleBacktestDirectionAllowed(StrategySide side, BacktestRunSettings settings) =>
+        side != StrategySide.None &&
+        (settings.TurtleAllowedDirections.Count == 0 || settings.TurtleAllowedDirections.Contains(side.ToString()));
+
+    private static bool IsTurtleBacktestSystemAllowed(string system, BacktestRunSettings settings) =>
+        settings.TurtleAllowedSystems.Count == 0 || settings.TurtleAllowedSystems.Contains(system);
+
+    private static bool ShouldRunNyBounceRouter(BacktestRunSettings settings) =>
+        settings.Mode != FuturesBacktestMode.TurtleOnly && settings.RunNyBounceRouter;
+
+    private decimal ResolveTurtleRiskPerUnitPercent(BacktestRunSettings settings) =>
+        settings.TurtleRiskPerUnitPercent > 0m ? settings.TurtleRiskPerUnitPercent : _turtleOptions.RiskPerUnitPercent;
+
+    private static string FormatAllowedTexts(IReadOnlySet<string> values, string fallback) =>
+        values.Count == 0
+            ? fallback
+            : string.Join(',', values.OrderBy(value => value, StringComparer.OrdinalIgnoreCase));
 
     private static decimal CalculateMidlineRoomR(string side, decimal rangeHigh, decimal rangeLow, decimal entryPrice, decimal risk)
     {
@@ -3872,6 +3920,10 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         FuturesBacktestMode Mode,
         IReadOnlySet<DayOfWeek> TurtleAllowedWeekdays,
         IReadOnlySet<int> TurtleAllowedNyHours,
+        bool RunNyBounceRouter,
+        IReadOnlySet<string> TurtleAllowedDirections,
+        IReadOnlySet<string> TurtleAllowedSystems,
+        decimal TurtleRiskPerUnitPercent,
         decimal EntryNotionalUsdt,
         decimal TakerFeePercent,
         decimal MakerFeePercent,
