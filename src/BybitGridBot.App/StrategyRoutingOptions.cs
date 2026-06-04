@@ -34,7 +34,7 @@ public sealed class StrategyRoutingOptions
 
     [ConfigurationKeyName("LIVE_ELIGIBLE_GATE_SIZE_MULTIPLIER")]
     [Range(typeof(decimal), "0", "100")]
-    public decimal LiveEligibleGateSizeMultiplier { get; init; } = 1m;
+    public decimal LiveEligibleGateSizeMultiplier { get; init; } = 0.5m;
 
     [ConfigurationKeyName("LIVE_INELIGIBLE_GATE_SIZE_MULTIPLIER")]
     [Range(typeof(decimal), "0", "100")]
@@ -42,6 +42,9 @@ public sealed class StrategyRoutingOptions
 
     [ConfigurationKeyName("NYSWEEP_LIVE_TRADING_ENABLED")]
     public bool NySweepLiveTradingEnabled { get; init; } = false;
+
+    [ConfigurationKeyName("LIVE_ELIGIBLE_DIRECTIONS")]
+    public string LiveEligibleDirections { get; init; } = "Long";
 
     [ConfigurationKeyName("NY_LIVE_ALLOWED_HOURS")]
     public string LiveAllowedHours { get; init; } = "10,11";

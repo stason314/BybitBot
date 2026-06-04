@@ -175,7 +175,8 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             if (result.EligibleStrategySymbolDirections.Count > 0)
             {
                 var key = BuildStrategyGateKey(strategyName, symbol, direction);
-                return result.EligibleStrategySymbolDirections.Contains(key, StringComparer.OrdinalIgnoreCase);
+                return IsLiveDirectionAllowed(direction) &&
+                    result.EligibleStrategySymbolDirections.Contains(key, StringComparer.OrdinalIgnoreCase);
             }
 
             return false;
@@ -1963,6 +1964,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         var protectedStop = isShort
             ? firstEntryPrice + nValue * _turtleOptions.StopAtrMultiplier
             : firstEntryPrice - nValue * _turtleOptions.StopAtrMultiplier;
+        var maxRiskUsdt = CalculateTurtlePositionRisk(entryPrices, quantities, protectedStop);
         var nextAddLevel = isShort
             ? firstEntryPrice - nValue * _turtleOptions.AddAtrInterval
             : firstEntryPrice + nValue * _turtleOptions.AddAtrInterval;
@@ -2008,6 +2010,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                     totalSlippageNotional += addPrice * unitQuantity;
                     units++;
                     protectedStop = addPrice + nValue * _turtleOptions.StopAtrMultiplier;
+                    maxRiskUsdt = decimal.Max(maxRiskUsdt, CalculateTurtlePositionRisk(entryPrices, quantities, protectedStop));
                     nextAddLevel = addPrice - nValue * _turtleOptions.AddAtrInterval;
                 }
             }
@@ -2041,6 +2044,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                     totalSlippageNotional += addPrice * unitQuantity;
                     units++;
                     protectedStop = addPrice - nValue * _turtleOptions.StopAtrMultiplier;
+                    maxRiskUsdt = decimal.Max(maxRiskUsdt, CalculateTurtlePositionRisk(entryPrices, quantities, protectedStop));
                     nextAddLevel = addPrice + nValue * _turtleOptions.AddAtrInterval;
                 }
             }
@@ -2071,8 +2075,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         var holdingHours = decimal.Max(0m, (decimal)(exitTime - signal.SignalCandleOpenTime).TotalHours);
         var fundingCost = totalEntryNotional * settings.FundingPercentPer8h / 100m * holdingHours / 8m;
         var netPnl = grossPnl - fees - fundingCost;
-        var initialRiskUsdt = nValue * _turtleOptions.StopAtrMultiplier * unitQuantity;
-        var rMultiple = initialRiskUsdt > 0m ? netPnl / initialRiskUsdt : 0m;
+        var rMultiple = maxRiskUsdt > 0m ? netPnl / maxRiskUsdt : 0m;
 
         return new BacktestTradeInternal(
             symbol,
@@ -2113,6 +2116,21 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         return side == StrategySide.Long
             ? exitLow > 0m && current.Close < exitLow
             : exitHigh > 0m && current.Close > exitHigh;
+    }
+
+    private static decimal CalculateTurtlePositionRisk(
+        IReadOnlyList<decimal> entryPrices,
+        IReadOnlyList<decimal> quantities,
+        decimal stopPrice)
+    {
+        var risk = 0m;
+        var count = Math.Min(entryPrices.Count, quantities.Count);
+        for (var i = 0; i < count; i++)
+        {
+            risk += Math.Abs(entryPrices[i] - stopPrice) * quantities[i];
+        }
+
+        return risk;
     }
 
     private decimal UpdateTurtleProtectedStop(
@@ -2228,6 +2246,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                 StringComparer.OrdinalIgnoreCase);
         var eligibleStrategySymbolDirections = optimizationStrategyGates
             .Where(item => IsLiveGateStrategyEnabled(item.StrategyName))
+            .Where(item => IsLiveDirectionAllowed(item.Direction))
             .Where(item => item.TradesCount >= _strategyRoutingOptions.MinTradesForStrategySymbolGating)
             .Where(item =>
                 item.ProfitFactor >= _strategyRoutingOptions.MinProfitFactorToEnable &&
@@ -2238,6 +2257,14 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             .OrderBy(key => key)
             .ToArray();
         var eligibleStrategyGateSet = eligibleStrategySymbolDirections.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var walkForwardStrategyGates = BuildWalkForwardStrategyGates(
+            optimizationTrades,
+            outOfSampleTrades,
+            eligibleStrategyGateSet,
+            periodStart,
+            splitAt,
+            periodEnd,
+            settings.InitialEquityUsdt);
         var filteredOutOfSampleTrades = outOfSampleTrades
             .Where(trade => eligibleStrategyGateSet.Contains(BuildStrategyGateKey(trade.Pattern, trade.Symbol, trade.Side)))
             .OrderBy(trade => trade.EntryTime)
@@ -2283,10 +2310,12 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             LiveUseEligibleStrategyGatesOnly = _strategyRoutingOptions.LiveUseEligibleStrategyGatesOnly,
             LiveEligibleGateSizeMultiplier = _strategyRoutingOptions.LiveEligibleGateSizeMultiplier,
             LiveIneligibleGateSizeMultiplier = _strategyRoutingOptions.LiveIneligibleGateSizeMultiplier,
+            LiveEligibleDirections = _strategyRoutingOptions.LiveEligibleDirections,
             EligibleSymbols = eligibleSymbols,
             ExcludedSymbols = excludedSymbols,
             EligibleStrategySymbolDirections = eligibleStrategySymbolDirections,
             ExcludedStrategySymbolDirections = excludedStrategySymbolDirections,
+            WalkForwardStrategyGates = walkForwardStrategyGates,
             BestSymbols = BuildSymbolPerformance(outOfSampleTrades).OrderByDescending(item => item.NetPnl).Take(10).ToArray(),
             WorstSymbols = BuildSymbolPerformance(outOfSampleTrades).OrderBy(item => item.NetPnl).Take(10).ToArray(),
             LongShort = BuildSidePerformance(outOfSampleTrades),
@@ -2313,15 +2342,65 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                 group.Key.Direction,
                 group.Count(),
                 group.Sum(trade => trade.NetPnl),
+                group.Any() ? (decimal)group.Count(trade => trade.NetPnl > 0m) / group.Count() * 100m : 0m,
                 CalculateProfitFactor(group),
                 group.Any() ? group.Average(trade => trade.RMultiple) : 0m))
             .ToArray();
+
+    private static IReadOnlyList<FuturesBacktestGateWalkForwardPerformance> BuildWalkForwardStrategyGates(
+        IReadOnlyList<BacktestTradeInternal> optimizationTrades,
+        IReadOnlyList<BacktestTradeInternal> outOfSampleTrades,
+        IReadOnlySet<string> eligibleGateSet,
+        DateTimeOffset optimizationStart,
+        DateTimeOffset splitAt,
+        DateTimeOffset outOfSampleEnd,
+        decimal initialEquity)
+    {
+        var optimizationByKey = GroupTradesByGate(optimizationTrades);
+        var outOfSampleByKey = GroupTradesByGate(outOfSampleTrades);
+        var keys = optimizationByKey.Keys
+            .Concat(outOfSampleByKey.Keys)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        return keys
+            .Select(key =>
+            {
+                optimizationByKey.TryGetValue(key, out var optimization);
+                outOfSampleByKey.TryGetValue(key, out var outOfSample);
+                var source = optimization?.FirstOrDefault() ?? outOfSample?.FirstOrDefault();
+                return source is null
+                    ? null
+                    : new FuturesBacktestGateWalkForwardPerformance
+                    {
+                        Key = key,
+                        StrategyName = source.Pattern,
+                        Symbol = source.Symbol,
+                        Direction = source.Side,
+                        IsLiveAllowed = eligibleGateSet.Contains(key),
+                        OptimizationMetrics = BuildMetrics(optimization ?? [], optimizationStart, splitAt, initialEquity),
+                        OutOfSampleMetrics = BuildMetrics(outOfSample ?? [], splitAt, outOfSampleEnd, initialEquity)
+                    };
+            })
+            .Where(item => item is not null)
+            .Cast<FuturesBacktestGateWalkForwardPerformance>()
+            .OrderByDescending(item => item.IsLiveAllowed)
+            .ThenByDescending(item => item.OutOfSampleMetrics.NetPnl)
+            .ThenBy(item => item.Key)
+            .ToArray();
+    }
+
+    private static Dictionary<string, BacktestTradeInternal[]> GroupTradesByGate(IReadOnlyList<BacktestTradeInternal> trades) =>
+        trades
+            .GroupBy(trade => BuildStrategyGateKey(trade.Pattern, trade.Symbol, trade.Side), StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.OrderBy(trade => trade.EntryTime).ToArray(), StringComparer.OrdinalIgnoreCase);
 
     private static bool IsOpenAtBacktestEnd(BacktestTradeInternal trade) =>
         string.Equals(trade.ExitReason, "BacktestEnd", StringComparison.OrdinalIgnoreCase);
 
     private bool IsBacktestLiveEntryAllowed(StrategyCandidate candidate, DateTimeOffset signalTime, TimeZoneInfo nyZone) =>
         IsLiveGateStrategyEnabled(candidate.StrategyName) &&
+        IsLiveDirectionAllowed(candidate.Side.ToString()) &&
         IsLiveHourAllowed(signalTime, nyZone);
 
     private bool IsLiveHourAllowed(DateTimeOffset signalTime, TimeZoneInfo nyZone)
@@ -2352,6 +2431,12 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         (string.Equals(strategyName, NYSweepReversalStrategy.Name, StringComparison.OrdinalIgnoreCase) &&
             _strategyRoutingOptions.NySweepLiveTradingEnabled);
 
+    private bool IsLiveDirectionAllowed(string direction)
+    {
+        var allowed = ParseAllowedTexts(_strategyRoutingOptions.LiveEligibleDirections);
+        return allowed.Count == 0 || allowed.Contains(direction.Trim());
+    }
+
     private static IReadOnlySet<int> ParseAllowedHours(string value) =>
         string.IsNullOrWhiteSpace(value)
             ? new HashSet<int>()
@@ -2359,6 +2444,13 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                 .Select(part => int.TryParse(part, out var hour) ? hour : -1)
                 .Where(hour => hour is >= 0 and <= 23)
                 .ToHashSet();
+
+    private static IReadOnlySet<string> ParseAllowedTexts(string value) =>
+        string.IsNullOrWhiteSpace(value)
+            ? new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            : value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Where(part => !string.IsNullOrWhiteSpace(part))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
     private static string BuildStrategyGateKey(string strategyName, string symbol, string direction) =>
         $"{NormalizeStrategyGateText(strategyName)}:{NormalizeStrategyGateSymbol(symbol)}:{NormalizeStrategyGateText(direction)}";
@@ -2390,6 +2482,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         var maxDrawdown = CalculateMaxDrawdown(trades, initialEquity);
         return new FuturesBacktestMetrics
         {
+            TradesCount = trades.Count,
             NetPnl = netPnl,
             MaxDrawdown = maxDrawdown,
             MaxDrawdownPercent = initialEquity > 0m ? maxDrawdown / initialEquity * 100m : 0m,
@@ -3330,6 +3423,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         string Direction,
         int TradesCount,
         decimal NetPnl,
+        decimal WinRate,
         decimal ProfitFactor,
         decimal AverageR);
 
