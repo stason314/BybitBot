@@ -92,6 +92,8 @@ public sealed class FuturesBacktestResult
 
     public decimal LiveIneligibleGateSizeMultiplier { get; init; }
 
+    public string LiveEligibleDirections { get; init; } = string.Empty;
+
     public int LiveAllowedStrategyGatesCount => EligibleStrategySymbolDirections.Count;
 
     public IReadOnlyList<string> EligibleSymbols { get; init; } = [];
@@ -107,6 +109,8 @@ public sealed class FuturesBacktestResult
     public IReadOnlyList<string> MarkToMarketProfitableStrategySymbolDirections { get; init; } = [];
 
     public IReadOnlyList<FuturesBacktestGateDiagnostic> GateDiagnostics { get; init; } = [];
+
+    public IReadOnlyList<FuturesBacktestGateWalkForwardPerformance> WalkForwardStrategyGates { get; init; } = [];
 
     public IReadOnlyList<FuturesBacktestSymbolPerformance> BestSymbols { get; init; } = [];
 
@@ -129,6 +133,8 @@ public sealed class FuturesBacktestResult
 
 public sealed class FuturesBacktestMetrics
 {
+    public int TradesCount { get; init; }
+
     public decimal NetPnl { get; init; }
 
     public decimal ClosedNetPnl { get; init; }
@@ -193,6 +199,23 @@ public sealed class FuturesBacktestGateDiagnostic
     public decimal OosMarkToMarketNetPnl { get; init; }
 
     public decimal OosMarkToMarketAverageR { get; init; }
+}
+
+public sealed class FuturesBacktestGateWalkForwardPerformance
+{
+    public string Key { get; init; } = string.Empty;
+
+    public string StrategyName { get; init; } = string.Empty;
+
+    public string Symbol { get; init; } = string.Empty;
+
+    public string Direction { get; init; } = string.Empty;
+
+    public bool IsLiveAllowed { get; init; }
+
+    public FuturesBacktestMetrics OptimizationMetrics { get; init; } = new();
+
+    public FuturesBacktestMetrics OutOfSampleMetrics { get; init; } = new();
 }
 
 public sealed class FuturesBacktestSymbolPerformance

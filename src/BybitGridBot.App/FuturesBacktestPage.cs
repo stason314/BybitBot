@@ -417,6 +417,7 @@ public static class FuturesBacktestPage
         `liveAllowedStrategyGatesCount=${Number(result.liveAllowedStrategyGatesCount || 0)}`,
         `liveEligibleGateSizeMultiplier=${Number(result.liveEligibleGateSizeMultiplier || 0)}`,
         `liveIneligibleGateSizeMultiplier=${Number(result.liveIneligibleGateSizeMultiplier || 0)}`,
+        `liveEligibleDirections=${result.liveEligibleDirections || '-'}`,
         `falseBreakoutCount=${result.falseBreakoutCount || 0}`,
         `trueBreakoutBlockedCount=${result.trueBreakoutBlockedCount || 0}`,
         '',
@@ -431,6 +432,8 @@ public static class FuturesBacktestPage
         `excludedStrategySymbolDirections(${(result.excludedStrategySymbolDirections || []).length})=${(result.excludedStrategySymbolDirections || []).join(', ') || '-'}`,
         `legacyEligibleSymbols_symbolOnly_notLiveGate(${(result.eligibleSymbols || []).length})=${(result.eligibleSymbols || []).join(', ') || '-'}`,
         `legacyExcludedSymbols_symbolOnly_notLiveGate(${(result.excludedSymbols || []).length})=${(result.excludedSymbols || []).join(', ') || '-'}`,
+        '',
+        walkForwardGateBlock(result.walkForwardStrategyGates || []),
         '',
         tableBlock('BEST_SYMBOLS', result.bestSymbols || []),
         tableBlock('WORST_SYMBOLS', result.worstSymbols || []),
@@ -449,6 +452,7 @@ public static class FuturesBacktestPage
     function metricBlock(name, item) {
       return [
         name,
+        `tradesCount=${Number(item.tradesCount || 0)}`,
         `netPnl=${Number(item.netPnl || 0)}`,
         `closedNetPnl=${Number(item.closedNetPnl ?? item.netPnl ?? 0)}`,
         `openUnrealizedPnl=${Number(item.openUnrealizedPnl || 0)}`,
@@ -462,6 +466,29 @@ public static class FuturesBacktestPage
         `averageR=${Number(item.averageR || 0)}`,
         `tradesPerDay=${Number(item.tradesPerDay || 0)}`
       ].join('\n');
+    }
+
+    function walkForwardGateBlock(items) {
+      if (!items.length) return 'WALK_FORWARD_STRATEGY_GATES\n-';
+      const lines = ['WALK_FORWARD_STRATEGY_GATES'];
+      for (const item of items.slice(0, 120)) {
+        const opt = item.optimizationMetrics || {};
+        const oos = item.outOfSampleMetrics || {};
+        lines.push([
+          item.isLiveAllowed ? 'ALLOWED' : 'excluded',
+          item.key || '-',
+          `optTrades=${Number(opt.tradesCount || 0)}`,
+          `optPnl=${Number(opt.netPnl || 0)}`,
+          `optPF=${Number(opt.profitFactor || 0)}`,
+          `optAvgR=${Number(opt.averageR || 0)}`,
+          `oosTrades=${Number(oos.tradesCount || 0)}`,
+          `oosPnl=${Number(oos.netPnl || 0)}`,
+          `oosPF=${Number(oos.profitFactor || 0)}`,
+          `oosAvgR=${Number(oos.averageR || 0)}`
+        ].join(' | '));
+      }
+
+      return lines.join('\n');
     }
 
     function tableBlock(name, items) {
