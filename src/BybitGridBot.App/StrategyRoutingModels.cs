@@ -193,6 +193,8 @@ public sealed class NyStrategyContext
 
     public IReadOnlyList<Candle> TurtleCandles { get; init; } = [];
 
+    public TurtleIndicatorSnapshot? TurtleIndicators { get; init; }
+
     public IReadOnlyList<Candle> BtcFifteenMinuteCandles { get; init; } = [];
 
     public NySessionRange Range { get; init; } = new();
@@ -202,4 +204,27 @@ public sealed class NyStrategyContext
     public decimal EntryNotionalUsdt { get; init; }
 
     public decimal RewardRisk { get; init; }
+}
+
+public sealed class TurtleIndicatorSnapshot
+{
+    public Candle Current { get; init; } = new(DateTimeOffset.MinValue, 0m, 0m, 0m, 0m, 0m, 0m);
+
+    public decimal EntryFastHigh { get; init; }
+
+    public decimal EntryFastLow { get; init; }
+
+    public decimal EntrySlowHigh { get; init; }
+
+    public decimal EntrySlowLow { get; init; }
+
+    public decimal ExitFastHigh { get; init; }
+
+    public decimal ExitFastLow { get; init; }
+
+    public decimal ExitSlowHigh { get; init; }
+
+    public decimal ExitSlowLow { get; init; }
+
+    public decimal TurtleN { get; init; }
 }

@@ -1,6 +1,7 @@
 using BybitGridBot.Bybit;
 using BybitGridBot.Domain;
 using Microsoft.Extensions.Options;
+using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -29,7 +30,6 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
     private const string FifteenMinuteInterval = "15";
     private const int ExpectedNySessionFiveMinuteCandles = 96;
     private const int KlinePageLimit = 1000;
-    private const int MaxConcurrency = 2;
 
     private readonly IBybitRestClient _bybitRestClient;
     private readonly FuturesBacktestOptions _backtestOptions;
@@ -204,7 +204,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             var settings = ResolveSettings(request);
             var periodEnd = DateTimeOffset.UtcNow;
             var periodStart = periodEnd.AddDays(-settings.Days);
-            SetStatus($"Loading top {settings.Symbols} Bybit USDT perpetual symbols", 2m);
+            SetStatus($"Loading top {settings.Symbols} Bybit USDT perpetual symbols ({settings.Mode})", 2m);
 
             var instruments = await _bybitRestClient.GetInstrumentsAsync(Category, cancellationToken);
             var tradable = instruments
@@ -218,33 +218,41 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                 .Select(ticker => ticker.Symbol)
                 .ToArray();
 
-            var btc15m = await FetchHistoricalCandlesAsync("BTCUSDT", FifteenMinuteInterval, periodStart, periodEnd, cancellationToken);
-            var allTrades = new List<BacktestTradeInternal>();
-            var falseBreakoutCount = 0;
-            var trueBreakoutBlockedCount = 0;
+            var btc15m = settings.Mode == FuturesBacktestMode.TurtleOnly
+                ? Array.Empty<Candle>()
+                : await FetchHistoricalCandlesAsync("BTCUSDT", FifteenMinuteInterval, periodStart, periodEnd, cancellationToken);
+            var btc15mSeries = BacktestCandleSeries.Create(btc15m, 15);
+            var outputs = new ConcurrentBag<SymbolBacktestOutput>();
             var processed = 0;
-            using var throttler = new SemaphoreSlim(MaxConcurrency);
-            var tasks = symbols.Select(async symbol =>
+            await Parallel.ForEachAsync(
+                symbols,
+                new ParallelOptions
+                {
+                    MaxDegreeOfParallelism = settings.MaxConcurrency,
+                    CancellationToken = cancellationToken
+                },
+                async (symbol, token) =>
             {
-                await throttler.WaitAsync(cancellationToken);
                 try
                 {
-                    return await BacktestSymbolAsync(symbol, periodStart, periodEnd, btc15m, settings, cancellationToken);
+                    outputs.Add(await BacktestSymbolAsync(symbol, periodStart, periodEnd, btc15mSeries, settings, token));
                 }
                 catch (Exception exception) when (exception is not OperationCanceledException)
                 {
                     _logger.LogWarning(exception, "Backtest failed for {Symbol}", symbol);
-                    return new SymbolBacktestOutput(symbol, [], 0, 0);
+                    outputs.Add(new SymbolBacktestOutput(symbol, [], 0, 0));
                 }
                 finally
                 {
                     var done = Interlocked.Increment(ref processed);
                     SetStatus($"Processed {done}/{symbols.Length} symbols", 5m + 90m * done / Math.Max(1, symbols.Length));
-                    throttler.Release();
                 }
             });
 
-            foreach (var output in await Task.WhenAll(tasks))
+            var allTrades = new List<BacktestTradeInternal>();
+            var falseBreakoutCount = 0;
+            var trueBreakoutBlockedCount = 0;
+            foreach (var output in outputs)
             {
                 allTrades.AddRange(output.Trades);
                 falseBreakoutCount += output.FalseBreakoutCount;
@@ -314,16 +322,34 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         string symbol,
         DateTimeOffset periodStart,
         DateTimeOffset periodEnd,
-        IReadOnlyList<Candle> btc15m,
+        BacktestCandleSeries btc15m,
         BacktestRunSettings settings,
         CancellationToken cancellationToken)
     {
         var fiveMinuteCandles = await FetchHistoricalCandlesAsync(symbol, FiveMinuteInterval, periodStart, periodEnd, cancellationToken);
-        var fifteenMinuteCandles = await FetchHistoricalCandlesAsync(symbol, FifteenMinuteInterval, periodStart, periodEnd, cancellationToken);
-        var turtleCandles = _strategyRoutingOptions.SignalSelectionMode == SignalSelectionMode.ScoreBased
+        var fiveMinuteSeries = BacktestCandleSeries.Create(fiveMinuteCandles, 5);
+        if (fiveMinuteSeries.Count < 500)
+        {
+            return new SymbolBacktestOutput(symbol, [], 0, 0);
+        }
+
+        var shouldLoadTurtleCandles = settings.Mode == FuturesBacktestMode.TurtleOnly ||
+            _strategyRoutingOptions.SignalSelectionMode == SignalSelectionMode.ScoreBased;
+        var turtleCandles = shouldLoadTurtleCandles
             ? await FetchHistoricalCandlesAsync(symbol, _turtleOptions.Timeframe, periodStart.AddDays(-10), periodEnd, cancellationToken)
             : Array.Empty<Candle>();
-        if (fiveMinuteCandles.Count < 500 || fifteenMinuteCandles.Count < 200)
+        var turtleSeries = BacktestCandleSeries.Create(turtleCandles, ResolveIntervalMinutes(_turtleOptions.Timeframe));
+        var turtleIndicators = PrecomputedTurtleIndicators.Build(turtleSeries.Candles, _turtleOptions);
+        var fiveMinuteTurtleExits = PrecomputedTurtleChannelExits.Build(fiveMinuteSeries.Candles, _turtleOptions);
+
+        if (settings.Mode == FuturesBacktestMode.TurtleOnly)
+        {
+            return BacktestTurtleOnlySymbol(symbol, periodStart, fiveMinuteSeries, turtleSeries, turtleIndicators, fiveMinuteTurtleExits, settings);
+        }
+
+        var fifteenMinuteCandles = await FetchHistoricalCandlesAsync(symbol, FifteenMinuteInterval, periodStart, periodEnd, cancellationToken);
+        var fifteenMinuteSeries = BacktestCandleSeries.Create(fifteenMinuteCandles, 15);
+        if (fifteenMinuteSeries.Count < 200)
         {
             return new SymbolBacktestOutput(symbol, [], 0, 0);
         }
@@ -332,7 +358,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         var trades = new List<BacktestTradeInternal>();
         var falseBreakoutCount = 0;
         var trueBreakoutBlockedCount = 0;
-        var groupedByDay = fiveMinuteCandles
+        var groupedByDay = fiveMinuteSeries.Candles
             .GroupBy(candle => DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(candle.OpenTime, nyZone).Date))
             .OrderBy(group => group.Key);
 
@@ -356,10 +382,164 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                 continue;
             }
 
-            BacktestDay(symbol, session, fiveMinuteCandles, fifteenMinuteCandles, turtleCandles, btc15m, settings, nyZone, trades, ref falseBreakoutCount, ref trueBreakoutBlockedCount);
+            BacktestDay(
+                symbol,
+                session,
+                fiveMinuteSeries,
+                fifteenMinuteSeries,
+                turtleSeries,
+                turtleIndicators,
+                btc15m,
+                fiveMinuteTurtleExits,
+                settings,
+                nyZone,
+                trades,
+                ref falseBreakoutCount,
+                ref trueBreakoutBlockedCount);
         }
 
         return new SymbolBacktestOutput(symbol, trades, falseBreakoutCount, trueBreakoutBlockedCount);
+    }
+
+    private SymbolBacktestOutput BacktestTurtleOnlySymbol(
+        string symbol,
+        DateTimeOffset periodStart,
+        BacktestCandleSeries fiveMinuteCandles,
+        BacktestCandleSeries turtleCandles,
+        PrecomputedTurtleIndicators indicators,
+        PrecomputedTurtleChannelExits turtleExits,
+        BacktestRunSettings settings)
+    {
+        var minCandles = Math.Max(_turtleOptions.EntrySlowPeriod, _turtleOptions.AtrPeriod) + 1;
+        if (turtleCandles.Count < minCandles || fiveMinuteCandles.Count < 2)
+        {
+            return new SymbolBacktestOutput(symbol, [], 0, 0);
+        }
+
+        var trades = new List<BacktestTradeInternal>();
+        var equity = settings.InitialEquityUsdt;
+        bool? previousS1WasProfitable = null;
+        for (var index = minCandles; index < turtleCandles.Count; index++)
+        {
+            var current = turtleCandles.Candles[index];
+            if (current.OpenTime < periodStart)
+            {
+                continue;
+            }
+
+            if (HasOpenBacktestTrade(trades, current.OpenTime))
+            {
+                continue;
+            }
+
+            var signal = TryBuildTurtleOnlySignal(symbol, current, indicators, index);
+            if (signal is null)
+            {
+                continue;
+            }
+
+            if (signal.TurtleSystem == "S1" && previousS1WasProfitable == true)
+            {
+                continue;
+            }
+
+            var trade = SimulateTrade(
+                symbol,
+                signal,
+                fiveMinuteCandles.Candles,
+                fiveMinuteCandles.Candles,
+                turtleExits,
+                0,
+                settings,
+                equity);
+            trades.Add(trade);
+            equity += trade.NetPnl;
+            if (signal.TurtleSystem == "S1")
+            {
+                previousS1WasProfitable = trade.NetPnl > 0m;
+            }
+        }
+
+        return new SymbolBacktestOutput(symbol, trades, 0, 0);
+    }
+
+    private NySessionSignal? TryBuildTurtleOnlySignal(
+        string symbol,
+        Candle current,
+        PrecomputedTurtleIndicators indicators,
+        int index)
+    {
+        var candidate = ResolvePrecomputedTurtleSignal(current, indicators, index);
+        if (candidate.Side == StrategySide.None)
+        {
+            return null;
+        }
+
+        var nValue = indicators.TurtleN[index];
+        if (nValue <= 0m)
+        {
+            return null;
+        }
+
+        var stopLoss = candidate.Side == StrategySide.Long
+            ? current.Close - nValue * _turtleOptions.StopAtrMultiplier
+            : current.Close + nValue * _turtleOptions.StopAtrMultiplier;
+        var risk = Math.Abs(current.Close - stopLoss);
+        if (risk <= 0m)
+        {
+            return null;
+        }
+
+        return new NySessionSignal
+        {
+            Side = candidate.Side.ToString(),
+            EntryPrice = current.Close,
+            StopLoss = stopLoss,
+            TakeProfit = 0m,
+            Boundary = candidate.BreakoutLevel,
+            StopDistancePercent = current.Close > 0m ? risk / current.Close * 100m : 0m,
+            Pattern = TurtleTrendStrategy.Name,
+            BreakoutCandleOpenTime = current.OpenTime,
+            SignalCandleOpenTime = current.OpenTime,
+            BreakoutVolumeRatio = 1m,
+            TurtleSystem = candidate.System,
+            TurtleSignalId = $"{symbol}:{candidate.System}:{candidate.Side}:{current.OpenTime.UtcDateTime:yyyyMMddHHmm}:{candidate.BreakoutLevel:0.########}",
+            TurtleN = nValue,
+            TurtleBreakoutLevel = candidate.BreakoutLevel,
+            Reason = $"Turtle-only {candidate.System} {candidate.Side} breakout. Close={current.Close:F8}, breakoutLevel={candidate.BreakoutLevel:F8}, N={nValue:F8}."
+        };
+    }
+
+    private static PrecomputedTurtleSignal ResolvePrecomputedTurtleSignal(
+        Candle current,
+        PrecomputedTurtleIndicators indicators,
+        int index)
+    {
+        var slowHigh = indicators.EntrySlowHigh[index];
+        var slowLow = indicators.EntrySlowLow[index];
+        if (slowHigh > 0m && current.Close > slowHigh)
+        {
+            return new PrecomputedTurtleSignal("S2", StrategySide.Long, slowHigh);
+        }
+
+        if (slowLow > 0m && current.Close < slowLow)
+        {
+            return new PrecomputedTurtleSignal("S2", StrategySide.Short, slowLow);
+        }
+
+        var fastHigh = indicators.EntryFastHigh[index];
+        var fastLow = indicators.EntryFastLow[index];
+        if (fastHigh > 0m && current.Close > fastHigh)
+        {
+            return new PrecomputedTurtleSignal("S1", StrategySide.Long, fastHigh);
+        }
+
+        if (fastLow > 0m && current.Close < fastLow)
+        {
+            return new PrecomputedTurtleSignal("S1", StrategySide.Short, fastLow);
+        }
+
+        return new PrecomputedTurtleSignal(string.Empty, StrategySide.None, 0m);
     }
 
     private static bool IsNySessionComplete(DateOnly nyDate, TimeZoneInfo nyZone, DateTimeOffset periodEnd)
@@ -373,10 +553,12 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
     private void BacktestDay(
         string symbol,
         IReadOnlyList<Candle> session,
-        IReadOnlyList<Candle> allFiveMinuteCandles,
-        IReadOnlyList<Candle> fifteenMinuteCandles,
-        IReadOnlyList<Candle> turtleCandles,
-        IReadOnlyList<Candle> btc15m,
+        BacktestCandleSeries allFiveMinuteCandles,
+        BacktestCandleSeries fifteenMinuteCandles,
+        BacktestCandleSeries turtleCandles,
+        PrecomputedTurtleIndicators turtleIndicators,
+        BacktestCandleSeries btc15m,
+        PrecomputedTurtleChannelExits turtleExits,
         BacktestRunSettings settings,
         TimeZoneInfo nyZone,
         List<BacktestTradeInternal> trades,
@@ -394,6 +576,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         var processedScoreSignals = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var processedBreakoutClassifications = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         bool? previousS1WasProfitable = null;
+        var realizedPnl = trades.Sum(trade => trade.NetPnl);
 
         for (var i = 1; i < session.Count; i++)
         {
@@ -402,7 +585,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             var isRangeBuilding = ny.TimeOfDay < TimeSpan.FromHours(12);
             if (_strategyRoutingOptions.SignalSelectionMode == SignalSelectionMode.ScoreBased)
             {
-                var decision = BuildScoreBasedBacktestDecision(symbol, session, allFiveMinuteCandles, i, fifteenMinuteCandles, turtleCandles, btc15m, settings);
+                var decision = BuildScoreBasedBacktestDecision(symbol, session, allFiveMinuteCandles, i, fifteenMinuteCandles, turtleCandles, turtleIndicators, btc15m, settings);
                 TrackScoreBasedBreakoutCounters(decision, session[i], processedBreakoutClassifications, ref falseBreakoutCount, ref trueBreakoutBlockedCount);
 
                 if (decision.IsTradeAllowed &&
@@ -429,9 +612,10 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                         continue;
                     }
 
-                    var accountEquity = settings.InitialEquityUsdt + trades.Sum(trade => trade.NetPnl);
-                    var trade = SimulateTrade(symbol, scoreSignal, session, allFiveMinuteCandles, i + 1, settings, accountEquity);
+                    var accountEquity = settings.InitialEquityUsdt + realizedPnl;
+                    var trade = SimulateTrade(symbol, scoreSignal, session, allFiveMinuteCandles.Candles, turtleExits, i + 1, settings, accountEquity);
                     trades.Add(trade);
+                    realizedPnl += trade.NetPnl;
                     if (IsTurtleBacktestSignal(scoreSignal) && scoreSignal.TurtleSystem == "S1")
                     {
                         previousS1WasProfitable = trade.NetPnl > 0m;
@@ -475,7 +659,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                     falseBreakoutCount++;
                 }
 
-                var filter = EvaluateBacktestFilters(signal, session.Take(i + 1).ToArray(), fifteenMinuteCandles, btc15m);
+                var filter = EvaluateBacktestFilters(signal, CopyPrefix(session, i + 1), fifteenMinuteCandles.Candles, btc15m.Candles);
                 if (filter.IsTrueBreakoutBlocked)
                 {
                     trueBreakoutBlockedCount++;
@@ -483,9 +667,10 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
 
                 if (filter.IsAllowed)
                 {
-                    var accountEquity = settings.InitialEquityUsdt + trades.Sum(trade => trade.NetPnl);
-                    var trade = SimulateTrade(symbol, signal, session, allFiveMinuteCandles, i + 1, settings, accountEquity);
+                    var accountEquity = settings.InitialEquityUsdt + realizedPnl;
+                    var trade = SimulateTrade(symbol, signal, session, allFiveMinuteCandles.Candles, turtleExits, i + 1, settings, accountEquity);
                     trades.Add(trade);
+                    realizedPnl += trade.NetPnl;
                     i = trade.ExitIndex;
                     upperStop = null;
                     upperSweepAt = null;
@@ -522,34 +707,28 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
     private StrategyDecision BuildScoreBasedBacktestDecision(
         string symbol,
         IReadOnlyList<Candle> session,
-        IReadOnlyList<Candle> allFiveMinuteCandles,
+        BacktestCandleSeries allFiveMinuteCandles,
         int index,
-        IReadOnlyList<Candle> fifteenMinuteCandles,
-        IReadOnlyList<Candle> turtleCandles,
-        IReadOnlyList<Candle> btc15m,
+        BacktestCandleSeries fifteenMinuteCandles,
+        BacktestCandleSeries turtleCandles,
+        PrecomputedTurtleIndicators turtleIndicators,
+        BacktestCandleSeries btc15m,
         BacktestRunSettings settings)
     {
         var current = session[index];
         var currentCloseTime = current.OpenTime.AddMinutes(5);
-        var fiveMinuteCandles = session.Take(index + 1).ToArray();
+        var fiveMinuteCandles = CopyPrefix(session, index + 1);
         var range = BuildBacktestRange(session, allFiveMinuteCandles, index);
         var turtleInterval = ParseIntervalMinutes(_turtleOptions.Timeframe, 60);
+        var turtleClosedCount = turtleCandles.CountClosedUntil(currentCloseTime, turtleInterval);
         var context = new NyStrategyContext
         {
             Symbol = symbol,
             FiveMinuteCandles = fiveMinuteCandles,
-            FifteenMinuteCandles = fifteenMinuteCandles
-                .Where(candle => candle.OpenTime.AddMinutes(15) <= currentCloseTime)
-                .OrderBy(candle => candle.OpenTime)
-                .ToArray(),
-            TurtleCandles = turtleCandles
-                .Where(candle => candle.OpenTime.AddMinutes(turtleInterval) <= currentCloseTime)
-                .OrderBy(candle => candle.OpenTime)
-                .ToArray(),
-            BtcFifteenMinuteCandles = btc15m
-                .Where(candle => candle.OpenTime.AddMinutes(15) <= currentCloseTime)
-                .OrderBy(candle => candle.OpenTime)
-                .ToArray(),
+            FifteenMinuteCandles = fifteenMinuteCandles.CopyClosedUntil(currentCloseTime),
+            TurtleCandles = turtleCandles.CopyFirst(turtleClosedCount),
+            TurtleIndicators = BuildTurtleIndicatorSnapshot(turtleCandles, turtleIndicators, turtleClosedCount),
+            BtcFifteenMinuteCandles = btc15m.CopyClosedUntil(currentCloseTime),
             Range = range,
             Now = currentCloseTime,
             EntryNotionalUsdt = settings.EntryNotionalUsdt,
@@ -595,38 +774,50 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
 
     private NySessionRange BuildBacktestRange(
         IReadOnlyList<Candle> session,
-        IReadOnlyList<Candle> allFiveMinuteCandles,
+        BacktestCandleSeries allFiveMinuteCandles,
         int index)
     {
         var sessionStart = session[0].OpenTime;
         var rangeStart = sessionStart;
         var rangeEnd = sessionStart.AddHours(4);
-        var currentTime = session[index].OpenTime.AddMinutes(5);
-        var currentCandles = session.Take(index + 1).ToArray();
-        var allClosed = allFiveMinuteCandles
-            .Where(candle => candle.OpenTime.AddMinutes(5) <= currentTime)
-            .OrderBy(candle => candle.OpenTime)
-            .ToArray();
-        var rangeCandles = _strategyRoutingOptions.NyRangeMode switch
-        {
-            NyRangeMode.LockedSessionRange => currentCandles
-                .Where(candle => candle.OpenTime < rangeEnd)
-                .DefaultIfEmpty(currentCandles[0])
-                .ToArray(),
-            NyRangeMode.PreSessionReferenceRange => allClosed
-                .Where(candle => candle.OpenTime >= rangeStart.AddHours(-4) && candle.OpenTime < rangeStart)
-                .DefaultIfEmpty(currentCandles[0])
-                .ToArray(),
-            _ => currentCandles.Where(candle => candle.OpenTime < rangeEnd).DefaultIfEmpty(currentCandles[0]).ToArray()
-        };
+        var currentCandles = CopyPrefix(session, index + 1);
+        var rangeCandles = _strategyRoutingOptions.NyRangeMode == NyRangeMode.PreSessionReferenceRange
+            ? allFiveMinuteCandles.CopyWindow(rangeStart.AddHours(-4), rangeStart, currentCandles[0])
+            : CopyWindow(currentCandles, currentCandles[0].OpenTime, rangeEnd, currentCandles[0]);
 
         return new NySessionRange
         {
-            Upper = rangeCandles.Max(candle => candle.High),
-            Lower = rangeCandles.Min(candle => candle.Low),
+            Upper = MaxHigh(rangeCandles),
+            Lower = MinLow(rangeCandles),
             Mode = _strategyRoutingOptions.NyRangeMode,
             RangeStartUtc = _strategyRoutingOptions.NyRangeMode == NyRangeMode.PreSessionReferenceRange ? rangeStart.AddHours(-4) : rangeStart,
             RangeEndUtc = _strategyRoutingOptions.NyRangeMode == NyRangeMode.PreSessionReferenceRange ? rangeStart : rangeEnd
+        };
+    }
+
+    private static TurtleIndicatorSnapshot? BuildTurtleIndicatorSnapshot(
+        BacktestCandleSeries turtleCandles,
+        PrecomputedTurtleIndicators indicators,
+        int closedCount)
+    {
+        if (closedCount <= 0)
+        {
+            return null;
+        }
+
+        var index = closedCount - 1;
+        return new TurtleIndicatorSnapshot
+        {
+            Current = turtleCandles.Candles[index],
+            EntryFastHigh = indicators.EntryFastHigh[index],
+            EntryFastLow = indicators.EntryFastLow[index],
+            EntrySlowHigh = indicators.EntrySlowHigh[index],
+            EntrySlowLow = indicators.EntrySlowLow[index],
+            ExitFastHigh = indicators.ExitFastHigh[index],
+            ExitFastLow = indicators.ExitFastLow[index],
+            ExitSlowHigh = indicators.ExitSlowHigh[index],
+            ExitSlowLow = indicators.ExitSlowLow[index],
+            TurtleN = indicators.TurtleN[index]
         };
     }
 
@@ -636,8 +827,8 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         var current = session[index];
         var takeProfit = intent.TakeProfit ?? 0m;
         var boundary = candidate.Side == StrategySide.Short
-            ? session.Take(index + 1).Max(candle => candle.High)
-            : session.Take(index + 1).Min(candle => candle.Low);
+            ? MaxHigh(session, index)
+            : MinLow(session, index);
         var stopDistancePercent = intent.EntryPrice > 0m
             ? Math.Abs(intent.EntryPrice - intent.StopLoss) / intent.EntryPrice * 100m
             : 0m;
@@ -721,7 +912,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                     candle.Close,
                     candle.High,
                     "Upper sweep reclaimed.",
-                    session.Take(index + 1).ToArray());
+                    CopyPrefix(session, index + 1));
             }
         }
 
@@ -744,7 +935,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                     candle.Close,
                     upperStop.Value,
                     "Upper breakout failed.",
-                    session.Take(index + 1).ToArray());
+                    CopyPrefix(session, index + 1));
             }
         }
 
@@ -767,11 +958,11 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                     candle.Close,
                     lowerStop.Value,
                     "Lower breakout failed.",
-                    session.Take(index + 1).ToArray());
+                    CopyPrefix(session, index + 1));
             }
         }
 
-        var closed = session.Take(index + 1).ToArray();
+        var closed = CopyPrefix(session, index + 1);
         return TryFindEngulfingSignal(closed, upperBoundary, lowerBoundary) ??
             TryFindPinbarSignal(closed, upperBoundary, lowerBoundary) ??
             TryFindThreeBarContinuationSignal(closed, upperBoundary, lowerBoundary) ??
@@ -1634,6 +1825,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         NySessionSignal signal,
         IReadOnlyList<Candle> session,
         IReadOnlyList<Candle> allFiveMinuteCandles,
+        PrecomputedTurtleChannelExits turtleExits,
         int startIndex,
         BacktestRunSettings settings,
         decimal accountEquityUsdt)
@@ -1642,7 +1834,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             signal.TakeProfit <= 0m;
         if (useTurtleChannelExit)
         {
-            return SimulateTurtleTrade(symbol, signal, session, allFiveMinuteCandles, settings, accountEquityUsdt);
+            return SimulateTurtleTrade(symbol, signal, session, allFiveMinuteCandles, turtleExits, settings, accountEquityUsdt);
         }
 
         var isShort = signal.Side == "Short";
@@ -1739,14 +1931,15 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         NySessionSignal signal,
         IReadOnlyList<Candle> session,
         IReadOnlyList<Candle> allFiveMinuteCandles,
+        PrecomputedTurtleChannelExits turtleExits,
         BacktestRunSettings settings,
         decimal accountEquityUsdt)
     {
-        var candles = allFiveMinuteCandles.OrderBy(candle => candle.OpenTime).ToArray();
-        var startIndex = Array.FindIndex(candles, candle => candle.OpenTime > signal.SignalCandleOpenTime);
+        var candles = allFiveMinuteCandles;
+        var startIndex = FindFirstOpenTimeAfter(candles, signal.SignalCandleOpenTime);
         if (startIndex < 0)
         {
-            startIndex = candles.Length - 1;
+            startIndex = candles.Count - 1;
         }
 
         var isShort = signal.Side == "Short";
@@ -1782,7 +1975,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         var exitIndex = ResolveSessionExitIndex(session, exitTime);
         var units = 1;
 
-        for (var i = startIndex; i < candles.Length; i++)
+        for (var i = startIndex; i < candles.Count; i++)
         {
             var candle = candles[i];
             if (isShort)
@@ -1796,7 +1989,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                     break;
                 }
 
-                if (IsBacktestTurtleChannelExit(candles, i, StrategySide.Short, signal.TurtleSystem))
+                if (IsBacktestTurtleChannelExit(candles, turtleExits, i, StrategySide.Short, signal.TurtleSystem))
                 {
                     exitPrice = candle.Close;
                     exitTime = candle.OpenTime;
@@ -1829,7 +2022,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                     break;
                 }
 
-                if (IsBacktestTurtleChannelExit(candles, i, StrategySide.Long, signal.TurtleSystem))
+                if (IsBacktestTurtleChannelExit(candles, turtleExits, i, StrategySide.Long, signal.TurtleSystem))
                 {
                     exitPrice = candle.Close;
                     exitTime = candle.OpenTime;
@@ -1901,28 +2094,22 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             exitIndex);
     }
 
-    private bool IsBacktestTurtleChannelExit(IReadOnlyList<Candle> candles, int index, StrategySide side, string turtleSystem)
+    private bool IsBacktestTurtleChannelExit(
+        IReadOnlyList<Candle> candles,
+        PrecomputedTurtleChannelExits exits,
+        int index,
+        StrategySide side,
+        string turtleSystem)
     {
         if (!_turtleOptions.UseChannelExit)
         {
             return false;
         }
 
-        var exitPeriod = string.Equals(turtleSystem, "S2", StringComparison.OrdinalIgnoreCase)
-            ? _turtleOptions.ExitSlowPeriod
-            : _turtleOptions.ExitFastPeriod;
-        var exitBars = Math.Max(
-            exitPeriod,
-            exitPeriod * ParseIntervalMinutes(_turtleOptions.Timeframe, 60) / 5);
-        if (index + 1 < exitBars + 2)
-        {
-            return false;
-        }
-
         var current = candles[index];
-        var closed = candles.Take(index + 1).ToArray();
-        var exitLow = TradingIndicatorMath.DonchianLow(closed, exitBars);
-        var exitHigh = TradingIndicatorMath.DonchianHigh(closed, exitBars);
+        var isSlow = string.Equals(turtleSystem, "S2", StringComparison.OrdinalIgnoreCase);
+        var exitLow = exits.GetLow(index, isSlow);
+        var exitHigh = exits.GetHigh(index, isSlow);
         return side == StrategySide.Long
             ? exitLow > 0m && current.Close < exitLow
             : exitHigh > 0m && current.Close > exitHigh;
@@ -2075,7 +2262,9 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         var publicOpenAtEndTrades = openAtBacktestEndTrades.Select(ToPublicTrade).ToArray();
         return new FuturesBacktestResult
         {
-            StrategyName = _strategyRoutingOptions.SignalSelectionMode == SignalSelectionMode.ScoreBased
+            StrategyName = settings.Mode == FuturesBacktestMode.TurtleOnly
+                ? "Turtle-only Donchian S1/S2 trend backtest"
+                : _strategyRoutingOptions.SignalSelectionMode == SignalSelectionMode.ScoreBased
                 ? "NY 08:00 Regime Router: Sweep Reversal + Turtle Trend + Breakout Retest with candle confirmations"
                 : "NY 08:00 4H Sweep Reversal + Engulfing + Pinbar + 3-Bar Continuation + 3-Bar Reversal + Breakout Candle + Shrinking Candles",
             PeriodStart = periodStart,
@@ -2512,12 +2701,22 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
     private BacktestRunSettings ResolveSettings(FuturesBacktestRequest request) => new(
         Math.Clamp(request.Days ?? _backtestOptions.Days, 1, 365),
         Math.Clamp(request.Symbols ?? _backtestOptions.Symbols, 1, 200),
+        Math.Clamp(_backtestOptions.MaxConcurrency, 1, 20),
+        ResolveBacktestMode(request.Mode, _backtestOptions.Mode),
         request.EntryNotionalUsdt ?? _backtestOptions.EntryNotionalUsdt,
         request.TakerFeePercent ?? _backtestOptions.TakerFeePercent,
         request.MakerFeePercent ?? _backtestOptions.MakerFeePercent,
         request.SlippagePercent ?? _backtestOptions.SlippagePercent,
         request.FundingPercentPer8h ?? _backtestOptions.FundingPercentPer8h,
         _backtestOptions.InitialEquityUsdt);
+
+    private static FuturesBacktestMode ResolveBacktestMode(string? requestMode, string optionsMode)
+    {
+        var value = string.IsNullOrWhiteSpace(requestMode) ? optionsMode : requestMode;
+        return Enum.TryParse<FuturesBacktestMode>(value, ignoreCase: true, out var mode)
+            ? mode
+            : FuturesBacktestMode.ScoreBasedRouter;
+    }
 
     private void SetStatus(string message, decimal progressPercent)
     {
@@ -2610,20 +2809,27 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
 
     private static decimal CalculateBreakoutVolumeRatio(IReadOnlyList<Candle> candles, DateTimeOffset breakoutOpenTime)
     {
-        var ordered = candles.OrderBy(candle => candle.OpenTime).ToArray();
+        var ordered = EnsureOrdered(candles);
         var index = Array.FindIndex(ordered, candle => candle.OpenTime == breakoutOpenTime);
         if (index < 0)
         {
             return 1m;
         }
 
-        var previous = ordered.Take(index).TakeLast(20).ToArray();
-        if (previous.Length == 0)
+        var start = Math.Max(0, index - 20);
+        var count = index - start;
+        if (count <= 0)
         {
             return 1m;
         }
 
-        var average = previous.Average(candle => candle.Volume);
+        var sum = 0m;
+        for (var i = start; i < index; i++)
+        {
+            sum += ordered[i].Volume;
+        }
+
+        var average = sum / count;
         return average > 0m ? ordered[index].Volume / average : 1m;
     }
 
@@ -2686,15 +2892,429 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         }
     }
 
+    private static Candle[] CopyPrefix(IReadOnlyList<Candle> candles, int count)
+    {
+        count = Math.Clamp(count, 0, candles.Count);
+        var result = new Candle[count];
+        for (var i = 0; i < count; i++)
+        {
+            result[i] = candles[i];
+        }
+
+        return result;
+    }
+
+    private static Candle[] CopyWindow(
+        IReadOnlyList<Candle> candles,
+        DateTimeOffset startInclusive,
+        DateTimeOffset endExclusive,
+        Candle fallback)
+    {
+        var result = new List<Candle>();
+        for (var i = 0; i < candles.Count; i++)
+        {
+            var openTime = candles[i].OpenTime;
+            if (openTime >= startInclusive && openTime < endExclusive)
+            {
+                result.Add(candles[i]);
+            }
+        }
+
+        return result.Count > 0 ? result.ToArray() : [fallback];
+    }
+
+    private static decimal MaxHigh(IReadOnlyList<Candle> candles)
+    {
+        var value = candles.Count > 0 ? candles[0].High : 0m;
+        for (var i = 1; i < candles.Count; i++)
+        {
+            value = decimal.Max(value, candles[i].High);
+        }
+
+        return value;
+    }
+
+    private static decimal MaxHigh(IReadOnlyList<Candle> candles, int inclusiveEnd)
+    {
+        if (candles.Count == 0)
+        {
+            return 0m;
+        }
+
+        inclusiveEnd = Math.Clamp(inclusiveEnd, 0, candles.Count - 1);
+        var value = candles[0].High;
+        for (var i = 1; i <= inclusiveEnd; i++)
+        {
+            value = decimal.Max(value, candles[i].High);
+        }
+
+        return value;
+    }
+
+    private static decimal MinLow(IReadOnlyList<Candle> candles)
+    {
+        var value = candles.Count > 0 ? candles[0].Low : 0m;
+        for (var i = 1; i < candles.Count; i++)
+        {
+            value = decimal.Min(value, candles[i].Low);
+        }
+
+        return value;
+    }
+
+    private static decimal MinLow(IReadOnlyList<Candle> candles, int inclusiveEnd)
+    {
+        if (candles.Count == 0)
+        {
+            return 0m;
+        }
+
+        inclusiveEnd = Math.Clamp(inclusiveEnd, 0, candles.Count - 1);
+        var value = candles[0].Low;
+        for (var i = 1; i <= inclusiveEnd; i++)
+        {
+            value = decimal.Min(value, candles[i].Low);
+        }
+
+        return value;
+    }
+
+    private static int FindFirstOpenTimeAfter(IReadOnlyList<Candle> candles, DateTimeOffset openTime)
+    {
+        var low = 0;
+        var high = candles.Count;
+        while (low < high)
+        {
+            var mid = low + (high - low) / 2;
+            if (candles[mid].OpenTime <= openTime)
+            {
+                low = mid + 1;
+            }
+            else
+            {
+                high = mid;
+            }
+        }
+
+        return low < candles.Count ? low : -1;
+    }
+
+    private static Candle[] EnsureOrdered(IReadOnlyList<Candle> candles)
+    {
+        if (candles.Count < 2)
+        {
+            return candles.ToArray();
+        }
+
+        for (var i = 1; i < candles.Count; i++)
+        {
+            if (candles[i - 1].OpenTime > candles[i].OpenTime)
+            {
+                return candles.OrderBy(candle => candle.OpenTime).ToArray();
+            }
+        }
+
+        return candles as Candle[] ?? candles.ToArray();
+    }
+
     private sealed record BacktestRunSettings(
         int Days,
         int Symbols,
+        int MaxConcurrency,
+        FuturesBacktestMode Mode,
         decimal EntryNotionalUsdt,
         decimal TakerFeePercent,
         decimal MakerFeePercent,
         decimal SlippagePercent,
         decimal FundingPercentPer8h,
         decimal InitialEquityUsdt);
+
+    private sealed class BacktestCandleSeries
+    {
+        private BacktestCandleSeries(Candle[] candles, int intervalMinutes)
+        {
+            Candles = candles;
+            IntervalMinutes = intervalMinutes;
+        }
+
+        public Candle[] Candles { get; }
+
+        public int IntervalMinutes { get; }
+
+        public int Count => Candles.Length;
+
+        public static BacktestCandleSeries Create(IReadOnlyList<Candle> candles, int intervalMinutes) =>
+            new(EnsureOrdered(candles), intervalMinutes);
+
+        public Candle[] CopyClosedUntil(DateTimeOffset closedAt) =>
+            CopyClosedUntil(closedAt, IntervalMinutes);
+
+        public Candle[] CopyFirst(int count)
+        {
+            count = Math.Clamp(count, 0, Candles.Length);
+            var result = new Candle[count];
+            Array.Copy(Candles, result, count);
+            return result;
+        }
+
+        public Candle[] CopyClosedUntil(DateTimeOffset closedAt, int intervalMinutes)
+        {
+            var count = CountClosedUntil(closedAt, intervalMinutes);
+            return CopyFirst(count);
+        }
+
+        public Candle[] CopyWindow(DateTimeOffset startInclusive, DateTimeOffset endExclusive, Candle fallback)
+        {
+            var start = LowerBoundOpenTime(startInclusive);
+            var end = LowerBoundOpenTime(endExclusive);
+            var count = Math.Max(0, end - start);
+            if (count == 0)
+            {
+                return [fallback];
+            }
+
+            var result = new Candle[count];
+            Array.Copy(Candles, start, result, 0, count);
+            return result;
+        }
+
+        public int CountClosedUntil(DateTimeOffset closedAt, int intervalMinutes)
+        {
+            var low = 0;
+            var high = Candles.Length;
+            while (low < high)
+            {
+                var mid = low + (high - low) / 2;
+                if (Candles[mid].OpenTime.AddMinutes(intervalMinutes) <= closedAt)
+                {
+                    low = mid + 1;
+                }
+                else
+                {
+                    high = mid;
+                }
+            }
+
+            return low;
+        }
+
+        private int LowerBoundOpenTime(DateTimeOffset openTime)
+        {
+            var low = 0;
+            var high = Candles.Length;
+            while (low < high)
+            {
+                var mid = low + (high - low) / 2;
+                if (Candles[mid].OpenTime < openTime)
+                {
+                    low = mid + 1;
+                }
+                else
+                {
+                    high = mid;
+                }
+            }
+
+            return low;
+        }
+    }
+
+    private sealed record PrecomputedTurtleSignal(string System, StrategySide Side, decimal BreakoutLevel);
+
+    private sealed class PrecomputedTurtleIndicators
+    {
+        private PrecomputedTurtleIndicators(
+            decimal[] entryFastHigh,
+            decimal[] entryFastLow,
+            decimal[] entrySlowHigh,
+            decimal[] entrySlowLow,
+            decimal[] exitFastHigh,
+            decimal[] exitFastLow,
+            decimal[] exitSlowHigh,
+            decimal[] exitSlowLow,
+            decimal[] turtleN)
+        {
+            EntryFastHigh = entryFastHigh;
+            EntryFastLow = entryFastLow;
+            EntrySlowHigh = entrySlowHigh;
+            EntrySlowLow = entrySlowLow;
+            ExitFastHigh = exitFastHigh;
+            ExitFastLow = exitFastLow;
+            ExitSlowHigh = exitSlowHigh;
+            ExitSlowLow = exitSlowLow;
+            TurtleN = turtleN;
+        }
+
+        public decimal[] EntryFastHigh { get; }
+
+        public decimal[] EntryFastLow { get; }
+
+        public decimal[] EntrySlowHigh { get; }
+
+        public decimal[] EntrySlowLow { get; }
+
+        public decimal[] ExitFastHigh { get; }
+
+        public decimal[] ExitFastLow { get; }
+
+        public decimal[] ExitSlowHigh { get; }
+
+        public decimal[] ExitSlowLow { get; }
+
+        public decimal[] TurtleN { get; }
+
+        public static PrecomputedTurtleIndicators Build(IReadOnlyList<Candle> candles, TurtleTrendOptions options)
+        {
+            return new PrecomputedTurtleIndicators(
+                ComputeDonchianHigh(candles, options.EntryFastPeriod),
+                ComputeDonchianLow(candles, options.EntryFastPeriod),
+                ComputeDonchianHigh(candles, options.EntrySlowPeriod),
+                ComputeDonchianLow(candles, options.EntrySlowPeriod),
+                ComputeDonchianHigh(candles, options.ExitFastPeriod),
+                ComputeDonchianLow(candles, options.ExitFastPeriod),
+                ComputeDonchianHigh(candles, options.ExitSlowPeriod),
+                ComputeDonchianLow(candles, options.ExitSlowPeriod),
+                ComputeTurtleN(candles, options.AtrPeriod));
+        }
+    }
+
+    private sealed class PrecomputedTurtleChannelExits
+    {
+        private PrecomputedTurtleChannelExits(
+            decimal[] fastHigh,
+            decimal[] fastLow,
+            decimal[] slowHigh,
+            decimal[] slowLow)
+        {
+            FastHigh = fastHigh;
+            FastLow = fastLow;
+            SlowHigh = slowHigh;
+            SlowLow = slowLow;
+        }
+
+        private decimal[] FastHigh { get; }
+
+        private decimal[] FastLow { get; }
+
+        private decimal[] SlowHigh { get; }
+
+        private decimal[] SlowLow { get; }
+
+        public static PrecomputedTurtleChannelExits Build(IReadOnlyList<Candle> fiveMinuteCandles, TurtleTrendOptions options)
+        {
+            var turtleInterval = ParseIntervalMinutes(options.Timeframe, 60);
+            var fastBars = Math.Max(options.ExitFastPeriod, options.ExitFastPeriod * turtleInterval / 5);
+            var slowBars = Math.Max(options.ExitSlowPeriod, options.ExitSlowPeriod * turtleInterval / 5);
+            return new PrecomputedTurtleChannelExits(
+                ComputeDonchianHigh(fiveMinuteCandles, fastBars, requireFullWarmup: true),
+                ComputeDonchianLow(fiveMinuteCandles, fastBars, requireFullWarmup: true),
+                ComputeDonchianHigh(fiveMinuteCandles, slowBars, requireFullWarmup: true),
+                ComputeDonchianLow(fiveMinuteCandles, slowBars, requireFullWarmup: true));
+        }
+
+        public decimal GetHigh(int index, bool slow) =>
+            slow ? SlowHigh[index] : FastHigh[index];
+
+        public decimal GetLow(int index, bool slow) =>
+            slow ? SlowLow[index] : FastLow[index];
+    }
+
+    private static decimal[] ComputeDonchianHigh(
+        IReadOnlyList<Candle> candles,
+        int period,
+        bool requireFullWarmup = false)
+    {
+        var result = new decimal[candles.Count];
+        if (period <= 0)
+        {
+            return result;
+        }
+
+        for (var index = 0; index < candles.Count; index++)
+        {
+            if (index == 0 || requireFullWarmup && index + 1 < period + 2)
+            {
+                continue;
+            }
+
+            var start = Math.Max(0, index - period);
+            var high = candles[start].High;
+            for (var i = start + 1; i < index; i++)
+            {
+                high = decimal.Max(high, candles[i].High);
+            }
+
+            result[index] = high;
+        }
+
+        return result;
+    }
+
+    private static decimal[] ComputeDonchianLow(
+        IReadOnlyList<Candle> candles,
+        int period,
+        bool requireFullWarmup = false)
+    {
+        var result = new decimal[candles.Count];
+        if (period <= 0)
+        {
+            return result;
+        }
+
+        for (var index = 0; index < candles.Count; index++)
+        {
+            if (index == 0 || requireFullWarmup && index + 1 < period + 2)
+            {
+                continue;
+            }
+
+            var start = Math.Max(0, index - period);
+            var low = candles[start].Low;
+            for (var i = start + 1; i < index; i++)
+            {
+                low = decimal.Min(low, candles[i].Low);
+            }
+
+            result[index] = low;
+        }
+
+        return result;
+    }
+
+    private static decimal[] ComputeTurtleN(IReadOnlyList<Candle> candles, int period)
+    {
+        var result = new decimal[candles.Count];
+        if (period <= 0 || candles.Count < period + 1)
+        {
+            return result;
+        }
+
+        var trueRanges = new decimal[candles.Count];
+        for (var index = 1; index < candles.Count; index++)
+        {
+            var current = candles[index];
+            var previous = candles[index - 1];
+            trueRanges[index] = decimal.Max(
+                current.High - current.Low,
+                decimal.Max(Math.Abs(current.High - previous.Close), Math.Abs(current.Low - previous.Close)));
+        }
+
+        var sum = 0m;
+        for (var index = 1; index <= period; index++)
+        {
+            sum += trueRanges[index];
+        }
+
+        var n = sum / period;
+        result[period] = n;
+        for (var index = period + 1; index < candles.Count; index++)
+        {
+            n = ((period - 1m) * n + trueRanges[index]) / period;
+            result[index] = n;
+        }
+
+        return result;
+    }
 
     private sealed record SymbolBacktestOutput(
         string Symbol,
