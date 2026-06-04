@@ -105,6 +105,10 @@ public sealed class StrategyRoutingOptions
     [Range(typeof(decimal), "0", "100")]
     public decimal MaxOosLargestWinGrossProfitPercentToEnable { get; init; } = 70m;
 
+    [ConfigurationKeyName("TURTLE_MAX_OOS_LARGEST_WIN_GROSS_PROFIT_PERCENT_TO_ENABLE")]
+    [Range(typeof(decimal), "0", "100")]
+    public decimal TurtleMaxOosLargestWinGrossProfitPercentToEnable { get; init; } = 85m;
+
     [ConfigurationKeyName("MIN_OOS_MEDIAN_R_TO_ENABLE")]
     [Range(typeof(decimal), "-100", "100")]
     public decimal MinOosMedianRToEnable { get; init; } = 0m;

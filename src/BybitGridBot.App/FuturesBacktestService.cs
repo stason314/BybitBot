@@ -3037,10 +3037,11 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             return $"OOS median R {oosClosed.MedianR:0.####} < {_strategyRoutingOptions.MinOosMedianRToEnable:0.####}.";
         }
 
-        if (_strategyRoutingOptions.MaxOosLargestWinGrossProfitPercentToEnable > 0m &&
-            oosClosed.LargestWinGrossProfitPercent > _strategyRoutingOptions.MaxOosLargestWinGrossProfitPercentToEnable)
+        var maxLargestWinPercent = ResolveMaxOosLargestWinGrossProfitPercentToEnable(oosClosed);
+        if (maxLargestWinPercent > 0m &&
+            oosClosed.LargestWinGrossProfitPercent > maxLargestWinPercent)
         {
-            return $"OOS largest win {oosClosed.LargestWinGrossProfitPercent:0.####}% of gross profit > {_strategyRoutingOptions.MaxOosLargestWinGrossProfitPercentToEnable:0.####}%.";
+            return $"OOS largest win {oosClosed.LargestWinGrossProfitPercent:0.####}% of gross profit > {maxLargestWinPercent:0.####}%.";
         }
 
         if (robustnessPassedWindows < _strategyRoutingOptions.MinRobustnessWindowsToEnable)
@@ -3115,7 +3116,13 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         IReadOnlyDictionary<string, StrategyGatePerformance> outOfSampleGates)
     {
         var key = BuildStrategyGateKey(optimizationGate);
-        return outOfSampleGates.TryGetValue(key, out var outOfSampleGate) &&
+        if (!outOfSampleGates.TryGetValue(key, out var outOfSampleGate))
+        {
+            return false;
+        }
+
+        var maxLargestWinPercent = ResolveMaxOosLargestWinGrossProfitPercentToEnable(outOfSampleGate);
+        return
             outOfSampleGate.TradesCount >= _strategyRoutingOptions.MinOosTradesForStrategySymbolGating &&
             outOfSampleGate.ProfitFactor >= _strategyRoutingOptions.MinOosProfitFactorToEnable &&
             outOfSampleGate.AverageR >= _strategyRoutingOptions.MinOosAverageRToEnable &&
@@ -3125,8 +3132,8 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                 outOfSampleGate.MaxDrawdownPercent <= _strategyRoutingOptions.MaxOosDrawdownPercentToEnable) &&
             (!ShouldRequireOosMedianR(outOfSampleGate) ||
                 outOfSampleGate.MedianR >= _strategyRoutingOptions.MinOosMedianRToEnable) &&
-            (_strategyRoutingOptions.MaxOosLargestWinGrossProfitPercentToEnable <= 0m ||
-                outOfSampleGate.LargestWinGrossProfitPercent <= _strategyRoutingOptions.MaxOosLargestWinGrossProfitPercentToEnable);
+            (maxLargestWinPercent <= 0m ||
+                outOfSampleGate.LargestWinGrossProfitPercent <= maxLargestWinPercent);
     }
 
     private static string BuildWindowLabel(string suffix, DateTimeOffset start, DateTimeOffset end)
@@ -3254,6 +3261,11 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
 
     private static bool ShouldRequireOosMedianR(StrategyGatePerformance gate) =>
         !string.Equals(gate.StrategyName, TurtleTrendStrategy.Name, StringComparison.OrdinalIgnoreCase);
+
+    private decimal ResolveMaxOosLargestWinGrossProfitPercentToEnable(StrategyGatePerformance gate) =>
+        string.Equals(gate.StrategyName, TurtleTrendStrategy.Name, StringComparison.OrdinalIgnoreCase)
+            ? _strategyRoutingOptions.TurtleMaxOosLargestWinGrossProfitPercentToEnable
+            : _strategyRoutingOptions.MaxOosLargestWinGrossProfitPercentToEnable;
 
     private static string NormalizeStrategyGateText(string value) =>
         string.IsNullOrWhiteSpace(value) ? "-" : value.Trim();
