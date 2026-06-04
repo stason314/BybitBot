@@ -63,7 +63,7 @@ public sealed class StrategyRoutingOptions
 
     [ConfigurationKeyName("MIN_OOS_TRADES_FOR_STRATEGY_SYMBOL_GATING")]
     [Range(1, 10000)]
-    public int MinOosTradesForStrategySymbolGating { get; init; } = 3;
+    public int MinOosTradesForStrategySymbolGating { get; init; } = 5;
 
     [ConfigurationKeyName("MIN_OOS_PROFIT_FACTOR_TO_ENABLE")]
     [Range(typeof(decimal), "0", "1000")]
@@ -72,6 +72,22 @@ public sealed class StrategyRoutingOptions
     [ConfigurationKeyName("MIN_OOS_AVERAGE_R_TO_ENABLE")]
     [Range(typeof(decimal), "-100", "100")]
     public decimal MinOosAverageRToEnable { get; init; } = 0m;
+
+    [ConfigurationKeyName("MIN_OOS_NET_PNL_TO_ENABLE")]
+    [Range(typeof(decimal), "-999999999", "999999999")]
+    public decimal MinOosNetPnlToEnable { get; init; } = 500m;
+
+    [ConfigurationKeyName("MAX_OOS_DRAWDOWN_PERCENT_TO_ENABLE")]
+    [Range(typeof(decimal), "0", "10000")]
+    public decimal MaxOosDrawdownPercentToEnable { get; init; } = 30m;
+
+    [ConfigurationKeyName("MAX_OOS_LARGEST_WIN_GROSS_PROFIT_PERCENT_TO_ENABLE")]
+    [Range(typeof(decimal), "0", "100")]
+    public decimal MaxOosLargestWinGrossProfitPercentToEnable { get; init; } = 70m;
+
+    [ConfigurationKeyName("MIN_OOS_MEDIAN_R_TO_ENABLE")]
+    [Range(typeof(decimal), "-100", "100")]
+    public decimal MinOosMedianRToEnable { get; init; } = 0m;
 
     [ConfigurationKeyName("DISABLE_AFTER_NEGATIVE_TRADES")]
     [Range(1, 10000)]

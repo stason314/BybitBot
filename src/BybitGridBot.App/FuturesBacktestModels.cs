@@ -70,6 +70,10 @@ public sealed class FuturesBacktestResult
 
     public int HardRiskCapBlockedCount { get; init; }
 
+    public decimal MaxTradeLossEquityPercent { get; init; }
+
+    public decimal MaxProjectedDrawdownEquityPercent { get; init; }
+
     public int OpenAtBacktestEndCount { get; init; }
 
     public decimal OpenAtBacktestEndUnrealizedPnl { get; init; }
@@ -189,6 +193,12 @@ public sealed class FuturesBacktestGateDiagnostic
     public decimal OosClosedProfitFactor { get; init; }
 
     public decimal OosClosedAverageR { get; init; }
+
+    public decimal OosClosedMaxDrawdownPercent { get; init; }
+
+    public decimal OosClosedLargestWinGrossProfitPercent { get; init; }
+
+    public decimal OosClosedMedianR { get; init; }
 
     public int OosOpenTrades { get; init; }
 

@@ -2386,7 +2386,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             .OrderBy(symbol => symbol)
             .ToArray();
         var eligibleSet = eligibleSymbols.ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var optimizationStrategyGates = BuildStrategyGatePerformance(optimizationTrades);
+        var optimizationStrategyGates = BuildStrategyGatePerformance(optimizationTrades, settings.InitialEquityUsdt);
         var optimizationStrategyGateMap = optimizationStrategyGates.ToDictionary(
             item => BuildStrategyGateKey(item.StrategyName, item.Symbol, item.Direction),
             StringComparer.OrdinalIgnoreCase);
@@ -2398,15 +2398,15 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             .Where(trade => trade.EntryTime >= splitAt)
             .OrderBy(trade => trade.EntryTime)
             .ToArray();
-        var outOfSampleOpenStrategyGates = BuildStrategyGatePerformance(outOfSampleOpenTrades);
-        var outOfSampleMarkToMarketStrategyGates = BuildStrategyGatePerformance(outOfSampleTrades.Concat(outOfSampleOpenTrades).ToArray());
+        var outOfSampleOpenStrategyGates = BuildStrategyGatePerformance(outOfSampleOpenTrades, settings.InitialEquityUsdt);
+        var outOfSampleMarkToMarketStrategyGates = BuildStrategyGatePerformance(outOfSampleTrades.Concat(outOfSampleOpenTrades).ToArray(), settings.InitialEquityUsdt);
         var outOfSampleOpenStrategyGateMap = outOfSampleOpenStrategyGates.ToDictionary(
             item => BuildStrategyGateKey(item.StrategyName, item.Symbol, item.Direction),
             StringComparer.OrdinalIgnoreCase);
         var outOfSampleMarkToMarketStrategyGateMap = outOfSampleMarkToMarketStrategyGates.ToDictionary(
             item => BuildStrategyGateKey(item.StrategyName, item.Symbol, item.Direction),
             StringComparer.OrdinalIgnoreCase);
-        var outOfSampleStrategyGates = BuildStrategyGatePerformance(outOfSampleTrades)
+        var outOfSampleStrategyGates = BuildStrategyGatePerformance(outOfSampleTrades, settings.InitialEquityUsdt)
             .ToDictionary(
                 item => BuildStrategyGateKey(item.StrategyName, item.Symbol, item.Direction),
                 StringComparer.OrdinalIgnoreCase);
@@ -2457,7 +2457,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             .Where(symbol => !eligibleSet.Contains(symbol))
             .OrderBy(symbol => symbol)
             .ToArray();
-        var tradedStrategyGates = BuildStrategyGatePerformance(closedTrades)
+        var tradedStrategyGates = BuildStrategyGatePerformance(closedTrades, settings.InitialEquityUsdt)
             .Select(item => BuildStrategyGateKey(item.StrategyName, item.Symbol, item.Direction))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
@@ -2482,6 +2482,8 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             FalseBreakoutCount = falseBreakoutCount,
             TrueBreakoutBlockedCount = trueBreakoutBlockedCount,
             HardRiskCapBlockedCount = hardRiskCapBlockedCount,
+            MaxTradeLossEquityPercent = settings.MaxTradeLossEquityPercent,
+            MaxProjectedDrawdownEquityPercent = settings.MaxProjectedDrawdownEquityPercent,
             OpenAtBacktestEndCount = openAtBacktestEndTrades.Length,
             OpenAtBacktestEndUnrealizedPnl = openAtBacktestEndTrades.Sum(trade => trade.NetPnl),
             OptimizationWindowLabel = optimizationWindowLabel,
@@ -2514,7 +2516,9 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         };
     }
 
-    private static IReadOnlyList<StrategyGatePerformance> BuildStrategyGatePerformance(IReadOnlyList<BacktestTradeInternal> trades) =>
+    private static IReadOnlyList<StrategyGatePerformance> BuildStrategyGatePerformance(
+        IReadOnlyList<BacktestTradeInternal> trades,
+        decimal initialEquity) =>
         trades
             .GroupBy(trade => new
             {
@@ -2530,7 +2534,10 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                 group.Sum(trade => trade.NetPnl),
                 group.Any() ? (decimal)group.Count(trade => trade.NetPnl > 0m) / group.Count() * 100m : 0m,
                 CalculateProfitFactor(group),
-                group.Any() ? group.Average(trade => trade.RMultiple) : 0m))
+                group.Any() ? group.Average(trade => trade.RMultiple) : 0m,
+                initialEquity > 0m ? CalculateMaxDrawdown(group.OrderBy(trade => trade.ExitTime).ToArray(), initialEquity) / initialEquity * 100m : 0m,
+                CalculateLargestWinGrossProfitPercent(group),
+                CalculateMedianR(group)))
             .ToArray();
 
     private IReadOnlyList<string> BuildProfitableDiagnosticGateKeys(
@@ -2584,6 +2591,9 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                     OosClosedNetPnl = oosClosed?.NetPnl ?? 0m,
                     OosClosedProfitFactor = oosClosed?.ProfitFactor ?? 0m,
                     OosClosedAverageR = oosClosed?.AverageR ?? 0m,
+                    OosClosedMaxDrawdownPercent = oosClosed?.MaxDrawdownPercent ?? 0m,
+                    OosClosedLargestWinGrossProfitPercent = oosClosed?.LargestWinGrossProfitPercent ?? 0m,
+                    OosClosedMedianR = oosClosed?.MedianR ?? 0m,
                     OosOpenTrades = oosOpen?.TradesCount ?? 0,
                     OosOpenNetPnl = oosOpen?.NetPnl ?? 0m,
                     OosMarkToMarketTrades = oosMarkToMarket?.TradesCount ?? 0,
@@ -2699,6 +2709,29 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             return $"OOS closed PnL {oosClosed.NetPnl:0.####} < 0.";
         }
 
+        if (oosClosed.NetPnl < _strategyRoutingOptions.MinOosNetPnlToEnable)
+        {
+            return $"OOS closed PnL {oosClosed.NetPnl:0.####} < {_strategyRoutingOptions.MinOosNetPnlToEnable:0.####}.";
+        }
+
+        if (_strategyRoutingOptions.MaxOosDrawdownPercentToEnable > 0m &&
+            oosClosed.MaxDrawdownPercent > _strategyRoutingOptions.MaxOosDrawdownPercentToEnable)
+        {
+            return $"OOS max DD {oosClosed.MaxDrawdownPercent:0.####}% > {_strategyRoutingOptions.MaxOosDrawdownPercentToEnable:0.####}%.";
+        }
+
+        if (oosClosed.MedianR < _strategyRoutingOptions.MinOosMedianRToEnable)
+        {
+            return $"OOS median R {oosClosed.MedianR:0.####} < {_strategyRoutingOptions.MinOosMedianRToEnable:0.####}.";
+        }
+
+        if (_strategyRoutingOptions.MaxOosLargestWinGrossProfitPercentToEnable > 0m &&
+            oosClosed.LargestWinGrossProfitPercent > _strategyRoutingOptions.MaxOosLargestWinGrossProfitPercentToEnable &&
+            oosClosed.MedianR <= _strategyRoutingOptions.MinOosMedianRToEnable)
+        {
+            return $"OOS largest win {oosClosed.LargestWinGrossProfitPercent:0.####}% of gross profit > {_strategyRoutingOptions.MaxOosLargestWinGrossProfitPercentToEnable:0.####}% and median R is not positive.";
+        }
+
         return "Rejected by closed-edge gate.";
     }
 
@@ -2730,7 +2763,14 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             outOfSampleGate.TradesCount >= _strategyRoutingOptions.MinOosTradesForStrategySymbolGating &&
             outOfSampleGate.ProfitFactor >= _strategyRoutingOptions.MinOosProfitFactorToEnable &&
             outOfSampleGate.AverageR >= _strategyRoutingOptions.MinOosAverageRToEnable &&
-            outOfSampleGate.NetPnl >= 0m;
+            outOfSampleGate.NetPnl >= 0m &&
+            outOfSampleGate.NetPnl >= _strategyRoutingOptions.MinOosNetPnlToEnable &&
+            (_strategyRoutingOptions.MaxOosDrawdownPercentToEnable <= 0m ||
+                outOfSampleGate.MaxDrawdownPercent <= _strategyRoutingOptions.MaxOosDrawdownPercentToEnable) &&
+            outOfSampleGate.MedianR >= _strategyRoutingOptions.MinOosMedianRToEnable &&
+            (_strategyRoutingOptions.MaxOosLargestWinGrossProfitPercentToEnable <= 0m ||
+                outOfSampleGate.LargestWinGrossProfitPercent <= _strategyRoutingOptions.MaxOosLargestWinGrossProfitPercentToEnable ||
+                outOfSampleGate.MedianR > _strategyRoutingOptions.MinOosMedianRToEnable);
     }
 
     private static string BuildWindowLabel(string suffix, DateTimeOffset start, DateTimeOffset end)
@@ -2926,6 +2966,33 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         var grossProfit = items.Where(trade => trade.NetPnl > 0m).Sum(trade => trade.NetPnl);
         var grossLoss = Math.Abs(items.Where(trade => trade.NetPnl < 0m).Sum(trade => trade.NetPnl));
         return grossLoss > 0m ? grossProfit / grossLoss : grossProfit > 0m ? 999m : 0m;
+    }
+
+    private static decimal CalculateLargestWinGrossProfitPercent(IEnumerable<BacktestTradeInternal> trades)
+    {
+        var winners = trades
+            .Where(trade => trade.NetPnl > 0m)
+            .Select(trade => trade.NetPnl)
+            .ToArray();
+        var grossProfit = winners.Sum();
+        return grossProfit > 0m ? winners.Max() / grossProfit * 100m : 0m;
+    }
+
+    private static decimal CalculateMedianR(IEnumerable<BacktestTradeInternal> trades)
+    {
+        var values = trades
+            .Select(trade => trade.RMultiple)
+            .OrderBy(value => value)
+            .ToArray();
+        if (values.Length == 0)
+        {
+            return 0m;
+        }
+
+        var middle = values.Length / 2;
+        return values.Length % 2 == 1
+            ? values[middle]
+            : (values[middle - 1] + values[middle]) / 2m;
     }
 
     private static FuturesBacktestTrade ToPublicTrade(BacktestTradeInternal trade) => new()
@@ -3827,7 +3894,10 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         decimal NetPnl,
         decimal WinRate,
         decimal ProfitFactor,
-        decimal AverageR);
+        decimal AverageR,
+        decimal MaxDrawdownPercent,
+        decimal LargestWinGrossProfitPercent,
+        decimal MedianR);
 
     private sealed record BacktestTradeInternal(
         string Symbol,

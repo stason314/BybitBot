@@ -121,11 +121,11 @@ public static class FuturesBacktestPage
         </div>
         <div class="run-field">
           <label for="maxTradeLossInput">Max loss %</label>
-          <input id="maxTradeLossInput" type="number" min="0" max="100" step="0.1" value="0" />
+          <input id="maxTradeLossInput" type="number" min="0" max="100" step="0.1" value="2" />
         </div>
         <div class="run-field">
           <label for="maxDrawdownInput">Max DD %</label>
-          <input id="maxDrawdownInput" type="number" min="0" max="100" step="0.1" value="0" />
+          <input id="maxDrawdownInput" type="number" min="0" max="100" step="0.1" value="30" />
         </div>
         <button class="btn secondary" id="copyDiagnostics" type="button">Copy diagnostics</button>
         <button class="btn" id="start" type="button">Start</button>
@@ -358,7 +358,7 @@ public static class FuturesBacktestPage
           <td>${item.isLiveAllowed ? 'yes' : 'no'}</td>
           <td>${item.reason || '-'}</td>
           <td>${item.optimizationTrades || 0} / ${pnl(item.optimizationNetPnl)} / PF ${fmt.format(item.optimizationProfitFactor || 0)}</td>
-          <td>${item.oosClosedTrades || 0} / ${pnl(item.oosClosedNetPnl)} / PF ${fmt.format(item.oosClosedProfitFactor || 0)}</td>
+          <td>${item.oosClosedTrades || 0} / ${pnl(item.oosClosedNetPnl)} / PF ${fmt.format(item.oosClosedProfitFactor || 0)} / DD ${pct(item.oosClosedMaxDrawdownPercent)} / medR ${fmt.format(item.oosClosedMedianR || 0)}</td>
           <td>${item.oosOpenTrades || 0} / ${pnl(item.oosOpenNetPnl)} / MTM ${pnl(item.oosMarkToMarketNetPnl)}</td>
         </tr>`).join('') : '<tr><td colspan="6" class="empty">Нет данных</td></tr>';
     }
@@ -411,6 +411,8 @@ public static class FuturesBacktestPage
         `openAtBacktestEndCount=${result.openAtBacktestEndCount || 0}`,
         `openAtBacktestEndUnrealizedPnl=${Number(result.openAtBacktestEndUnrealizedPnl || 0)}`,
         `hardRiskCapBlockedCount=${result.hardRiskCapBlockedCount || 0}`,
+        `maxTradeLossEquityPercent=${Number(result.maxTradeLossEquityPercent || 0)}`,
+        `maxProjectedDrawdownEquityPercent=${Number(result.maxProjectedDrawdownEquityPercent || 0)}`,
         `optimizationWindow=${result.optimizationWindowLabel || '-'}`,
         `outOfSampleWindow=${result.outOfSampleWindowLabel || '-'}`,
         `liveUseEligibleStrategyGatesOnly=${Boolean(result.liveUseEligibleStrategyGatesOnly)}`,

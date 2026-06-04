@@ -52,11 +52,11 @@ public sealed class FuturesBacktestOptions
 
     [ConfigurationKeyName("FUTURES_BACKTEST_MAX_TRADE_LOSS_EQUITY_PERCENT")]
     [Range(typeof(decimal), "0", "100")]
-    public decimal MaxTradeLossEquityPercent { get; init; } = 0m;
+    public decimal MaxTradeLossEquityPercent { get; init; } = 2m;
 
     [ConfigurationKeyName("FUTURES_BACKTEST_MAX_PROJECTED_DRAWDOWN_EQUITY_PERCENT")]
     [Range(typeof(decimal), "0", "100")]
-    public decimal MaxProjectedDrawdownEquityPercent { get; init; } = 0m;
+    public decimal MaxProjectedDrawdownEquityPercent { get; init; } = 30m;
 
     [ConfigurationKeyName("FUTURES_BACKTEST_CANDLE_CACHE_ENABLED")]
     public bool CandleCacheEnabled { get; init; } = true;
