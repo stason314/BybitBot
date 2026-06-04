@@ -120,8 +120,9 @@ public static class FuturesBacktestPage
     </section>
 
     <section class="metrics">
-      <div class="metric"><div class="label">Net PnL</div><div class="value" id="netPnl">-</div></div>
-      <div class="metric"><div class="label">Max drawdown</div><div class="value" id="drawdown">-</div></div>
+      <div class="metric"><div class="label">MTM PnL</div><div class="value" id="netPnl">-</div></div>
+      <div class="metric"><div class="label">Closed PnL</div><div class="value" id="closedPnl">-</div></div>
+      <div class="metric"><div class="label">MTM drawdown</div><div class="value" id="drawdown">-</div></div>
       <div class="metric"><div class="label">Win rate</div><div class="value" id="winRate">-</div></div>
       <div class="metric"><div class="label">Profit factor</div><div class="value" id="profitFactor">-</div></div>
       <div class="metric"><div class="label">Average R</div><div class="value" id="averageR">-</div></div>
@@ -237,9 +238,16 @@ public static class FuturesBacktestPage
       const result = data.result;
       if (!result) return;
       const m = result.metrics || {};
-      byId('netPnl').textContent = pnl(m.netPnl);
-      byId('netPnl').className = `value ${cls(m.netPnl)}`;
-      byId('drawdown').textContent = `${money.format(m.maxDrawdown || 0)} (${pct(m.maxDrawdownPercent)})`;
+      const closedNetPnl = Number(m.closedNetPnl ?? m.netPnl ?? 0);
+      const openUnrealizedPnl = Number(m.openUnrealizedPnl ?? result.openAtBacktestEndUnrealizedPnl ?? 0);
+      const markToMarketNetPnl = Number(m.markToMarketNetPnl ?? (closedNetPnl + openUnrealizedPnl));
+      const markToMarketDrawdown = Number(m.markToMarketMaxDrawdown ?? m.maxDrawdown ?? 0);
+      const markToMarketDrawdownPercent = Number(m.markToMarketMaxDrawdownPercent ?? m.maxDrawdownPercent ?? 0);
+      byId('netPnl').textContent = pnl(markToMarketNetPnl);
+      byId('netPnl').className = `value ${cls(markToMarketNetPnl)}`;
+      byId('closedPnl').textContent = pnl(closedNetPnl);
+      byId('closedPnl').className = `value ${cls(closedNetPnl)}`;
+      byId('drawdown').textContent = `${money.format(markToMarketDrawdown)} (${pct(markToMarketDrawdownPercent)})`;
       byId('winRate').textContent = pct(m.winRate);
       byId('profitFactor').textContent = fmt.format(m.profitFactor || 0);
       byId('averageR').textContent = fmt.format(m.averageR || 0);
@@ -248,7 +256,7 @@ public static class FuturesBacktestPage
       const eligibleGates = Array.isArray(result.eligibleStrategySymbolDirections) ? result.eligibleStrategySymbolDirections : [];
       const excludedGates = Array.isArray(result.excludedStrategySymbolDirections) ? result.excludedStrategySymbolDirections : [];
       byId('eligibleCount').textContent = `${Number(result.liveAllowedStrategyGatesCount ?? eligibleGates.length)}`;
-      byId('openAtEnd').textContent = `${result.openAtBacktestEndCount || 0} (${pnl(result.openAtBacktestEndUnrealizedPnl)})`;
+      byId('openAtEnd').textContent = `${result.openAtBacktestEndCount || 0} (${pnl(openUnrealizedPnl)})`;
       byId('wfSymbols').innerHTML = walkForwardSymbolRows(eligibleGates, excludedGates);
       byId('wfMetrics').innerHTML = walkForwardMetricRows(result.optimizationMetrics || {}, result.outOfSampleMetrics || {}, result.filteredOutOfSampleMetrics || {});
       byId('best').innerHTML = perfRows(result.bestSymbols || [], 'symbol');
@@ -267,7 +275,7 @@ public static class FuturesBacktestPage
         <tr>
           <td>${item[key] || '-'}</td>
           <td>${item.trades || 0}</td>
-          <td class="${cls(item.netPnl)}">${pnl(item.netPnl)}</td>
+          <td class="${cls(item.markToMarketNetPnl ?? item.netPnl)}">${pnl(item.markToMarketNetPnl ?? item.netPnl)}</td>
           <td>${pct(item.winRate)}</td>
         </tr>`).join('') : '<tr><td colspan="4" class="empty">Нет данных</td></tr>';
     }
@@ -286,7 +294,7 @@ public static class FuturesBacktestPage
         <tr>
           <td>${label}</td>
           <td>${fmt.format(item.tradesPerDay || 0)}/day</td>
-          <td class="${cls(item.netPnl)}">${pnl(item.netPnl)}</td>
+          <td class="${cls(item.markToMarketNetPnl ?? item.netPnl)}">${pnl(item.markToMarketNetPnl ?? item.netPnl)}</td>
           <td>${fmt.format(item.profitFactor || 0)}</td>
         </tr>`).join('');
     }
@@ -372,8 +380,13 @@ public static class FuturesBacktestPage
       return [
         name,
         `netPnl=${Number(item.netPnl || 0)}`,
+        `closedNetPnl=${Number(item.closedNetPnl ?? item.netPnl ?? 0)}`,
+        `openUnrealizedPnl=${Number(item.openUnrealizedPnl || 0)}`,
+        `markToMarketNetPnl=${Number(item.markToMarketNetPnl ?? item.netPnl ?? 0)}`,
         `maxDrawdown=${Number(item.maxDrawdown || 0)}`,
         `maxDrawdownPercent=${Number(item.maxDrawdownPercent || 0)}`,
+        `markToMarketMaxDrawdown=${Number(item.markToMarketMaxDrawdown ?? item.maxDrawdown ?? 0)}`,
+        `markToMarketMaxDrawdownPercent=${Number(item.markToMarketMaxDrawdownPercent ?? item.maxDrawdownPercent ?? 0)}`,
         `winRate=${Number(item.winRate || 0)}`,
         `profitFactor=${Number(item.profitFactor || 0)}`,
         `averageR=${Number(item.averageR || 0)}`,

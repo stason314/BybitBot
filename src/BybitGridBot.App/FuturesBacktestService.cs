@@ -2035,6 +2035,10 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             .Where(trade => trade.EntryTime >= splitAt)
             .OrderBy(trade => trade.EntryTime)
             .ToArray();
+        var outOfSampleOpenTrades = openAtBacktestEndTrades
+            .Where(trade => trade.EntryTime >= splitAt)
+            .OrderBy(trade => trade.EntryTime)
+            .ToArray();
         var outOfSampleStrategyGates = BuildStrategyGatePerformance(outOfSampleTrades)
             .ToDictionary(
                 item => BuildStrategyGateKey(item.StrategyName, item.Symbol, item.Direction),
@@ -2052,6 +2056,10 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             .ToArray();
         var eligibleStrategyGateSet = eligibleStrategySymbolDirections.ToHashSet(StringComparer.OrdinalIgnoreCase);
         var filteredOutOfSampleTrades = outOfSampleTrades
+            .Where(trade => eligibleStrategyGateSet.Contains(BuildStrategyGateKey(trade.Pattern, trade.Symbol, trade.Side)))
+            .OrderBy(trade => trade.EntryTime)
+            .ToArray();
+        var filteredOutOfSampleOpenTrades = outOfSampleOpenTrades
             .Where(trade => eligibleStrategyGateSet.Contains(BuildStrategyGateKey(trade.Pattern, trade.Symbol, trade.Side)))
             .OrderBy(trade => trade.EntryTime)
             .ToArray();
@@ -2087,10 +2095,10 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             TrueBreakoutBlockedCount = trueBreakoutBlockedCount,
             OpenAtBacktestEndCount = openAtBacktestEndTrades.Length,
             OpenAtBacktestEndUnrealizedPnl = openAtBacktestEndTrades.Sum(trade => trade.NetPnl),
-            Metrics = BuildMetrics(outOfSampleTrades, splitAt, periodEnd, settings.InitialEquityUsdt),
+            Metrics = BuildMetrics(outOfSampleTrades, splitAt, periodEnd, settings.InitialEquityUsdt, outOfSampleOpenTrades),
             OptimizationMetrics = BuildMetrics(optimizationTrades, periodStart, splitAt, settings.InitialEquityUsdt),
-            OutOfSampleMetrics = BuildMetrics(outOfSampleTrades, splitAt, periodEnd, settings.InitialEquityUsdt),
-            FilteredOutOfSampleMetrics = BuildMetrics(filteredOutOfSampleTrades, splitAt, periodEnd, settings.InitialEquityUsdt),
+            OutOfSampleMetrics = BuildMetrics(outOfSampleTrades, splitAt, periodEnd, settings.InitialEquityUsdt, outOfSampleOpenTrades),
+            FilteredOutOfSampleMetrics = BuildMetrics(filteredOutOfSampleTrades, splitAt, periodEnd, settings.InitialEquityUsdt, filteredOutOfSampleOpenTrades),
             LiveUseEligibleStrategyGatesOnly = _strategyRoutingOptions.LiveUseEligibleStrategyGatesOnly,
             LiveEligibleGateSizeMultiplier = _strategyRoutingOptions.LiveEligibleGateSizeMultiplier,
             LiveIneligibleGateSizeMultiplier = _strategyRoutingOptions.LiveIneligibleGateSizeMultiplier,
@@ -2191,19 +2199,31 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         IReadOnlyList<BacktestTradeInternal> trades,
         DateTimeOffset periodStart,
         DateTimeOffset periodEnd,
-        decimal initialEquity)
+        decimal initialEquity,
+        IReadOnlyList<BacktestTradeInternal>? openTrades = null)
     {
-        var netPnl = trades.Sum(trade => trade.NetPnl);
+        var closedNetPnl = trades.Sum(trade => trade.NetPnl);
+        var openUnrealizedPnl = openTrades?.Sum(trade => trade.NetPnl) ?? 0m;
+        var markToMarketNetPnl = closedNetPnl + openUnrealizedPnl;
         var wins = trades.Count(trade => trade.NetPnl > 0m);
         var grossProfit = trades.Where(trade => trade.NetPnl > 0m).Sum(trade => trade.NetPnl);
         var grossLoss = Math.Abs(trades.Where(trade => trade.NetPnl < 0m).Sum(trade => trade.NetPnl));
         var days = decimal.Max(1m, (decimal)(periodEnd - periodStart).TotalDays);
         var maxDrawdown = CalculateMaxDrawdown(trades, initialEquity);
+        var markToMarketTrades = openTrades is { Count: > 0 }
+            ? trades.Concat(openTrades).ToArray()
+            : trades;
+        var markToMarketMaxDrawdown = CalculateMaxDrawdown(markToMarketTrades, initialEquity);
         return new FuturesBacktestMetrics
         {
-            NetPnl = netPnl,
+            NetPnl = closedNetPnl,
+            ClosedNetPnl = closedNetPnl,
+            OpenUnrealizedPnl = openUnrealizedPnl,
+            MarkToMarketNetPnl = markToMarketNetPnl,
             MaxDrawdown = maxDrawdown,
             MaxDrawdownPercent = initialEquity > 0m ? maxDrawdown / initialEquity * 100m : 0m,
+            MarkToMarketMaxDrawdown = markToMarketMaxDrawdown,
+            MarkToMarketMaxDrawdownPercent = initialEquity > 0m ? markToMarketMaxDrawdown / initialEquity * 100m : 0m,
             WinRate = trades.Count > 0 ? (decimal)wins / trades.Count * 100m : 0m,
             ProfitFactor = grossLoss > 0m ? grossProfit / grossLoss : grossProfit > 0m ? 999m : 0m,
             AverageR = trades.Count > 0 ? trades.Average(trade => trade.RMultiple) : 0m,

@@ -103,9 +103,19 @@ public sealed class FuturesBacktestMetrics
 {
     public decimal NetPnl { get; init; }
 
+    public decimal ClosedNetPnl { get; init; }
+
+    public decimal OpenUnrealizedPnl { get; init; }
+
+    public decimal MarkToMarketNetPnl { get; init; }
+
     public decimal MaxDrawdown { get; init; }
 
     public decimal MaxDrawdownPercent { get; init; }
+
+    public decimal MarkToMarketMaxDrawdown { get; init; }
+
+    public decimal MarkToMarketMaxDrawdownPercent { get; init; }
 
     public decimal WinRate { get; init; }
 
