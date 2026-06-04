@@ -171,6 +171,10 @@ public static class FuturesBacktestPage
         <table><thead><tr><th>Window</th><th>Trades/day</th><th>PnL</th><th>PF</th></tr></thead><tbody id="wfMetrics"><tr><td colspan="4" class="empty">Нет данных</td></tr></tbody></table>
       </div>
       <div class="panel">
+        <h2>Backtest timings</h2>
+        <table><thead><tr><th>Stage</th><th>Count</th><th>Total ms</th><th>Avg / max ms</th></tr></thead><tbody id="timings"><tr><td colspan="4" class="empty">Нет данных</td></tr></tbody></table>
+      </div>
+      <div class="panel">
         <h2>Best symbols</h2>
         <table><thead><tr><th>Symbol</th><th>Trades</th><th>PnL</th><th>WR</th></tr></thead><tbody id="best"><tr><td colspan="4" class="empty">Нет данных</td></tr></tbody></table>
       </div>
@@ -310,6 +314,7 @@ public static class FuturesBacktestPage
       byId('wfSymbols').innerHTML = walkForwardSymbolRows(eligibleGates, excludedGates);
       byId('gateDiagnostics').innerHTML = gateDiagnosticRows(result.gateDiagnostics || []);
       byId('wfMetrics').innerHTML = walkForwardMetricRows(result);
+      byId('timings').innerHTML = timingRows(result.timings || []);
       byId('best').innerHTML = perfRows(result.bestSymbols || [], 'symbol');
       byId('worst').innerHTML = perfRows(result.worstSymbols || [], 'symbol');
       byId('sides').innerHTML = sideRows(result.longShort || []);
@@ -366,6 +371,16 @@ public static class FuturesBacktestPage
           <td>${item.oosOpenTrades || 0} / ${pnl(item.oosOpenNetPnl)} / MTM ${pnl(item.oosMarkToMarketNetPnl)}</td>
           <td>${item.oosForcedClosedTrades || 0} / ${pnl(item.oosForcedClosedNetPnl)} / DD ${pct(item.oosForcedClosedMaxDrawdownPercent)}</td>
         </tr>`).join('') : '<tr><td colspan="7" class="empty">Нет данных</td></tr>';
+    }
+
+    function timingRows(items) {
+      return items.length ? items.slice(0, 30).map(item => `
+        <tr>
+          <td>${item.stage || '-'}</td>
+          <td>${item.count || 0}</td>
+          <td>${fmt.format(item.totalMilliseconds || 0)}</td>
+          <td>${fmt.format(item.averageMilliseconds || 0)} / ${fmt.format(item.maxMilliseconds || 0)}</td>
+        </tr>`).join('') : '<tr><td colspan="4" class="empty">Нет данных</td></tr>';
     }
 
     async function copyDiagnostics() {
@@ -453,6 +468,7 @@ public static class FuturesBacktestPage
         tableBlock('PATTERN', result.patternPerformance || []),
         tableBlock('WEEKDAY', result.weekdayPerformance || []),
         tableBlock('HOUR_NY', result.hourPerformance || []),
+        tableBlock('TIMINGS', result.timings || []),
         tableBlock('OPEN_AT_BACKTEST_END', result.openAtBacktestEndTrades || []),
         tableBlock('RECENT_TRADES', result.recentTrades || [])
       ];

@@ -143,6 +143,21 @@ public sealed class FuturesBacktestResult
     public IReadOnlyList<FuturesBacktestTrade> RecentTrades { get; init; } = [];
 
     public IReadOnlyList<FuturesBacktestTrade> OpenAtBacktestEndTrades { get; init; } = [];
+
+    public IReadOnlyList<FuturesBacktestTiming> Timings { get; init; } = [];
+}
+
+public sealed class FuturesBacktestTiming
+{
+    public string Stage { get; init; } = string.Empty;
+
+    public int Count { get; init; }
+
+    public decimal TotalMilliseconds { get; init; }
+
+    public decimal AverageMilliseconds { get; init; }
+
+    public decimal MaxMilliseconds { get; init; }
 }
 
 public sealed class FuturesBacktestMetrics

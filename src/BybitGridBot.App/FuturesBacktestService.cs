@@ -2,6 +2,7 @@ using BybitGridBot.Bybit;
 using BybitGridBot.Domain;
 using Microsoft.Extensions.Options;
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -200,16 +201,21 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
     {
         try
         {
+            var timings = new BacktestTimingCollector();
             var settings = ResolveSettings(request);
             var periodEnd = DateTimeOffset.UtcNow;
             var periodStart = periodEnd.AddDays(-settings.Days);
             SetStatus($"Loading top {settings.Symbols} Bybit USDT perpetual symbols ({settings.Mode})", 2m);
 
-            var instruments = await _bybitRestClient.GetInstrumentsAsync(Category, cancellationToken);
+            var instruments = await timings.MeasureAsync(
+                "load.instruments",
+                () => _bybitRestClient.GetInstrumentsAsync(Category, cancellationToken));
             var tradable = instruments
                 .Where(IsTradable)
                 .ToDictionary(instrument => instrument.Symbol, StringComparer.OrdinalIgnoreCase);
-            var tickers = await _bybitRestClient.GetTickersAsync(Category, cancellationToken);
+            var tickers = await timings.MeasureAsync(
+                "load.tickers",
+                () => _bybitRestClient.GetTickersAsync(Category, cancellationToken));
             var symbols = tickers
                 .Where(ticker => tradable.ContainsKey(ticker.Symbol))
                 .OrderByDescending(ticker => ticker.Turnover24h)
@@ -219,7 +225,9 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
 
             var btc15m = settings.Mode == FuturesBacktestMode.TurtleOnly
                 ? Array.Empty<Candle>()
-                : await FetchHistoricalCandlesAsync("BTCUSDT", FifteenMinuteInterval, periodStart, periodEnd, cancellationToken);
+                : await timings.MeasureAsync(
+                    "load.btc_15m",
+                    () => FetchHistoricalCandlesAsync("BTCUSDT", FifteenMinuteInterval, periodStart, periodEnd, cancellationToken));
             var btc15mSeries = BacktestCandleSeries.Create(btc15m, 15);
             var outputs = new ConcurrentBag<SymbolBacktestOutput>();
             var processed = 0;
@@ -234,7 +242,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             {
                 try
                 {
-                    outputs.Add(await BacktestSymbolAsync(symbol, periodStart, periodEnd, btc15mSeries, settings, token));
+                    outputs.Add(await BacktestSymbolAsync(symbol, periodStart, periodEnd, btc15mSeries, settings, timings, token));
                 }
                 catch (Exception exception) when (exception is not OperationCanceledException)
                 {
@@ -252,14 +260,17 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             var falseBreakoutCount = 0;
             var trueBreakoutBlockedCount = 0;
             var hardRiskCapBlockedCount = 0;
-            foreach (var output in outputs)
+            timings.Measure("aggregate.symbol_outputs", () =>
             {
-                cancellationToken.ThrowIfCancellationRequested();
-                allTrades.AddRange(output.Trades);
-                falseBreakoutCount += output.FalseBreakoutCount;
-                trueBreakoutBlockedCount += output.TrueBreakoutBlockedCount;
-                hardRiskCapBlockedCount += output.HardRiskCapBlockedCount;
-            }
+                foreach (var output in outputs)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    allTrades.AddRange(output.Trades);
+                    falseBreakoutCount += output.FalseBreakoutCount;
+                    trueBreakoutBlockedCount += output.TrueBreakoutBlockedCount;
+                    hardRiskCapBlockedCount += output.HardRiskCapBlockedCount;
+                }
+            });
 
             var result = BuildResult(
                 periodStart,
@@ -270,7 +281,8 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                 falseBreakoutCount,
                 trueBreakoutBlockedCount,
                 hardRiskCapBlockedCount,
-                settings);
+                settings,
+                timings.ToPublicTimings());
 
             lock (_sync)
             {
@@ -327,9 +339,12 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         DateTimeOffset periodEnd,
         BacktestCandleSeries btc15m,
         BacktestRunSettings settings,
+        BacktestTimingCollector timings,
         CancellationToken cancellationToken)
     {
-        var fiveMinuteCandles = await FetchHistoricalCandlesAsync(symbol, FiveMinuteInterval, periodStart, periodEnd, cancellationToken);
+        var fiveMinuteCandles = await timings.MeasureAsync(
+            "symbol.fetch_5m",
+            () => FetchHistoricalCandlesAsync(symbol, FiveMinuteInterval, periodStart, periodEnd, cancellationToken));
         var fiveMinuteSeries = BacktestCandleSeries.Create(fiveMinuteCandles, 5);
         if (fiveMinuteSeries.Count < 500)
         {
@@ -339,18 +354,28 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         var shouldLoadTurtleCandles = settings.Mode == FuturesBacktestMode.TurtleOnly ||
             _strategyRoutingOptions.SignalSelectionMode == SignalSelectionMode.ScoreBased;
         var turtleCandles = shouldLoadTurtleCandles
-            ? await FetchHistoricalCandlesAsync(symbol, _turtleOptions.Timeframe, periodStart.AddDays(-10), periodEnd, cancellationToken)
+            ? await timings.MeasureAsync(
+                "symbol.fetch_turtle_timeframe",
+                () => FetchHistoricalCandlesAsync(symbol, _turtleOptions.Timeframe, periodStart.AddDays(-10), periodEnd, cancellationToken))
             : Array.Empty<Candle>();
         var turtleSeries = BacktestCandleSeries.Create(turtleCandles, ResolveIntervalMinutes(_turtleOptions.Timeframe));
-        var turtleIndicators = PrecomputedTurtleIndicators.Build(turtleSeries.Candles, _turtleOptions, cancellationToken);
-        var fiveMinuteTurtleExits = PrecomputedTurtleChannelExits.Build(fiveMinuteSeries.Candles, _turtleOptions, cancellationToken);
+        var turtleIndicators = timings.Measure(
+            "symbol.build_turtle_indicators",
+            () => PrecomputedTurtleIndicators.Build(turtleSeries.Candles, _turtleOptions, cancellationToken));
+        var fiveMinuteTurtleExits = timings.Measure(
+            "symbol.build_turtle_exits",
+            () => PrecomputedTurtleChannelExits.Build(fiveMinuteSeries.Candles, _turtleOptions, cancellationToken));
 
         if (settings.Mode == FuturesBacktestMode.TurtleOnly)
         {
-            return BacktestTurtleOnlySymbol(symbol, periodStart, fiveMinuteSeries, turtleSeries, turtleIndicators, fiveMinuteTurtleExits, settings, cancellationToken);
+            return timings.Measure(
+                "symbol.backtest_turtle_only",
+                () => BacktestTurtleOnlySymbol(symbol, periodStart, fiveMinuteSeries, turtleSeries, turtleIndicators, fiveMinuteTurtleExits, settings, cancellationToken));
         }
 
-        var fifteenMinuteCandles = await FetchHistoricalCandlesAsync(symbol, FifteenMinuteInterval, periodStart, periodEnd, cancellationToken);
+        var fifteenMinuteCandles = await timings.MeasureAsync(
+            "symbol.fetch_15m",
+            () => FetchHistoricalCandlesAsync(symbol, FifteenMinuteInterval, periodStart, periodEnd, cancellationToken));
         var fifteenMinuteSeries = BacktestCandleSeries.Create(fifteenMinuteCandles, 15);
         if (fifteenMinuteSeries.Count < 200)
         {
@@ -359,53 +384,84 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
 
         var nyZone = ResolveNewYorkTimeZone();
         var trades = new List<BacktestTradeInternal>();
+        var hardRiskCapBlockedCount = 0;
+        if (_strategyRoutingOptions.SignalSelectionMode == SignalSelectionMode.ScoreBased)
+        {
+            var startedAt = Stopwatch.GetTimestamp();
+            try
+            {
+                BacktestTurtleSignals(
+                    symbol,
+                    periodStart,
+                    fiveMinuteSeries,
+                    turtleSeries,
+                    turtleIndicators,
+                    fiveMinuteTurtleExits,
+                    settings,
+                    trades,
+                    ref hardRiskCapBlockedCount,
+                    cancellationToken);
+            }
+            finally
+            {
+                timings.AddElapsed("symbol.backtest_independent_turtle", Stopwatch.GetTimestamp() - startedAt);
+            }
+        }
+
         var falseBreakoutCount = 0;
         var trueBreakoutBlockedCount = 0;
-        var hardRiskCapBlockedCount = 0;
         var groupedByDay = fiveMinuteSeries.Candles
             .GroupBy(candle => DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(candle.OpenTime, nyZone).Date))
             .OrderBy(group => group.Key);
 
-        foreach (var day in groupedByDay)
+        var nyStartedAt = Stopwatch.GetTimestamp();
+        try
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            if (!IsNySessionComplete(day.Key, nyZone, periodEnd))
+            foreach (var day in groupedByDay)
             {
-                continue;
-            }
-
-            var session = day
-                .Where(candle =>
+                cancellationToken.ThrowIfCancellationRequested();
+                if (!IsNySessionComplete(day.Key, nyZone, periodEnd))
                 {
-                    var ny = TimeZoneInfo.ConvertTime(candle.OpenTime, nyZone);
-                    return ny.TimeOfDay >= TimeSpan.FromHours(8) && ny.TimeOfDay < TimeSpan.FromHours(16);
-                })
-                .OrderBy(candle => candle.OpenTime)
-                .ToArray();
-            if (session.Length < ExpectedNySessionFiveMinuteCandles)
-            {
-                continue;
-            }
+                    continue;
+                }
 
-            BacktestDay(
-                symbol,
-                session,
-                fiveMinuteSeries,
-                fifteenMinuteSeries,
-                turtleSeries,
-                turtleIndicators,
-                btc15m,
-                fiveMinuteTurtleExits,
-                settings,
-                nyZone,
-                trades,
-                ref falseBreakoutCount,
-                ref trueBreakoutBlockedCount,
-                ref hardRiskCapBlockedCount,
-                cancellationToken);
+                var session = day
+                    .Where(candle =>
+                    {
+                        var ny = TimeZoneInfo.ConvertTime(candle.OpenTime, nyZone);
+                        return ny.TimeOfDay >= TimeSpan.FromHours(8) && ny.TimeOfDay < TimeSpan.FromHours(16);
+                    })
+                    .OrderBy(candle => candle.OpenTime)
+                    .ToArray();
+                if (session.Length < ExpectedNySessionFiveMinuteCandles)
+                {
+                    continue;
+                }
+
+                BacktestDay(
+                    symbol,
+                    session,
+                    fiveMinuteSeries,
+                    fifteenMinuteSeries,
+                    turtleSeries,
+                    turtleIndicators,
+                    btc15m,
+                    fiveMinuteTurtleExits,
+                    settings,
+                    nyZone,
+                    trades,
+                    ref falseBreakoutCount,
+                    ref trueBreakoutBlockedCount,
+                    ref hardRiskCapBlockedCount,
+                    cancellationToken);
+            }
+        }
+        finally
+        {
+            timings.AddElapsed("symbol.backtest_ny_router", Stopwatch.GetTimestamp() - nyStartedAt);
         }
 
-        return new SymbolBacktestOutput(symbol, trades, falseBreakoutCount, trueBreakoutBlockedCount, hardRiskCapBlockedCount);
+        return new SymbolBacktestOutput(symbol, trades.OrderBy(trade => trade.EntryTime).ToArray(), falseBreakoutCount, trueBreakoutBlockedCount, hardRiskCapBlockedCount);
     }
 
     private SymbolBacktestOutput BacktestTurtleOnlySymbol(
@@ -425,8 +481,40 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         }
 
         var trades = new List<BacktestTradeInternal>();
-        var equity = settings.InitialEquityUsdt;
         var hardRiskCapBlockedCount = 0;
+        BacktestTurtleSignals(
+            symbol,
+            periodStart,
+            fiveMinuteCandles,
+            turtleCandles,
+            indicators,
+            turtleExits,
+            settings,
+            trades,
+            ref hardRiskCapBlockedCount,
+            cancellationToken);
+
+        return new SymbolBacktestOutput(symbol, trades.OrderBy(trade => trade.EntryTime).ToArray(), 0, 0, hardRiskCapBlockedCount);
+    }
+
+    private void BacktestTurtleSignals(
+        string symbol,
+        DateTimeOffset periodStart,
+        BacktestCandleSeries fiveMinuteCandles,
+        BacktestCandleSeries turtleCandles,
+        PrecomputedTurtleIndicators indicators,
+        PrecomputedTurtleChannelExits turtleExits,
+        BacktestRunSettings settings,
+        List<BacktestTradeInternal> trades,
+        ref int hardRiskCapBlockedCount,
+        CancellationToken cancellationToken)
+    {
+        var minCandles = Math.Max(_turtleOptions.EntrySlowPeriod, _turtleOptions.AtrPeriod) + 1;
+        if (turtleCandles.Count < minCandles || fiveMinuteCandles.Count < 2)
+        {
+            return;
+        }
+
         bool? previousS1WasProfitable = null;
         for (var index = minCandles; index < turtleCandles.Count; index++)
         {
@@ -458,6 +546,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                 continue;
             }
 
+            var equity = settings.InitialEquityUsdt + CalculateClosedPnl(trades, current.OpenTime);
             var trade = SimulateTrade(
                 symbol,
                 signal,
@@ -475,14 +564,11 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             }
 
             trades.Add(trade);
-            equity += trade.NetPnl;
             if (signal.TurtleSystem == "S1")
             {
                 previousS1WasProfitable = trade.NetPnl > 0m;
             }
         }
-
-        return new SymbolBacktestOutput(symbol, trades, 0, 0, hardRiskCapBlockedCount);
     }
 
     private NySessionSignal? TryBuildTurtleOnlySignal(
@@ -599,8 +685,6 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         decimal? lowerReturnLevel = null;
         var processedScoreSignals = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var processedBreakoutClassifications = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        bool? previousS1WasProfitable = null;
-        var realizedPnl = trades.Sum(trade => trade.NetPnl);
 
         for (var i = 1; i < session.Count; i++)
         {
@@ -630,14 +714,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                     }
 
                     var scoreSignal = ToBacktestSignal(decision.SelectedCandidate, session, i);
-                    if (IsTurtleBacktestSignal(scoreSignal) &&
-                        scoreSignal.TurtleSystem == "S1" &&
-                        previousS1WasProfitable == true)
-                    {
-                        continue;
-                    }
-
-                    var accountEquity = settings.InitialEquityUsdt + realizedPnl;
+                    var accountEquity = settings.InitialEquityUsdt + CalculateClosedPnl(trades, session[i].OpenTime);
                     var trade = SimulateTrade(symbol, scoreSignal, session, allFiveMinuteCandles.Candles, turtleExits, i + 1, settings, accountEquity, cancellationToken);
                     if (trade is null)
                     {
@@ -646,12 +723,6 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                     }
 
                     trades.Add(trade);
-                    realizedPnl += trade.NetPnl;
-                    if (IsTurtleBacktestSignal(scoreSignal) && scoreSignal.TurtleSystem == "S1")
-                    {
-                        previousS1WasProfitable = trade.NetPnl > 0m;
-                    }
-
                     i = trade.ExitIndex;
                     continue;
                 }
@@ -698,7 +769,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
 
                 if (filter.IsAllowed)
                 {
-                    var accountEquity = settings.InitialEquityUsdt + realizedPnl;
+                    var accountEquity = settings.InitialEquityUsdt + CalculateClosedPnl(trades, session[i].OpenTime);
                     var trade = SimulateTrade(symbol, signal, session, allFiveMinuteCandles.Candles, turtleExits, i + 1, settings, accountEquity, cancellationToken);
                     if (trade is null)
                     {
@@ -707,7 +778,6 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                     }
 
                     trades.Add(trade);
-                    realizedPnl += trade.NetPnl;
                     i = trade.ExitIndex;
                     upperStop = null;
                     upperSweepAt = null;
@@ -772,7 +842,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             RewardRisk = _strategyOptions.RewardRisk
         };
 
-        return _scoreBasedSignalEngine.Decide(context);
+        return _scoreBasedSignalEngine.Decide(context, includeTurtle: false);
     }
 
     private static void TrackScoreBasedBreakoutCounters(
@@ -915,6 +985,9 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
 
     private static bool HasOpenBacktestTrade(IReadOnlyList<BacktestTradeInternal> trades, DateTimeOffset currentTime) =>
         trades.Any(trade => trade.EntryTime <= currentTime && trade.ExitTime > currentTime);
+
+    private static decimal CalculateClosedPnl(IReadOnlyList<BacktestTradeInternal> trades, DateTimeOffset currentTime) =>
+        trades.Where(trade => trade.ExitTime <= currentTime).Sum(trade => trade.NetPnl);
 
     private static int ParseIntervalMinutes(string interval, int fallback)
     {
@@ -2462,7 +2535,8 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         int falseBreakoutCount,
         int trueBreakoutBlockedCount,
         int hardRiskCapBlockedCount,
-        BacktestRunSettings settings)
+        BacktestRunSettings settings,
+        IReadOnlyList<FuturesBacktestTiming> timings)
     {
         var splitAt = periodEnd.AddDays(-30);
         if (splitAt <= periodStart)
@@ -2589,7 +2663,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             StrategyName = settings.Mode == FuturesBacktestMode.TurtleOnly
                 ? "Turtle-only Donchian S1/S2 trend backtest"
                 : _strategyRoutingOptions.SignalSelectionMode == SignalSelectionMode.ScoreBased
-                ? "NY 08:00 Regime Router: Sweep Reversal + Turtle Trend + Breakout Retest with candle confirmations"
+                ? "Independent Turtle Trend + NY 08:00 Bounce Router: Sweep Reversal + Breakout Retest"
                 : "NY 08:00 4H Sweep Reversal + Engulfing + Pinbar + 3-Bar Continuation + 3-Bar Reversal + Breakout Candle + Shrinking Candles",
             PeriodStart = periodStart,
             PeriodEnd = periodEnd,
@@ -2638,7 +2712,8 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             WeekdayPerformance = BuildBucketPerformance(outOfSampleTrades, trade => trade.EntryTime.DayOfWeek.ToString()),
             HourPerformance = BuildBucketPerformance(outOfSampleTrades, trade => TimeZoneInfo.ConvertTime(trade.EntryTime, ResolveNewYorkTimeZone()).Hour.ToString("00")),
             RecentTrades = publicTrades.OrderByDescending(trade => trade.EntryTime).Take(100).ToArray(),
-            OpenAtBacktestEndTrades = publicOpenAtEndTrades.OrderByDescending(trade => trade.EntryTime).Take(100).ToArray()
+            OpenAtBacktestEndTrades = publicOpenAtEndTrades.OrderByDescending(trade => trade.EntryTime).Take(100).ToArray(),
+            Timings = timings
         };
     }
 
@@ -4116,6 +4191,108 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         int FalseBreakoutCount,
         int TrueBreakoutBlockedCount,
         int HardRiskCapBlockedCount);
+
+    private sealed class BacktestTimingCollector
+    {
+        private readonly ConcurrentDictionary<string, BacktestTimingAccumulator> _items = new(StringComparer.OrdinalIgnoreCase);
+
+        public T Measure<T>(string stage, Func<T> action)
+        {
+            var startedAt = Stopwatch.GetTimestamp();
+            try
+            {
+                return action();
+            }
+            finally
+            {
+                Add(stage, Stopwatch.GetTimestamp() - startedAt);
+            }
+        }
+
+        public void Measure(string stage, Action action)
+        {
+            var startedAt = Stopwatch.GetTimestamp();
+            try
+            {
+                action();
+            }
+            finally
+            {
+                Add(stage, Stopwatch.GetTimestamp() - startedAt);
+            }
+        }
+
+        public async Task<T> MeasureAsync<T>(string stage, Func<Task<T>> action)
+        {
+            var startedAt = Stopwatch.GetTimestamp();
+            try
+            {
+                return await action();
+            }
+            finally
+            {
+                Add(stage, Stopwatch.GetTimestamp() - startedAt);
+            }
+        }
+
+        public IReadOnlyList<FuturesBacktestTiming> ToPublicTimings() =>
+            _items
+                .Select(item => item.Value.ToPublicTiming(item.Key))
+                .OrderByDescending(item => item.TotalMilliseconds)
+                .ThenBy(item => item.Stage)
+                .ToArray();
+
+        public void AddElapsed(string stage, long elapsedTicks) => Add(stage, elapsedTicks);
+
+        private void Add(string stage, long elapsedTicks)
+        {
+            var accumulator = _items.GetOrAdd(stage, _ => new BacktestTimingAccumulator());
+            accumulator.Add(elapsedTicks);
+        }
+    }
+
+    private sealed class BacktestTimingAccumulator
+    {
+        private long _count;
+        private long _totalTicks;
+        private long _maxTicks;
+
+        public void Add(long elapsedTicks)
+        {
+            Interlocked.Increment(ref _count);
+            Interlocked.Add(ref _totalTicks, elapsedTicks);
+
+            var currentMax = Volatile.Read(ref _maxTicks);
+            while (elapsedTicks > currentMax)
+            {
+                var original = Interlocked.CompareExchange(ref _maxTicks, elapsedTicks, currentMax);
+                if (original == currentMax)
+                {
+                    break;
+                }
+
+                currentMax = original;
+            }
+        }
+
+        public FuturesBacktestTiming ToPublicTiming(string stage)
+        {
+            var count = Volatile.Read(ref _count);
+            var totalTicks = Volatile.Read(ref _totalTicks);
+            var totalMs = ToMilliseconds(totalTicks);
+            return new FuturesBacktestTiming
+            {
+                Stage = stage,
+                Count = (int)count,
+                TotalMilliseconds = totalMs,
+                AverageMilliseconds = count > 0 ? totalMs / count : 0m,
+                MaxMilliseconds = ToMilliseconds(Volatile.Read(ref _maxTicks))
+            };
+        }
+
+        private static decimal ToMilliseconds(long ticks) =>
+            Stopwatch.Frequency > 0 ? ticks * 1000m / Stopwatch.Frequency : 0m;
+    }
 
     private sealed record BacktestFilterResult(bool IsAllowed, bool IsTrueBreakoutBlocked);
 

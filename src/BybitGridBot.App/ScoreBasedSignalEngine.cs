@@ -22,7 +22,7 @@ public sealed class ScoreBasedSignalEngine
         _router = router;
     }
 
-    public StrategyDecision Decide(NyStrategyContext context)
+    public StrategyDecision Decide(NyStrategyContext context, bool includeTurtle = true)
     {
         if (context.FiveMinuteCandles.Count < 2)
         {
@@ -32,7 +32,11 @@ public sealed class ScoreBasedSignalEngine
         var breakout = _classifier.Classify(context);
         var candidates = new List<StrategyCandidate>();
         AddIfNotNull(candidates, _sweep.BuildCandidate(context, breakout));
-        AddIfNotNull(candidates, _turtle.BuildCandidate(context, breakout));
+        if (includeTurtle)
+        {
+            AddIfNotNull(candidates, _turtle.BuildCandidate(context, breakout));
+        }
+
         AddIfNotNull(candidates, _retest.BuildCandidate(context, breakout));
         return AttachBreakout(_router.Decide(candidates), breakout);
     }
