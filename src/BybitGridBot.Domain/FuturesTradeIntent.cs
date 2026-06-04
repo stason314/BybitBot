@@ -12,6 +12,12 @@ public sealed class FuturesTradeIntent
 
     public decimal Price { get; init; }
 
+    public decimal? TriggerPrice { get; init; }
+
+    public int? TriggerDirection { get; init; }
+
+    public string? TriggerBy { get; init; }
+
     public decimal Quantity { get; init; }
 
     public decimal Leverage { get; init; } = 1m;

@@ -39,6 +39,11 @@ public interface IGridRepository
     Task<ExecutionTurnoverStats> GetFuturesFillTurnoverAsync(string symbol, DateOnly today, CancellationToken cancellationToken);
     Task<IReadOnlyList<FuturesRiskDecisionRecord>> GetFuturesRiskDecisionsAsync(string symbol, int limit, CancellationToken cancellationToken);
     Task AddFuturesRiskDecisionAsync(FuturesRiskDecisionRecord decision, CancellationToken cancellationToken);
+    Task<TurtleSignalRecord?> GetTurtleSignalAsync(string signalId, CancellationToken cancellationToken);
+    Task<TurtleSignalRecord?> GetOpenTurtleSignalAsync(string symbol, CancellationToken cancellationToken);
+    Task<TurtleSignalRecord?> GetLatestClosedTurtleSignalAsync(string symbol, string system, CancellationToken cancellationToken);
+    Task<IReadOnlyList<TurtleSignalRecord>> GetOpenTurtleSignalsAsync(CancellationToken cancellationToken);
+    Task UpsertTurtleSignalAsync(TurtleSignalRecord signal, CancellationToken cancellationToken);
     Task ClearFuturesPaperHistoryAsync(string symbol, CancellationToken cancellationToken);
     Task<IReadOnlyList<GridLevel>> GetGridLevelsAsync(string symbol, CancellationToken cancellationToken);
     Task SaveGridLevelsAsync(string symbol, IReadOnlyCollection<GridLevel> levels, CancellationToken cancellationToken);

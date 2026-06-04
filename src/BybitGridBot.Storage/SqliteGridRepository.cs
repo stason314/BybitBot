@@ -283,6 +283,24 @@ public sealed class SqliteGridRepository : IGridRepository
                 created_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS turtle_signals (
+                signal_id TEXT NOT NULL PRIMARY KEY,
+                symbol TEXT NOT NULL,
+                system TEXT NOT NULL,
+                side TEXT NOT NULL,
+                signal_time TEXT NOT NULL,
+                entry_price TEXT NOT NULL,
+                last_entry_price TEXT NOT NULL,
+                stop_price TEXT NOT NULL,
+                exit_price TEXT NOT NULL,
+                units INTEGER NOT NULL,
+                n_value TEXT NOT NULL,
+                is_profitable INTEGER NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS strategy_candidates (
                 candidate_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 symbol TEXT NOT NULL,
@@ -1536,6 +1554,124 @@ public sealed class SqliteGridRepository : IGridRepository
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
+    public async Task<TurtleSignalRecord?> GetTurtleSignalAsync(string signalId, CancellationToken cancellationToken)
+    {
+        const string sql = """
+            SELECT signal_id, symbol, system, side, signal_time, entry_price, last_entry_price, stop_price,
+                   exit_price, units, n_value, is_profitable, status, created_at, updated_at
+            FROM turtle_signals
+            WHERE signal_id = $signal_id
+            LIMIT 1;
+            """;
+
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        command.Parameters.AddWithValue("$signal_id", signalId);
+        return (await ReadTurtleSignalsAsync(command, cancellationToken)).FirstOrDefault();
+    }
+
+    public async Task<TurtleSignalRecord?> GetOpenTurtleSignalAsync(string symbol, CancellationToken cancellationToken)
+    {
+        const string sql = """
+            SELECT signal_id, symbol, system, side, signal_time, entry_price, last_entry_price, stop_price,
+                   exit_price, units, n_value, is_profitable, status, created_at, updated_at
+            FROM turtle_signals
+            WHERE symbol = $symbol AND status = 'Open'
+            ORDER BY updated_at DESC
+            LIMIT 1;
+            """;
+
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        command.Parameters.AddWithValue("$symbol", symbol);
+        return (await ReadTurtleSignalsAsync(command, cancellationToken)).FirstOrDefault();
+    }
+
+    public async Task<TurtleSignalRecord?> GetLatestClosedTurtleSignalAsync(string symbol, string system, CancellationToken cancellationToken)
+    {
+        const string sql = """
+            SELECT signal_id, symbol, system, side, signal_time, entry_price, last_entry_price, stop_price,
+                   exit_price, units, n_value, is_profitable, status, created_at, updated_at
+            FROM turtle_signals
+            WHERE symbol = $symbol AND system = $system AND status = 'Closed'
+            ORDER BY updated_at DESC
+            LIMIT 1;
+            """;
+
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        command.Parameters.AddWithValue("$symbol", symbol);
+        command.Parameters.AddWithValue("$system", system);
+        return (await ReadTurtleSignalsAsync(command, cancellationToken)).FirstOrDefault();
+    }
+
+    public async Task<IReadOnlyList<TurtleSignalRecord>> GetOpenTurtleSignalsAsync(CancellationToken cancellationToken)
+    {
+        const string sql = """
+            SELECT signal_id, symbol, system, side, signal_time, entry_price, last_entry_price, stop_price,
+                   exit_price, units, n_value, is_profitable, status, created_at, updated_at
+            FROM turtle_signals
+            WHERE status = 'Open'
+            ORDER BY updated_at DESC;
+            """;
+
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        return await ReadTurtleSignalsAsync(command, cancellationToken);
+    }
+
+    public async Task UpsertTurtleSignalAsync(TurtleSignalRecord signal, CancellationToken cancellationToken)
+    {
+        const string sql = """
+            INSERT INTO turtle_signals (
+                signal_id, symbol, system, side, signal_time, entry_price, last_entry_price, stop_price,
+                exit_price, units, n_value, is_profitable, status, created_at, updated_at
+            )
+            VALUES (
+                $signal_id, $symbol, $system, $side, $signal_time, $entry_price, $last_entry_price, $stop_price,
+                $exit_price, $units, $n_value, $is_profitable, $status, $created_at, $updated_at
+            )
+            ON CONFLICT(signal_id) DO UPDATE SET
+                symbol = excluded.symbol,
+                system = excluded.system,
+                side = excluded.side,
+                signal_time = excluded.signal_time,
+                entry_price = excluded.entry_price,
+                last_entry_price = excluded.last_entry_price,
+                stop_price = excluded.stop_price,
+                exit_price = excluded.exit_price,
+                units = excluded.units,
+                n_value = excluded.n_value,
+                is_profitable = excluded.is_profitable,
+                status = excluded.status,
+                updated_at = excluded.updated_at;
+            """;
+
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        command.Parameters.AddWithValue("$signal_id", signal.SignalId);
+        command.Parameters.AddWithValue("$symbol", signal.Symbol);
+        command.Parameters.AddWithValue("$system", signal.System);
+        command.Parameters.AddWithValue("$side", signal.Side);
+        command.Parameters.AddWithValue("$signal_time", signal.SignalTime.ToString("O", CultureInfo.InvariantCulture));
+        command.Parameters.AddWithValue("$entry_price", FormatDecimal(signal.EntryPrice));
+        command.Parameters.AddWithValue("$last_entry_price", FormatDecimal(signal.LastEntryPrice));
+        command.Parameters.AddWithValue("$stop_price", FormatDecimal(signal.StopPrice));
+        command.Parameters.AddWithValue("$exit_price", FormatDecimal(signal.ExitPrice));
+        command.Parameters.AddWithValue("$units", signal.Units);
+        command.Parameters.AddWithValue("$n_value", FormatDecimal(signal.NValue));
+        command.Parameters.AddWithValue("$is_profitable", signal.IsProfitable is null ? (object)DBNull.Value : signal.IsProfitable.Value);
+        command.Parameters.AddWithValue("$status", signal.Status);
+        command.Parameters.AddWithValue("$created_at", signal.CreatedAt.ToString("O", CultureInfo.InvariantCulture));
+        command.Parameters.AddWithValue("$updated_at", signal.UpdatedAt.ToString("O", CultureInfo.InvariantCulture));
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
     public async Task ClearFuturesPaperHistoryAsync(string symbol, CancellationToken cancellationToken)
     {
         const string sql = """
@@ -1543,6 +1679,7 @@ public sealed class SqliteGridRepository : IGridRepository
             DELETE FROM futures_orders WHERE symbol = $symbol;
             DELETE FROM futures_risk_decisions WHERE symbol = $symbol;
             DELETE FROM futures_positions WHERE symbol = $symbol;
+            DELETE FROM turtle_signals WHERE symbol = $symbol;
             """;
 
         await using var connection = await OpenConnectionAsync(cancellationToken);
@@ -2399,6 +2536,38 @@ public sealed class SqliteGridRepository : IGridRepository
         Reason = reader.GetString(3),
         CreatedAt = DateTimeOffset.Parse(reader.GetString(4), CultureInfo.InvariantCulture)
     };
+
+    private static async Task<List<TurtleSignalRecord>> ReadTurtleSignalsAsync(
+        SqliteCommand command,
+        CancellationToken cancellationToken)
+    {
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        var result = new List<TurtleSignalRecord>();
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            bool? isProfitable = reader.IsDBNull(11) ? null : reader.GetBoolean(11);
+            result.Add(new TurtleSignalRecord
+            {
+                SignalId = reader.GetString(0),
+                Symbol = reader.GetString(1),
+                System = reader.GetString(2),
+                Side = reader.GetString(3),
+                SignalTime = DateTimeOffset.Parse(reader.GetString(4), CultureInfo.InvariantCulture),
+                EntryPrice = ParseDecimal(reader.GetString(5)),
+                LastEntryPrice = ParseDecimal(reader.GetString(6)),
+                StopPrice = ParseDecimal(reader.GetString(7)),
+                ExitPrice = ParseDecimal(reader.GetString(8)),
+                Units = reader.GetInt32(9),
+                NValue = ParseDecimal(reader.GetString(10)),
+                IsProfitable = isProfitable,
+                Status = reader.GetString(12),
+                CreatedAt = DateTimeOffset.Parse(reader.GetString(13), CultureInfo.InvariantCulture),
+                UpdatedAt = DateTimeOffset.Parse(reader.GetString(14), CultureInfo.InvariantCulture)
+            });
+        }
+
+        return result;
+    }
 
     private static void AddFuturesOrderParameters(SqliteCommand command, FuturesOrderRecord order)
     {

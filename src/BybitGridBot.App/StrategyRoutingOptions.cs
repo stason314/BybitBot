@@ -152,10 +152,10 @@ public sealed class TurtleTrendOptions
     public bool UseChannelExit { get; init; } = true;
 
     [ConfigurationKeyName("TURTLE_USE_TRAILING_ATR_STOP")]
-    public bool UseTrailingAtrStop { get; init; } = true;
+    public bool UseTrailingAtrStop { get; init; } = false;
 
     [ConfigurationKeyName("TURTLE_USE_PROFIT_LOCK")]
-    public bool UseProfitLock { get; init; } = true;
+    public bool UseProfitLock { get; init; } = false;
 
     [ConfigurationKeyName("TURTLE_BREAKEVEN_TRIGGER_R")]
     [Range(typeof(decimal), "0", "100")]
@@ -178,11 +178,11 @@ public sealed class TurtleTrendOptions
     public decimal AtrTrailMultiplier { get; init; } = 2m;
 
     [ConfigurationKeyName("TURTLE_USE_PYRAMIDING")]
-    public bool UsePyramiding { get; init; } = false;
+    public bool UsePyramiding { get; init; } = true;
 
     [ConfigurationKeyName("TURTLE_MAX_UNITS")]
     [Range(1, 20)]
-    public int MaxUnits { get; init; } = 2;
+    public int MaxUnits { get; init; } = 4;
 
     [ConfigurationKeyName("TURTLE_ADD_ATR_INTERVAL")]
     [Range(typeof(decimal), "0.00000001", "100")]
@@ -190,5 +190,21 @@ public sealed class TurtleTrendOptions
 
     [ConfigurationKeyName("TURTLE_RISK_PER_UNIT_PERCENT")]
     [Range(typeof(decimal), "0.00000001", "100")]
-    public decimal RiskPerUnitPercent { get; init; } = 0.25m;
+    public decimal RiskPerUnitPercent { get; init; } = 1m;
+
+    [ConfigurationKeyName("TURTLE_POINT_VALUE_USDT")]
+    [Range(typeof(decimal), "0.00000001", "999999999")]
+    public decimal PointValueUsdt { get; init; } = 1m;
+
+    [ConfigurationKeyName("TURTLE_MAX_UNITS_CORRELATED")]
+    [Range(1, 100)]
+    public int MaxUnitsCorrelated { get; init; } = 6;
+
+    [ConfigurationKeyName("TURTLE_MAX_UNITS_TIGHT")]
+    [Range(1, 100)]
+    public int MaxUnitsTight { get; init; } = 10;
+
+    [ConfigurationKeyName("TURTLE_MAX_UNITS_DIRECTION")]
+    [Range(1, 100)]
+    public int MaxUnitsDirection { get; init; } = 12;
 }

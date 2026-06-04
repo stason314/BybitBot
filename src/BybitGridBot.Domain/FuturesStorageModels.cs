@@ -104,3 +104,36 @@ public sealed class FuturesRiskDecisionRecord
 
     public DateTimeOffset CreatedAt { get; init; } = DateTimeOffset.UtcNow;
 }
+
+public sealed class TurtleSignalRecord
+{
+    public string SignalId { get; init; } = string.Empty;
+
+    public string Symbol { get; init; } = string.Empty;
+
+    public string System { get; init; } = "S1";
+
+    public string Side { get; init; } = "Long";
+
+    public DateTimeOffset SignalTime { get; init; }
+
+    public decimal EntryPrice { get; set; }
+
+    public decimal LastEntryPrice { get; set; }
+
+    public decimal StopPrice { get; set; }
+
+    public decimal ExitPrice { get; set; }
+
+    public int Units { get; set; }
+
+    public decimal NValue { get; set; }
+
+    public bool? IsProfitable { get; set; }
+
+    public string Status { get; set; } = "Open";
+
+    public DateTimeOffset CreatedAt { get; init; } = DateTimeOffset.UtcNow;
+
+    public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
+}

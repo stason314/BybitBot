@@ -48,6 +48,33 @@ public static class TradingIndicatorMath
         return trueRanges.TakeLast(Math.Min(period, trueRanges.Count)).DefaultIfEmpty(0m).Average();
     }
 
+    public static decimal TurtleN(IReadOnlyList<Candle> candles, int period)
+    {
+        var ordered = candles.OrderBy(candle => candle.OpenTime).ToArray();
+        if (ordered.Length < period + 1 || period <= 0)
+        {
+            return 0m;
+        }
+
+        var trueRanges = new List<decimal>();
+        for (var index = 1; index < ordered.Length; index++)
+        {
+            var current = ordered[index];
+            var previous = ordered[index - 1];
+            trueRanges.Add(decimal.Max(
+                current.High - current.Low,
+                decimal.Max(Math.Abs(current.High - previous.Close), Math.Abs(current.Low - previous.Close))));
+        }
+
+        var n = trueRanges.Take(period).Average();
+        for (var index = period; index < trueRanges.Count; index++)
+        {
+            n = ((period - 1m) * n + trueRanges[index]) / period;
+        }
+
+        return n;
+    }
+
     public static decimal Adx(IReadOnlyList<Candle> candles, int period)
     {
         var ordered = candles.OrderBy(candle => candle.OpenTime).ToArray();

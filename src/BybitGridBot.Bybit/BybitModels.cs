@@ -60,6 +60,15 @@ public sealed class BybitCreateOrderRequest
     [JsonPropertyName("price")]
     public string? Price { get; init; }
 
+    [JsonPropertyName("triggerPrice")]
+    public string? TriggerPrice { get; init; }
+
+    [JsonPropertyName("triggerDirection")]
+    public int? TriggerDirection { get; init; }
+
+    [JsonPropertyName("triggerBy")]
+    public string? TriggerBy { get; init; }
+
     [JsonPropertyName("timeInForce")]
     public string TimeInForce { get; init; } = "GTC";
 

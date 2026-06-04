@@ -5,6 +5,8 @@ using BybitGridBot.Storage;
 using BybitGridBot.Strategy;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
+using System.Security.Cryptography;
+using System.Text;
 
 namespace BybitGridBot.App;
 
@@ -498,8 +500,14 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
             }
 
             var position = await ResolvePositionAsync(item.Symbol, item.LastPrice, cancellationToken);
+            if (position.Size <= 0m)
+            {
+                await CloseStaleTurtleSignalIfFlatAsync(item.Symbol, item.LastPrice, cancellationToken);
+            }
+
             if (position.Size > 0m)
             {
+                await ManageOpenTurtlePositionAsync(item.Symbol, position, instruments[item.Symbol], cancellationToken);
                 continue;
             }
 
@@ -511,6 +519,12 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
                 IsSignalAlreadyHandled(item.Symbol, signal.SignalCandleOpenTime) ||
                 await HasOpeningOrderAfterSignalAsync(item.Symbol, signal.SignalCandleOpenTime, cancellationToken))
             {
+                continue;
+            }
+
+            if (IsTurtleSignal(signal) && await ShouldSkipTurtleSignalAsync(item.Symbol, signal, cancellationToken))
+            {
+                MarkSignalHandled(item.Symbol, signal.SignalCandleOpenTime);
                 continue;
             }
 
@@ -576,8 +590,25 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
 
             var instrument = MapInstrumentRules(instruments[item.Symbol]);
             var entryNotionalUsdt = _options.EntryNotionalUsdt * edgeSizeMultiplier;
+            decimal? quantityOverride = null;
+            if (IsTurtleSignal(signal))
+            {
+                var turtleRisk = await EvaluateTurtleUnitRiskAsync(item.Symbol, signal, instrument, cancellationToken);
+                if (!turtleRisk.IsAllowed || turtleRisk.UnitQuantity <= 0m)
+                {
+                    MarkSignalHandled(item.Symbol, signal.SignalCandleOpenTime);
+                    AddEvent(item.Symbol, "warning", turtleRisk.Reason);
+                    await RecordTurtleRiskDecisionAsync(item.Symbol, signal, false, turtleRisk.Reason, cancellationToken);
+                    continue;
+                }
+
+                quantityOverride = turtleRisk.UnitQuantity;
+                entryNotionalUsdt = signal.EntryPrice * turtleRisk.UnitQuantity;
+                await RecordTurtleRiskDecisionAsync(item.Symbol, signal, true, turtleRisk.Reason, cancellationToken);
+            }
+
             var settings = BuildSettings(item.Symbol, signal, entryNotionalUsdt, edgeSizeMultiplier);
-            var intent = BuildOpenIntent(settings, signal, instrument, entryNotionalUsdt);
+            var intent = BuildOpenIntent(settings, signal, instrument, entryNotionalUsdt, quantityOverride);
             var result = await _executionService.ExecuteAsync(new FuturesExecutionRequest
             {
                 Settings = settings,
@@ -588,6 +619,11 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
             }, cancellationToken);
 
             MarkSignalHandled(item.Symbol, signal.SignalCandleOpenTime);
+            if (IsTurtleSignal(signal))
+            {
+                await RecordOpenTurtleSignalAsync(item.Symbol, signal, intent.Price, intent.StopLossPrice ?? signal.StopLoss, cancellationToken);
+            }
+
             openPositions++;
             AddEvent(item.Symbol, "trade", $"{signal.Pattern} {signal.Side} opened at {signal.EntryPrice}. Size {edgeSizeMultiplier:0.####}x. SL {signal.StopLoss}, TP {signal.TakeProfit}.");
             await _notifier.NotifyAsync(
@@ -722,6 +758,9 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
     {
         var intent = candidate.TradeIntent ?? throw new InvalidOperationException("Selected candidate has no trade intent.");
         var risk = Math.Abs(intent.EntryPrice - intent.StopLoss);
+        var turtleSignalId = string.Equals(candidate.StrategyName, TurtleTrendStrategy.Name, StringComparison.OrdinalIgnoreCase)
+            ? BuildTurtleSignalId(candidate.Symbol, intent.TurtleSystem, candidate.Side, candidate.CreatedAt, intent.TurtleBreakoutLevel)
+            : string.Empty;
         return new NySessionSignal
         {
             Pattern = candidate.StrategyName,
@@ -736,6 +775,10 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
             StopLoss = intent.StopLoss,
             TakeProfit = intent.TakeProfit ?? 0m,
             StopDistancePercent = intent.EntryPrice > 0m ? risk / intent.EntryPrice * 100m : 0m,
+            TurtleSystem = intent.TurtleSystem,
+            TurtleSignalId = turtleSignalId,
+            TurtleN = intent.TurtleN,
+            TurtleBreakoutLevel = intent.TurtleBreakoutLevel,
             Reason = candidate.Reason
         };
     }
@@ -778,7 +821,8 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
                 continue;
             }
 
-            var exitPrice = ResolvePaperExitPrice(position, entryOrder, candles, lastClosed);
+            var turtleSignal = await _repository.GetOpenTurtleSignalAsync(item.Symbol, cancellationToken);
+            var exitPrice = ResolvePaperExitPrice(position, entryOrder, candles, lastClosed, turtleSignal);
             if (exitPrice is null)
             {
                 continue;
@@ -815,6 +859,11 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
                 MarkPrice = intent.Price,
                 Instrument = instrument
             }, cancellationToken);
+            if (turtleSignal is not null)
+            {
+                await CloseTurtleSignalAsync(turtleSignal, intent.Price, cancellationToken);
+            }
+
             AddEvent(item.Symbol, "trade", $"Paper position closed at {intent.Price} by SL/TP/channel.");
         }
     }
@@ -823,9 +872,12 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
         FuturesPositionSnapshot position,
         FuturesOrderRecord entryOrder,
         IReadOnlyList<Candle> candles,
-        Candle candle)
+        Candle candle,
+        TurtleSignalRecord? turtleSignal)
     {
-        var protectedStop = ResolvePaperProtectedStop(position, entryOrder, candles, candle);
+        var protectedStop = turtleSignal?.StopPrice > 0m
+            ? turtleSignal.StopPrice
+            : ResolvePaperProtectedStop(position, entryOrder, candles, candle);
         if (IsShort(position.Side))
         {
             if (candle.High >= protectedStop)
@@ -838,7 +890,7 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
                 return entryOrder.TakeProfitPrice;
             }
 
-            if (entryOrder.TakeProfitPrice <= 0m && IsTurtleChannelExit(candles, candle, StrategySide.Short))
+            if (entryOrder.TakeProfitPrice <= 0m && IsTurtleChannelExit(candles, candle, StrategySide.Short, turtleSignal?.System))
             {
                 return candle.Close;
             }
@@ -855,7 +907,7 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
                 return entryOrder.TakeProfitPrice;
             }
 
-            if (entryOrder.TakeProfitPrice <= 0m && IsTurtleChannelExit(candles, candle, StrategySide.Long))
+            if (entryOrder.TakeProfitPrice <= 0m && IsTurtleChannelExit(candles, candle, StrategySide.Long, turtleSignal?.System))
             {
                 return candle.Close;
             }
@@ -930,20 +982,23 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
         return protectedStop;
     }
 
-    private bool IsTurtleChannelExit(IReadOnlyList<Candle> candles, Candle current, StrategySide side)
+    private bool IsTurtleChannelExit(IReadOnlyList<Candle> candles, Candle current, StrategySide side, string? turtleSystem = null)
     {
         if (!_turtleOptions.UseChannelExit)
         {
             return false;
         }
 
+        var configuredExitPeriod = string.Equals(turtleSystem, "S2", StringComparison.OrdinalIgnoreCase)
+            ? _turtleOptions.ExitSlowPeriod
+            : _turtleOptions.ExitFastPeriod;
         var closed = candles
             .Where(candle => candle.OpenTime <= current.OpenTime)
             .OrderBy(candle => candle.OpenTime)
             .ToArray();
         var exitBars = Math.Max(
-            _turtleOptions.ExitFastPeriod,
-            _turtleOptions.ExitFastPeriod * ParseIntervalMinutes(_turtleOptions.Timeframe) / 5);
+            configuredExitPeriod,
+            configuredExitPeriod * ParseIntervalMinutes(_turtleOptions.Timeframe) / 5);
         if (closed.Length < exitBars + 2)
         {
             return false;
@@ -2592,16 +2647,470 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
             order.CreatedAt >= signalCandleOpenTime);
     }
 
+    private async Task<bool> ShouldSkipTurtleSignalAsync(string symbol, NySessionSignal signal, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(signal.TurtleSignalId))
+        {
+            return true;
+        }
+
+        if (await _repository.GetTurtleSignalAsync(signal.TurtleSignalId, cancellationToken) is not null ||
+            await _repository.GetFuturesOrderByLinkIdAsync(BuildTurtleOrderLinkId(signal.TurtleSignalId), cancellationToken) is not null)
+        {
+            AddEvent(symbol, "warning", $"{signal.TurtleSystem} {signal.Side} skipped by persisted idempotency.");
+            return true;
+        }
+
+        if (signal.TurtleSystem == "S1")
+        {
+            var previousS1 = await _repository.GetLatestClosedTurtleSignalAsync(symbol, "S1", cancellationToken);
+            if (previousS1?.IsProfitable == true)
+            {
+                AddEvent(symbol, "warning", $"S1 {signal.Side} skipped because previous S1 signal was profitable.");
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private async Task<TurtleUnitRiskResult> EvaluateTurtleUnitRiskAsync(
+        string symbol,
+        NySessionSignal signal,
+        FuturesInstrumentRules instrument,
+        CancellationToken cancellationToken)
+    {
+        var equity = await ResolveAccountEquityUsdtAsync(symbol, signal.EntryPrice, cancellationToken);
+        var dollarVolatility = signal.TurtleN * _turtleOptions.PointValueUsdt;
+        if (equity <= 0m || dollarVolatility <= 0m)
+        {
+            return TurtleUnitRiskResult.Blocked("Turtle sizing blocked: account equity or dollar volatility is zero.");
+        }
+
+        var rawUnit = equity * _turtleOptions.RiskPerUnitPercent / 100m / dollarVolatility;
+        var quantity = instrument.RoundQuantity(rawUnit);
+        if (quantity <= 0m)
+        {
+            return TurtleUnitRiskResult.Blocked($"Turtle sizing blocked: Unit=floor_to_step({equity:0.####} * {_turtleOptions.RiskPerUnitPercent:0.####}% / {dollarVolatility:0.########}) is below tradable size.");
+        }
+
+        if (instrument.MinOrderQty > 0m && quantity < instrument.MinOrderQty)
+        {
+            return TurtleUnitRiskResult.Blocked($"Turtle sizing blocked: Unit {quantity:0.########} is below min qty {instrument.MinOrderQty:0.########}.");
+        }
+
+        if (instrument.MinOrderAmount > 0m && signal.EntryPrice * quantity < instrument.MinOrderAmount)
+        {
+            return TurtleUnitRiskResult.Blocked($"Turtle sizing blocked: Unit notional {signal.EntryPrice * quantity:0.########} is below min notional {instrument.MinOrderAmount:0.########}.");
+        }
+
+        var limitReason = await GetTurtleUnitLimitBlockReasonAsync(symbol, signal.Side, 1, cancellationToken);
+        if (limitReason is not null)
+        {
+            return TurtleUnitRiskResult.Blocked(limitReason);
+        }
+
+        return TurtleUnitRiskResult.Allowed(quantity, $"Turtle risk passed. Equity={equity:0.####}, N={signal.TurtleN:0.########}, DV={dollarVolatility:0.########}, Unit={quantity:0.########}.");
+    }
+
+    private async Task<string?> GetTurtleUnitLimitBlockReasonAsync(
+        string symbol,
+        string side,
+        int addedUnits,
+        CancellationToken cancellationToken)
+    {
+        var openSignals = await _repository.GetOpenTurtleSignalsAsync(cancellationToken);
+        var symbolUnits = openSignals
+            .Where(signal => string.Equals(signal.Symbol, symbol, StringComparison.OrdinalIgnoreCase))
+            .Sum(signal => signal.Units);
+        if (symbolUnits + addedUnits > _turtleOptions.MaxUnits)
+        {
+            return $"Turtle unit limit blocked: {symbol} would exceed {_turtleOptions.MaxUnits} units.";
+        }
+
+        var group = ResolveTurtleCorrelationGroup(symbol);
+        var groupUnits = openSignals
+            .Where(signal => string.Equals(ResolveTurtleCorrelationGroup(signal.Symbol), group, StringComparison.OrdinalIgnoreCase))
+            .Sum(signal => signal.Units);
+        if (groupUnits + addedUnits > _turtleOptions.MaxUnitsCorrelated)
+        {
+            return $"Turtle correlated limit blocked: group {group} would exceed {_turtleOptions.MaxUnitsCorrelated} units.";
+        }
+
+        var tightGroup = ResolveTurtleTightGroup(symbol);
+        var tightUnits = openSignals
+            .Where(signal => string.Equals(ResolveTurtleTightGroup(signal.Symbol), tightGroup, StringComparison.OrdinalIgnoreCase))
+            .Sum(signal => signal.Units);
+        if (tightUnits + addedUnits > _turtleOptions.MaxUnitsTight)
+        {
+            return $"Turtle tight-correlation limit blocked: group {tightGroup} would exceed {_turtleOptions.MaxUnitsTight} units.";
+        }
+
+        var directionUnits = openSignals
+            .Where(signal => string.Equals(signal.Side, side, StringComparison.OrdinalIgnoreCase))
+            .Sum(signal => signal.Units);
+        if (directionUnits + addedUnits > _turtleOptions.MaxUnitsDirection)
+        {
+            return $"Turtle direction limit blocked: {side} would exceed {_turtleOptions.MaxUnitsDirection} units.";
+        }
+
+        return null;
+    }
+
+    private async Task ManageOpenTurtlePositionAsync(
+        string symbol,
+        FuturesPositionSnapshot position,
+        BybitInstrumentInfo bybitInstrument,
+        CancellationToken cancellationToken)
+    {
+        var turtleSignal = await _repository.GetOpenTurtleSignalAsync(symbol, cancellationToken);
+        if (turtleSignal is null)
+        {
+            return;
+        }
+
+        var intervalMinutes = ParseIntervalMinutes(_turtleOptions.Timeframe);
+        var candles = (await _bybitRestClient.GetKlinesAsync(Category, symbol, _turtleOptions.Timeframe, 140, cancellationToken))
+            .Where(candle => candle.OpenTime.AddMinutes(intervalMinutes) <= DateTimeOffset.UtcNow)
+            .OrderBy(candle => candle.OpenTime)
+            .ToArray();
+        if (candles.Length < Math.Max(_turtleOptions.ExitSlowPeriod, _turtleOptions.AtrPeriod) + 1)
+        {
+            return;
+        }
+
+        var current = candles[^1];
+        var side = IsShort(position.Side) ? StrategySide.Short : StrategySide.Long;
+        if (IsTurtleSystemChannelExit(candles, current, side, turtleSignal.System))
+        {
+            await CloseTurtlePositionAsync(symbol, position, turtleSignal, current.Close, "Turtle channel exit", bybitInstrument, cancellationToken);
+            return;
+        }
+
+        if (!_turtleOptions.UsePyramiding || turtleSignal.Units >= _turtleOptions.MaxUnits)
+        {
+            return;
+        }
+
+        var nextEntry = side == StrategySide.Long
+            ? turtleSignal.LastEntryPrice + turtleSignal.NValue * _turtleOptions.AddAtrInterval
+            : turtleSignal.LastEntryPrice - turtleSignal.NValue * _turtleOptions.AddAtrInterval;
+        var shouldAdd = side == StrategySide.Long ? current.Close >= nextEntry : current.Close <= nextEntry;
+        if (!shouldAdd)
+        {
+            return;
+        }
+
+        var signal = new NySessionSignal
+        {
+            Pattern = TurtleTrendStrategy.Name,
+            Side = side == StrategySide.Short ? "Short" : "Long",
+            SignalCandleOpenTime = current.OpenTime,
+            BreakoutCandleOpenTime = current.OpenTime,
+            EntryPrice = current.Close,
+            StopLoss = side == StrategySide.Long
+                ? nextEntry - turtleSignal.NValue * _turtleOptions.StopAtrMultiplier
+                : nextEntry + turtleSignal.NValue * _turtleOptions.StopAtrMultiplier,
+            TurtleSystem = turtleSignal.System,
+            TurtleSignalId = $"{turtleSignal.SignalId}:U{turtleSignal.Units + 1}",
+            TurtleN = turtleSignal.NValue,
+            TurtleBreakoutLevel = nextEntry,
+            Reason = $"Turtle pyramiding unit #{turtleSignal.Units + 1} at {nextEntry:F8}."
+        };
+        var instrument = MapInstrumentRules(bybitInstrument);
+        var risk = await EvaluateTurtleUnitRiskAsync(symbol, signal, instrument, cancellationToken);
+        if (!risk.IsAllowed || risk.UnitQuantity <= 0m)
+        {
+            AddEvent(symbol, "warning", risk.Reason);
+            await RecordTurtleRiskDecisionAsync(symbol, signal, false, risk.Reason, cancellationToken);
+            return;
+        }
+
+        var settings = BuildSettings(symbol, signal, signal.EntryPrice * risk.UnitQuantity, 1m);
+        var intent = BuildOpenIntent(settings, signal, instrument, signal.EntryPrice * risk.UnitQuantity, risk.UnitQuantity);
+        var result = await _executionService.ExecuteAsync(new FuturesExecutionRequest
+        {
+            Settings = settings,
+            Intent = intent,
+            Position = position,
+            MarkPrice = signal.EntryPrice,
+            Instrument = instrument
+        }, cancellationToken);
+
+        turtleSignal.Units += 1;
+        turtleSignal.LastEntryPrice = intent.Price;
+        turtleSignal.StopPrice = intent.StopLossPrice ?? signal.StopLoss;
+        turtleSignal.UpdatedAt = DateTimeOffset.UtcNow;
+        await _repository.UpsertTurtleSignalAsync(turtleSignal, cancellationToken);
+        await EnsureTurtleTradingStopAsync(symbol, position.PositionIdx, turtleSignal.StopPrice, cancellationToken);
+        await RecordTurtleRiskDecisionAsync(symbol, signal, true, risk.Reason, cancellationToken);
+        AddEvent(symbol, "trade", $"Turtle unit #{turtleSignal.Units} added at {intent.Price}. Stop moved to {turtleSignal.StopPrice}. {result.Message}");
+        await _notifier.NotifyAsync(
+            $"Turtle add unit.\nSymbol: `{symbol}`\nSystem: `{turtleSignal.System}`\nSide: `{signal.Side}`\nUnit: `{turtleSignal.Units}`\nEntry: `{intent.Price}`\nStop: `{turtleSignal.StopPrice}`",
+            cancellationToken);
+    }
+
+    private bool IsTurtleSystemChannelExit(IReadOnlyList<Candle> candles, Candle current, StrategySide side, string system)
+    {
+        if (!_turtleOptions.UseChannelExit)
+        {
+            return false;
+        }
+
+        var exitPeriod = string.Equals(system, "S2", StringComparison.OrdinalIgnoreCase)
+            ? _turtleOptions.ExitSlowPeriod
+            : _turtleOptions.ExitFastPeriod;
+        if (candles.Count < exitPeriod + 2)
+        {
+            return false;
+        }
+
+        var exitLow = TradingIndicatorMath.DonchianLow(candles, exitPeriod);
+        var exitHigh = TradingIndicatorMath.DonchianHigh(candles, exitPeriod);
+        return side == StrategySide.Long
+            ? exitLow > 0m && current.Close < exitLow
+            : exitHigh > 0m && current.Close > exitHigh;
+    }
+
+    private async Task CloseTurtlePositionAsync(
+        string symbol,
+        FuturesPositionSnapshot position,
+        TurtleSignalRecord turtleSignal,
+        decimal exitPrice,
+        string reason,
+        BybitInstrumentInfo bybitInstrument,
+        CancellationToken cancellationToken)
+    {
+        var instrument = MapInstrumentRules(bybitInstrument);
+        var action = IsShort(position.Side) ? FuturesTradeAction.CloseShort : FuturesTradeAction.CloseLong;
+        var intent = new FuturesTradeIntent
+        {
+            Symbol = symbol,
+            Category = Category,
+            Action = action,
+            OrderType = OrderType.Market,
+            Price = instrument.RoundPrice(exitPrice),
+            Quantity = instrument.RoundQuantity(position.Size),
+            Leverage = position.Leverage > 0m ? position.Leverage : _futuresOptions.Leverage,
+            PositionIdx = position.PositionIdx,
+            OrderLinkId = FuturesOrderLinkIds.Create(action),
+            Reason = "turtle-channel-exit"
+        };
+        var settings = BuildSettings(symbol, new NySessionSignal
+        {
+            Side = IsShort(position.Side) ? "Short" : "Long",
+            EntryPrice = position.EntryPrice,
+            StopLoss = turtleSignal.StopPrice,
+            TurtleSystem = turtleSignal.System,
+            TurtleSignalId = turtleSignal.SignalId,
+            TurtleN = turtleSignal.NValue
+        }, Math.Abs(intent.Price * intent.Quantity), 1m);
+        var result = await _executionService.ExecuteAsync(new FuturesExecutionRequest
+        {
+            Settings = settings,
+            Intent = intent,
+            Position = position,
+            MarkPrice = intent.Price,
+            Instrument = instrument
+        }, cancellationToken);
+
+        await CloseTurtleSignalAsync(turtleSignal, intent.Price, cancellationToken);
+        AddEvent(symbol, "trade", $"{reason} at {intent.Price}. {result.Message}");
+        await _notifier.NotifyAsync(
+            $"Turtle exit.\nSymbol: `{symbol}`\nSystem: `{turtleSignal.System}`\nSide: `{turtleSignal.Side}`\nExit: `{intent.Price}`\nReason: `{reason}`",
+            cancellationToken);
+    }
+
+    private async Task RecordOpenTurtleSignalAsync(
+        string symbol,
+        NySessionSignal signal,
+        decimal entryPrice,
+        decimal stopPrice,
+        CancellationToken cancellationToken)
+    {
+        await _repository.UpsertTurtleSignalAsync(new TurtleSignalRecord
+        {
+            SignalId = signal.TurtleSignalId,
+            Symbol = symbol,
+            System = signal.TurtleSystem,
+            Side = signal.Side,
+            SignalTime = signal.SignalCandleOpenTime,
+            EntryPrice = entryPrice,
+            LastEntryPrice = entryPrice,
+            StopPrice = stopPrice,
+            Units = 1,
+            NValue = signal.TurtleN,
+            Status = "Open",
+            CreatedAt = DateTimeOffset.UtcNow,
+            UpdatedAt = DateTimeOffset.UtcNow
+        }, cancellationToken);
+    }
+
+    private async Task CloseTurtleSignalAsync(TurtleSignalRecord turtleSignal, decimal exitPrice, CancellationToken cancellationToken)
+    {
+        turtleSignal.ExitPrice = exitPrice;
+        turtleSignal.IsProfitable = string.Equals(turtleSignal.Side, "Short", StringComparison.OrdinalIgnoreCase)
+            ? exitPrice < turtleSignal.EntryPrice
+            : exitPrice > turtleSignal.EntryPrice;
+        turtleSignal.Status = "Closed";
+        turtleSignal.UpdatedAt = DateTimeOffset.UtcNow;
+        await _repository.UpsertTurtleSignalAsync(turtleSignal, cancellationToken);
+    }
+
+    private async Task CloseStaleTurtleSignalIfFlatAsync(string symbol, decimal fallbackExitPrice, CancellationToken cancellationToken)
+    {
+        var turtleSignal = await _repository.GetOpenTurtleSignalAsync(symbol, cancellationToken);
+        if (turtleSignal is null)
+        {
+            return;
+        }
+
+        var orderLinkId = BuildTurtleOrderLinkId(turtleSignal.SignalId);
+        var order = await _repository.GetFuturesOrderByLinkIdAsync(orderLinkId, cancellationToken);
+        if (order?.IsActive == true)
+        {
+            return;
+        }
+
+        await CloseTurtleSignalAsync(turtleSignal, fallbackExitPrice > 0m ? fallbackExitPrice : turtleSignal.StopPrice, cancellationToken);
+        AddEvent(symbol, "info", $"Open Turtle signal marked closed because position is flat. Exit={fallbackExitPrice}.");
+    }
+
+    private async Task EnsureTurtleTradingStopAsync(
+        string symbol,
+        int positionIdx,
+        decimal stopPrice,
+        CancellationToken cancellationToken)
+    {
+        if (_appOptions.TradingMode == TradingMode.Paper || stopPrice <= 0m)
+        {
+            return;
+        }
+
+        await _bybitRestClient.SetTradingStopAsync(new BybitSetTradingStopRequest
+        {
+            Category = Category,
+            Symbol = symbol,
+            PositionIdx = positionIdx,
+            StopLoss = stopPrice.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            StopLossTriggerBy = "MarkPrice",
+            TakeProfitStopLossMode = "Full"
+        }, cancellationToken);
+    }
+
+    private async Task<decimal> ResolveAccountEquityUsdtAsync(string symbol, decimal markPrice, CancellationToken cancellationToken)
+    {
+        if (_appOptions.TradingMode == TradingMode.Paper)
+        {
+            var state = await _repository.GetBotStateAsync(symbol, cancellationToken);
+            var equity = (state?.QuoteAssetBalance ?? _futuresOptions.PaperInitialEquityUsdt) + (state?.UnrealizedPnl ?? 0m);
+            return equity > 0m ? equity : _futuresOptions.PaperInitialEquityUsdt;
+        }
+
+        var wallet = await _bybitRestClient.GetWalletBalanceAsync(cancellationToken, "USDT");
+        return wallet.Coins.TryGetValue("USDT", out var usdt) && usdt.Equity > 0m
+            ? usdt.Equity
+            : _futuresOptions.PaperInitialEquityUsdt;
+    }
+
+    private async Task RecordTurtleRiskDecisionAsync(
+        string symbol,
+        NySessionSignal signal,
+        bool allowed,
+        string reason,
+        CancellationToken cancellationToken)
+    {
+        await _repository.AddFuturesRiskDecisionAsync(new FuturesRiskDecisionRecord
+        {
+            Symbol = symbol,
+            Source = "TurtleRisk",
+            OrderLinkId = string.IsNullOrWhiteSpace(signal.TurtleSignalId) ? null : BuildTurtleOrderLinkId(signal.TurtleSignalId),
+            Action = signal.Side == "Short" ? FuturesTradeAction.OpenShort : FuturesTradeAction.OpenLong,
+            IsAllowed = allowed,
+            Reason = reason,
+            Severity = allowed ? RiskSeverity.Info.ToString() : RiskSeverity.Warning.ToString(),
+            SuggestedAction = allowed ? RiskSuggestedAction.Allow.ToString() : RiskSuggestedAction.BlockNewOrders.ToString(),
+            CreatedAt = DateTimeOffset.UtcNow
+        }, cancellationToken);
+    }
+
+    private static bool IsTurtleSignal(NySessionSignal signal) =>
+        string.Equals(signal.Pattern, TurtleTrendStrategy.Name, StringComparison.OrdinalIgnoreCase);
+
+    private static decimal ResolveTurtleTriggerPrice(NySessionSignal signal, FuturesInstrumentRules instrument)
+    {
+        var tick = instrument.TickSize > 0m ? instrument.TickSize : 0m;
+        var trigger = signal.Side == "Short"
+            ? signal.TurtleBreakoutLevel - tick
+            : signal.TurtleBreakoutLevel + tick;
+        return instrument.RoundPrice(trigger);
+    }
+
+    private decimal ResolveTurtleStopPrice(NySessionSignal signal, decimal entryPrice, FuturesInstrumentRules instrument)
+    {
+        var stop = signal.Side == "Short"
+            ? entryPrice + signal.TurtleN * _turtleOptions.StopAtrMultiplier
+            : entryPrice - signal.TurtleN * _turtleOptions.StopAtrMultiplier;
+        return instrument.RoundPrice(stop);
+    }
+
+    private static string BuildTurtleSignalId(string symbol, string system, StrategySide side, DateTimeOffset signalTime, decimal level) =>
+        $"{symbol.Trim().ToUpperInvariant()}:{system}:{side}:{signalTime.UtcDateTime:yyyyMMddHHmm}:{level.ToString("0.########", System.Globalization.CultureInfo.InvariantCulture)}";
+
+    private static string BuildTurtleOrderLinkId(string signalId)
+    {
+        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(signalId))).ToLowerInvariant();
+        return $"turt{hash[..28]}";
+    }
+
+    private static string ResolveTurtleCorrelationGroup(string symbol)
+    {
+        var normalized = symbol.ToUpperInvariant();
+        if (normalized.StartsWith("BTC", StringComparison.Ordinal)) return "CryptoMajors";
+        if (normalized.StartsWith("ETH", StringComparison.Ordinal)) return "CryptoMajors";
+        if (normalized.StartsWith("SOL", StringComparison.Ordinal)) return "L1Beta";
+        if (normalized.StartsWith("BNB", StringComparison.Ordinal)) return "L1Beta";
+        if (normalized.StartsWith("XRP", StringComparison.Ordinal)) return "LargeCaps";
+        if (normalized.StartsWith("DOGE", StringComparison.Ordinal)) return "Meme";
+        return "Crypto";
+    }
+
+    private static string ResolveTurtleTightGroup(string symbol)
+    {
+        var normalized = symbol.ToUpperInvariant();
+        if (normalized.StartsWith("BTC", StringComparison.Ordinal) ||
+            normalized.StartsWith("ETH", StringComparison.Ordinal))
+        {
+            return "CryptoMajors";
+        }
+
+        return ResolveTurtleCorrelationGroup(symbol);
+    }
+
+    private readonly record struct TurtleUnitRiskResult(bool IsAllowed, decimal UnitQuantity, string Reason)
+    {
+        public static TurtleUnitRiskResult Allowed(decimal quantity, string reason) => new(true, quantity, reason);
+
+        public static TurtleUnitRiskResult Blocked(string reason) => new(false, 0m, reason);
+    }
+
     private FuturesTradeIntent BuildOpenIntent(
         FuturesBotSettings settings,
         NySessionSignal signal,
         FuturesInstrumentRules instrument,
-        decimal entryNotionalUsdt)
+        decimal entryNotionalUsdt,
+        decimal? quantityOverride = null)
     {
-        var price = instrument.RoundPrice(signal.EntryPrice);
-        var quantity = ResolveEntryQuantity(entryNotionalUsdt, price, instrument);
+        var price = IsTurtleSignal(signal)
+            ? ResolveTurtleTriggerPrice(signal, instrument)
+            : instrument.RoundPrice(signal.EntryPrice);
+        var quantity = quantityOverride is > 0m
+            ? instrument.RoundQuantity(quantityOverride.Value)
+            : ResolveEntryQuantity(entryNotionalUsdt, price, instrument);
         var action = signal.Side == "Short" ? FuturesTradeAction.OpenShort : FuturesTradeAction.OpenLong;
-        var stopLoss = instrument.RoundPrice(signal.StopLoss);
+        var stopLoss = IsTurtleSignal(signal)
+            ? ResolveTurtleStopPrice(signal, price, instrument)
+            : instrument.RoundPrice(signal.StopLoss);
         var takeProfit = signal.TakeProfit > 0m ? instrument.RoundPrice(signal.TakeProfit) : (decimal?)null;
 
         return new FuturesTradeIntent
@@ -2611,6 +3120,9 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
             Action = action,
             OrderType = OrderType.Market,
             Price = price,
+            TriggerPrice = IsTurtleSignal(signal) ? price : null,
+            TriggerDirection = IsTurtleSignal(signal) ? signal.Side == "Short" ? 2 : 1 : null,
+            TriggerBy = IsTurtleSignal(signal) ? "MarkPrice" : null,
             Quantity = quantity,
             Leverage = settings.Leverage,
             StopLossPrice = stopLoss,
@@ -2619,7 +3131,9 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
                 ? EstimateShortLiquidationPrice(price, settings.Leverage)
                 : EstimateLongLiquidationPrice(price, settings.Leverage),
             PositionIdx = 0,
-            OrderLinkId = FuturesOrderLinkIds.Create(action),
+            OrderLinkId = IsTurtleSignal(signal) && !string.IsNullOrWhiteSpace(signal.TurtleSignalId)
+                ? BuildTurtleOrderLinkId(signal.TurtleSignalId)
+                : FuturesOrderLinkIds.Create(action),
             Reason = signal.Pattern switch
             {
                 "Engulfing" => "ny-session-engulfing",

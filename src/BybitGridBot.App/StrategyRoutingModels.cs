@@ -79,6 +79,14 @@ public sealed class StrategyTradeIntent
 
     public decimal ExpectedR { get; init; }
 
+    public string TurtleSystem { get; init; } = string.Empty;
+
+    public string TurtleSignalId { get; init; } = string.Empty;
+
+    public decimal TurtleN { get; init; }
+
+    public decimal TurtleBreakoutLevel { get; init; }
+
     public string Reason { get; init; } = string.Empty;
 }
 
