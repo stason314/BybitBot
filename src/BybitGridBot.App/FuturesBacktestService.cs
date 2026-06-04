@@ -21,7 +21,11 @@ public interface IFuturesBacktestService
 
     bool IsStrategySymbolDirectionAllowedForTrading(string strategyName, string symbol, string direction, bool requireCompletedBacktest);
 
+    bool IsStrategySymbolDirectionAllowedForTrading(string strategyName, string system, string symbol, string direction, bool requireCompletedBacktest);
+
     decimal ResolveStrategySymbolDirectionSizeMultiplier(string strategyName, string symbol, string direction, bool requireCompletedBacktest);
+
+    decimal ResolveStrategySymbolDirectionSizeMultiplier(string strategyName, string system, string symbol, string direction, bool requireCompletedBacktest);
 }
 
 public sealed class FuturesBacktestService : IFuturesBacktestService
@@ -155,6 +159,14 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         string strategyName,
         string symbol,
         string direction,
+        bool requireCompletedBacktest) =>
+        IsStrategySymbolDirectionAllowedForTrading(strategyName, string.Empty, symbol, direction, requireCompletedBacktest);
+
+    public bool IsStrategySymbolDirectionAllowedForTrading(
+        string strategyName,
+        string system,
+        string symbol,
+        string direction,
         bool requireCompletedBacktest)
     {
         if (!_strategyRoutingOptions.EnableStrategySymbolGating &&
@@ -173,9 +185,19 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
 
             if (result.EligibleStrategySymbolDirections.Count > 0)
             {
-                var key = BuildStrategyGateKey(strategyName, symbol, direction);
-                return IsLiveDirectionAllowed(direction) &&
-                    result.EligibleStrategySymbolDirections.Contains(key, StringComparer.OrdinalIgnoreCase);
+                if (!IsLiveDirectionAllowed(direction))
+                {
+                    return false;
+                }
+
+                var key = BuildStrategyGateKey(strategyName, system, symbol, direction);
+                if (result.EligibleStrategySymbolDirections.Contains(key, StringComparer.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+
+                return string.IsNullOrWhiteSpace(system) &&
+                    result.EligibleStrategySymbolDirections.Any(item => IsStrategyGateKeyForIdentity(item, strategyName, symbol, direction));
             }
 
             return false;
@@ -186,9 +208,17 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         string strategyName,
         string symbol,
         string direction,
+        bool requireCompletedBacktest) =>
+        ResolveStrategySymbolDirectionSizeMultiplier(strategyName, string.Empty, symbol, direction, requireCompletedBacktest);
+
+    public decimal ResolveStrategySymbolDirectionSizeMultiplier(
+        string strategyName,
+        string system,
+        string symbol,
+        string direction,
         bool requireCompletedBacktest)
     {
-        var isAllowed = IsStrategySymbolDirectionAllowedForTrading(strategyName, symbol, direction, requireCompletedBacktest);
+        var isAllowed = IsStrategySymbolDirectionAllowedForTrading(strategyName, system, symbol, direction, requireCompletedBacktest);
         return isAllowed
             ? decimal.Max(0m, _strategyRoutingOptions.LiveEligibleGateSizeMultiplier)
             : decimal.Max(0m, _strategyRoutingOptions.LiveIneligibleGateSizeMultiplier);
@@ -2074,6 +2104,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             symbol,
             signal.Side,
             signal.Pattern,
+            signal.TurtleSystem,
             signal.SignalCandleOpenTime,
             exitTime,
             entryPrice,
@@ -2331,6 +2362,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             symbol,
             signal.Side,
             signal.Pattern,
+            signal.TurtleSystem,
             signal.SignalCandleOpenTime,
             exitTime,
             averageEntryPrice,
@@ -2588,7 +2620,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         var eligibleSet = eligibleSymbols.ToHashSet(StringComparer.OrdinalIgnoreCase);
         var optimizationStrategyGates = BuildStrategyGatePerformance(optimizationTrades, settings.InitialEquityUsdt);
         var optimizationStrategyGateMap = optimizationStrategyGates.ToDictionary(
-            item => BuildStrategyGateKey(item.StrategyName, item.Symbol, item.Direction),
+            item => BuildStrategyGateKey(item),
             StringComparer.OrdinalIgnoreCase);
         var outOfSampleTrades = closedTrades
             .Where(trade => trade.EntryTime >= splitAt)
@@ -2603,17 +2635,17 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         var outOfSampleMarkToMarketStrategyGates = BuildStrategyGatePerformance(outOfSampleTrades.Concat(outOfSampleOpenTrades).ToArray(), settings.InitialEquityUsdt);
         var outOfSampleForcedClosedStrategyGates = BuildStrategyGatePerformance(outOfSampleTrades.Concat(outOfSampleForcedClosedTrades).ToArray(), settings.InitialEquityUsdt);
         var outOfSampleOpenStrategyGateMap = outOfSampleOpenStrategyGates.ToDictionary(
-            item => BuildStrategyGateKey(item.StrategyName, item.Symbol, item.Direction),
+            item => BuildStrategyGateKey(item),
             StringComparer.OrdinalIgnoreCase);
         var outOfSampleMarkToMarketStrategyGateMap = outOfSampleMarkToMarketStrategyGates.ToDictionary(
-            item => BuildStrategyGateKey(item.StrategyName, item.Symbol, item.Direction),
+            item => BuildStrategyGateKey(item),
             StringComparer.OrdinalIgnoreCase);
         var outOfSampleForcedClosedStrategyGateMap = outOfSampleForcedClosedStrategyGates.ToDictionary(
-            item => BuildStrategyGateKey(item.StrategyName, item.Symbol, item.Direction),
+            item => BuildStrategyGateKey(item),
             StringComparer.OrdinalIgnoreCase);
         var outOfSampleStrategyGates = BuildStrategyGatePerformance(outOfSampleTrades, settings.InitialEquityUsdt)
             .ToDictionary(
-                item => BuildStrategyGateKey(item.StrategyName, item.Symbol, item.Direction),
+                item => BuildStrategyGateKey(item),
                 StringComparer.OrdinalIgnoreCase);
         var robustnessPassedWindows = BuildRobustnessPassedWindowCounts(outOfSampleTrades, splitAt, periodEnd, settings.InitialEquityUsdt);
         var eligibleStrategySymbolDirections = optimizationStrategyGates
@@ -2626,9 +2658,9 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                 item.NetPnl > 0m)
             .Where(item => IsOosGateConfirmed(item, outOfSampleStrategyGates))
             .Where(item =>
-                robustnessPassedWindows.TryGetValue(BuildStrategyGateKey(item.StrategyName, item.Symbol, item.Direction), out var passedWindows) &&
+                robustnessPassedWindows.TryGetValue(BuildStrategyGateKey(item), out var passedWindows) &&
                 passedWindows >= _strategyRoutingOptions.MinRobustnessWindowsToEnable)
-            .Select(item => BuildStrategyGateKey(item.StrategyName, item.Symbol, item.Direction))
+            .Select(BuildStrategyGateKey)
             .OrderBy(key => key)
             .ToArray();
         var openProfitableStrategySymbolDirections = BuildProfitableDiagnosticGateKeys(outOfSampleOpenStrategyGates, minTrades: 1);
@@ -2653,11 +2685,11 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             periodEnd,
             settings.InitialEquityUsdt);
         var filteredOutOfSampleTrades = outOfSampleTrades
-            .Where(trade => eligibleStrategyGateSet.Contains(BuildStrategyGateKey(trade.Pattern, trade.Symbol, trade.Side)))
+            .Where(trade => eligibleStrategyGateSet.Contains(BuildStrategyGateKey(trade)))
             .OrderBy(trade => trade.EntryTime)
             .ToArray();
         var filteredOutOfSampleOpenTrades = outOfSampleOpenTrades
-            .Where(trade => eligibleStrategyGateSet.Contains(BuildStrategyGateKey(trade.Pattern, trade.Symbol, trade.Side)))
+            .Where(trade => eligibleStrategyGateSet.Contains(BuildStrategyGateKey(trade)))
             .OrderBy(trade => trade.EntryTime)
             .ToArray();
         var tradedSymbols = closedTrades
@@ -2669,7 +2701,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             .OrderBy(symbol => symbol)
             .ToArray();
         var tradedStrategyGates = BuildStrategyGatePerformance(closedTrades, settings.InitialEquityUsdt)
-            .Select(item => BuildStrategyGateKey(item.StrategyName, item.Symbol, item.Direction))
+            .Select(BuildStrategyGateKey)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
         var excludedStrategySymbolDirections = tradedStrategyGates
@@ -2751,10 +2783,12 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             {
                 StrategyName = trade.Pattern,
                 trade.Symbol,
-                Direction = trade.Side
+                Direction = trade.Side,
+                System = ResolveStrategyGateSystem(trade)
             })
             .Select(group => new StrategyGatePerformance(
                 group.Key.StrategyName,
+                group.Key.System,
                 group.Key.Symbol,
                 group.Key.Direction,
                 group.Count(),
@@ -2798,7 +2832,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                     continue;
                 }
 
-                var key = BuildStrategyGateKey(gate.StrategyName, gate.Symbol, gate.Direction);
+                var key = BuildStrategyGateKey(gate);
                 counts[key] = counts.TryGetValue(key, out var current) ? current + 1 : 1;
             }
         }
@@ -2813,7 +2847,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             .Where(item => IsLiveGateStrategyEnabled(item.StrategyName))
             .Where(item => item.TradesCount >= minTrades)
             .Where(item => item.NetPnl > 0m && item.ProfitFactor >= 1m && item.AverageR > 0m)
-            .Select(item => BuildStrategyGateKey(item.StrategyName, item.Symbol, item.Direction))
+            .Select(BuildStrategyGateKey)
             .OrderBy(key => key)
             .ToArray();
 
@@ -2850,6 +2884,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                 {
                     Key = key,
                     StrategyName = identity?.StrategyName ?? string.Empty,
+                    System = identity?.System ?? string.Empty,
                     Symbol = identity?.Symbol ?? string.Empty,
                     Direction = identity?.Direction ?? string.Empty,
                     IsLiveAllowed = isLiveAllowed,
@@ -2907,6 +2942,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                     {
                         Key = key,
                         StrategyName = source.Pattern,
+                        System = ResolveStrategyGateSystem(source),
                         Symbol = source.Symbol,
                         Direction = source.Side,
                         IsLiveAllowed = eligibleGateSet.Contains(key),
@@ -2924,7 +2960,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
 
     private static Dictionary<string, BacktestTradeInternal[]> GroupTradesByGate(IReadOnlyList<BacktestTradeInternal> trades) =>
         trades
-            .GroupBy(trade => BuildStrategyGateKey(trade.Pattern, trade.Symbol, trade.Side), StringComparer.OrdinalIgnoreCase)
+            .GroupBy(BuildStrategyGateKey, StringComparer.OrdinalIgnoreCase)
             .ToDictionary(group => group.Key, group => group.OrderBy(trade => trade.EntryTime).ToArray(), StringComparer.OrdinalIgnoreCase);
 
     private string BuildGateRejectReason(StrategyGatePerformance? optimization, StrategyGatePerformance? oosClosed, int robustnessPassedWindows)
@@ -2995,7 +3031,8 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             return $"OOS max DD {oosClosed.MaxDrawdownPercent:0.####}% > {_strategyRoutingOptions.MaxOosDrawdownPercentToEnable:0.####}%.";
         }
 
-        if (oosClosed.MedianR < _strategyRoutingOptions.MinOosMedianRToEnable)
+        if (ShouldRequireOosMedianR(oosClosed) &&
+            oosClosed.MedianR < _strategyRoutingOptions.MinOosMedianRToEnable)
         {
             return $"OOS median R {oosClosed.MedianR:0.####} < {_strategyRoutingOptions.MinOosMedianRToEnable:0.####}.";
         }
@@ -3077,7 +3114,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         StrategyGatePerformance optimizationGate,
         IReadOnlyDictionary<string, StrategyGatePerformance> outOfSampleGates)
     {
-        var key = BuildStrategyGateKey(optimizationGate.StrategyName, optimizationGate.Symbol, optimizationGate.Direction);
+        var key = BuildStrategyGateKey(optimizationGate);
         return outOfSampleGates.TryGetValue(key, out var outOfSampleGate) &&
             outOfSampleGate.TradesCount >= _strategyRoutingOptions.MinOosTradesForStrategySymbolGating &&
             outOfSampleGate.ProfitFactor >= _strategyRoutingOptions.MinOosProfitFactorToEnable &&
@@ -3086,7 +3123,8 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             outOfSampleGate.NetPnl >= _strategyRoutingOptions.MinOosNetPnlToEnable &&
             (_strategyRoutingOptions.MaxOosDrawdownPercentToEnable <= 0m ||
                 outOfSampleGate.MaxDrawdownPercent <= _strategyRoutingOptions.MaxOosDrawdownPercentToEnable) &&
-            outOfSampleGate.MedianR >= _strategyRoutingOptions.MinOosMedianRToEnable &&
+            (!ShouldRequireOosMedianR(outOfSampleGate) ||
+                outOfSampleGate.MedianR >= _strategyRoutingOptions.MinOosMedianRToEnable) &&
             (_strategyRoutingOptions.MaxOosLargestWinGrossProfitPercentToEnable <= 0m ||
                 outOfSampleGate.LargestWinGrossProfitPercent <= _strategyRoutingOptions.MaxOosLargestWinGrossProfitPercentToEnable);
     }
@@ -3164,15 +3202,58 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                 .Where(part => !string.IsNullOrWhiteSpace(part))
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-    private static string BuildStrategyGateKey(string strategyName, string symbol, string direction) =>
-        $"{NormalizeStrategyGateText(strategyName)}:{NormalizeStrategyGateSymbol(symbol)}:{NormalizeStrategyGateText(direction)}";
+    private static string BuildStrategyGateKey(StrategyGatePerformance gate) =>
+        BuildStrategyGateKey(gate.StrategyName, gate.System, gate.Symbol, gate.Direction);
+
+    private static string BuildStrategyGateKey(BacktestTradeInternal trade) =>
+        BuildStrategyGateKey(trade.Pattern, ResolveStrategyGateSystem(trade), trade.Symbol, trade.Side);
+
+    private static string BuildStrategyGateKey(string strategyName, string system, string symbol, string direction)
+    {
+        var normalizedStrategy = NormalizeStrategyGateText(strategyName);
+        var normalizedSymbol = NormalizeStrategyGateSymbol(symbol);
+        var normalizedDirection = NormalizeStrategyGateText(direction);
+        var normalizedSystem = NormalizeStrategyGateText(system);
+        return normalizedSystem == "-"
+            ? $"{normalizedStrategy}:{normalizedSymbol}:{normalizedDirection}"
+            : $"{normalizedStrategy}:{normalizedSystem}:{normalizedSymbol}:{normalizedDirection}";
+    }
 
     private static bool IsStrategyGateKeyForSymbol(string key, string symbol)
     {
         var parts = key.Split(':', StringSplitOptions.TrimEntries);
-        return parts.Length == 3 &&
-            string.Equals(parts[1], NormalizeStrategyGateSymbol(symbol), StringComparison.OrdinalIgnoreCase);
+        var symbolIndex = parts.Length switch
+        {
+            3 => 1,
+            4 => 2,
+            _ => -1
+        };
+        return symbolIndex >= 0 &&
+            string.Equals(parts[symbolIndex], NormalizeStrategyGateSymbol(symbol), StringComparison.OrdinalIgnoreCase);
     }
+
+    private static bool IsStrategyGateKeyForIdentity(string key, string strategyName, string symbol, string direction)
+    {
+        var parts = key.Split(':', StringSplitOptions.TrimEntries);
+        return parts.Length switch
+        {
+            3 => string.Equals(parts[0], NormalizeStrategyGateText(strategyName), StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(parts[1], NormalizeStrategyGateSymbol(symbol), StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(parts[2], NormalizeStrategyGateText(direction), StringComparison.OrdinalIgnoreCase),
+            4 => string.Equals(parts[0], NormalizeStrategyGateText(strategyName), StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(parts[2], NormalizeStrategyGateSymbol(symbol), StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(parts[3], NormalizeStrategyGateText(direction), StringComparison.OrdinalIgnoreCase),
+            _ => false
+        };
+    }
+
+    private static string ResolveStrategyGateSystem(BacktestTradeInternal trade) =>
+        string.Equals(trade.Pattern, TurtleTrendStrategy.Name, StringComparison.OrdinalIgnoreCase)
+            ? trade.TurtleSystem
+            : string.Empty;
+
+    private static bool ShouldRequireOosMedianR(StrategyGatePerformance gate) =>
+        !string.Equals(gate.StrategyName, TurtleTrendStrategy.Name, StringComparison.OrdinalIgnoreCase);
 
     private static string NormalizeStrategyGateText(string value) =>
         string.IsNullOrWhiteSpace(value) ? "-" : value.Trim();
@@ -4350,6 +4431,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
 
     private sealed record StrategyGatePerformance(
         string StrategyName,
+        string System,
         string Symbol,
         string Direction,
         int TradesCount,
@@ -4365,6 +4447,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         string Symbol,
         string Side,
         string Pattern,
+        string TurtleSystem,
         DateTimeOffset EntryTime,
         DateTimeOffset ExitTime,
         decimal EntryPrice,

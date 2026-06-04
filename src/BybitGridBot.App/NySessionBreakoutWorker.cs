@@ -552,6 +552,7 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
 
             if (!_backtestService.IsStrategySymbolDirectionAllowedForTrading(
                     signal.Pattern,
+                    signal.TurtleSystem,
                     item.Symbol,
                     signal.Side,
                     _options.RequireBacktestSymbolFilter))
@@ -563,6 +564,7 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
 
             var edgeSizeMultiplier = _backtestService.ResolveStrategySymbolDirectionSizeMultiplier(
                 signal.Pattern,
+                signal.TurtleSystem,
                 item.Symbol,
                 signal.Side,
                 _options.RequireBacktestSymbolFilter);

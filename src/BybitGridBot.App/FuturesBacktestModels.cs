@@ -219,6 +219,8 @@ public sealed class FuturesBacktestGateDiagnostic
 
     public string StrategyName { get; init; } = string.Empty;
 
+    public string System { get; init; } = string.Empty;
+
     public string Symbol { get; init; } = string.Empty;
 
     public string Direction { get; init; } = string.Empty;
@@ -273,6 +275,8 @@ public sealed class FuturesBacktestGateWalkForwardPerformance
     public string Key { get; init; } = string.Empty;
 
     public string StrategyName { get; init; } = string.Empty;
+
+    public string System { get; init; } = string.Empty;
 
     public string Symbol { get; init; } = string.Empty;
 
