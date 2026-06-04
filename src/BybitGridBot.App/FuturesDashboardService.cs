@@ -3407,6 +3407,8 @@ public sealed class FuturesDashboardService : IFuturesDashboardService
         MaxDailyLossUsdt = _riskOptions.MaxDailyLossUsdt,
         MaxDailyLossEquityPercent = _riskOptions.MaxDailyLossEquityPercent,
         MaxDrawdownEquityPercent = _riskOptions.MaxDrawdownEquityPercent,
+        MaxTradeLossEquityPercent = _riskOptions.MaxTradeLossEquityPercent,
+        MaxProjectedDrawdownEquityPercent = _riskOptions.MaxProjectedDrawdownEquityPercent,
         MaxOpenPositions = _riskOptions.MaxOpenPositions,
         AggressiveMaxOrdersPerHour = ResolveAggressiveMaxOrdersPerHour(settings),
         AggressiveMinSecondsBetweenEntries = ResolveAggressiveMinSecondsBetweenEntries(settings),

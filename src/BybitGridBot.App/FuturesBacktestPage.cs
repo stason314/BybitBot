@@ -119,6 +119,14 @@ public static class FuturesBacktestPage
           <label for="hoursInput">NY hours</label>
           <input id="hoursInput" type="text" value="" placeholder="10,11" />
         </div>
+        <div class="run-field">
+          <label for="maxTradeLossInput">Max loss %</label>
+          <input id="maxTradeLossInput" type="number" min="0" max="100" step="0.1" value="0" />
+        </div>
+        <div class="run-field">
+          <label for="maxDrawdownInput">Max DD %</label>
+          <input id="maxDrawdownInput" type="number" min="0" max="100" step="0.1" value="0" />
+        </div>
         <button class="btn secondary" id="copyDiagnostics" type="button">Copy diagnostics</button>
         <button class="btn" id="start" type="button">Start</button>
         <button class="btn danger" id="stop" type="button">Stop</button>
@@ -152,6 +160,10 @@ public static class FuturesBacktestPage
       <div class="panel">
         <h2>Walk-forward gates</h2>
         <table><thead><tr><th>Allowed strategy:symbol:direction</th><th>Excluded</th></tr></thead><tbody id="wfSymbols"><tr><td colspan="2" class="empty">Нет данных</td></tr></tbody></table>
+      </div>
+      <div class="panel">
+        <h2>Gate diagnostics</h2>
+        <table><thead><tr><th>Gate</th><th>Live</th><th>Reason</th><th>Opt</th><th>OOS closed</th><th>OOS open</th></tr></thead><tbody id="gateDiagnostics"><tr><td colspan="6" class="empty">Нет данных</td></tr></tbody></table>
       </div>
       <div class="panel">
         <h2>Walk-forward metrics</h2>
@@ -218,10 +230,12 @@ public static class FuturesBacktestPage
       const mode = byId('modeInput').value || 'ScoreBasedRouter';
       const turtleAllowedWeekdays = byId('weekdaysInput').value || '';
       const turtleAllowedNyHours = byId('hoursInput').value || '';
+      const maxTradeLossEquityPercent = clampDecimal(byId('maxTradeLossInput').value, 0, 100, 0);
+      const maxProjectedDrawdownEquityPercent = clampDecimal(byId('maxDrawdownInput').value, 0, 100, 0);
       const response = await fetch('/api/futures/backtest/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ days, symbols, mode, turtleAllowedWeekdays, turtleAllowedNyHours })
+        body: JSON.stringify({ days, symbols, mode, turtleAllowedWeekdays, turtleAllowedNyHours, maxTradeLossEquityPercent, maxProjectedDrawdownEquityPercent })
       });
       if (!response.ok) throw new Error(`Start ${response.status}`);
       render(await response.json());
@@ -229,6 +243,12 @@ public static class FuturesBacktestPage
 
     function clampInt(value, min, max, fallback) {
       const parsed = Number.parseInt(value, 10);
+      if (!Number.isFinite(parsed)) return fallback;
+      return Math.max(min, Math.min(max, parsed));
+    }
+
+    function clampDecimal(value, min, max, fallback) {
+      const parsed = Number.parseFloat(value);
       if (!Number.isFinite(parsed)) return fallback;
       return Math.max(min, Math.min(max, parsed));
     }
@@ -257,6 +277,8 @@ public static class FuturesBacktestPage
       byId('modeInput').disabled = Boolean(data.isRunning);
       byId('weekdaysInput').disabled = Boolean(data.isRunning);
       byId('hoursInput').disabled = Boolean(data.isRunning);
+      byId('maxTradeLossInput').disabled = Boolean(data.isRunning);
+      byId('maxDrawdownInput').disabled = Boolean(data.isRunning);
       byId('copyDiagnostics').disabled = !data.result;
 
       const result = data.result;
@@ -282,6 +304,7 @@ public static class FuturesBacktestPage
       byId('eligibleCount').textContent = `${Number(result.liveAllowedStrategyGatesCount ?? eligibleGates.length)}`;
       byId('openAtEnd').textContent = `${result.openAtBacktestEndCount || 0} (${pnl(openUnrealizedPnl)})`;
       byId('wfSymbols').innerHTML = walkForwardSymbolRows(eligibleGates, excludedGates);
+      byId('gateDiagnostics').innerHTML = gateDiagnosticRows(result.gateDiagnostics || []);
       byId('wfMetrics').innerHTML = walkForwardMetricRows(result);
       byId('best').innerHTML = perfRows(result.bestSymbols || [], 'symbol');
       byId('worst').innerHTML = perfRows(result.worstSymbols || [], 'symbol');
@@ -326,6 +349,18 @@ public static class FuturesBacktestPage
           <td class="${cls(item.markToMarketNetPnl ?? item.netPnl)}">${pnl(item.markToMarketNetPnl ?? item.netPnl)}</td>
           <td>${fmt.format(item.profitFactor || 0)}</td>
         </tr>`).join('');
+    }
+
+    function gateDiagnosticRows(items) {
+      return items.length ? items.slice(0, 80).map(item => `
+        <tr>
+          <td>${item.key || '-'}</td>
+          <td>${item.isLiveAllowed ? 'yes' : 'no'}</td>
+          <td>${item.reason || '-'}</td>
+          <td>${item.optimizationTrades || 0} / ${pnl(item.optimizationNetPnl)} / PF ${fmt.format(item.optimizationProfitFactor || 0)}</td>
+          <td>${item.oosClosedTrades || 0} / ${pnl(item.oosClosedNetPnl)} / PF ${fmt.format(item.oosClosedProfitFactor || 0)}</td>
+          <td>${item.oosOpenTrades || 0} / ${pnl(item.oosOpenNetPnl)} / MTM ${pnl(item.oosMarkToMarketNetPnl)}</td>
+        </tr>`).join('') : '<tr><td colspan="6" class="empty">Нет данных</td></tr>';
     }
 
     async function copyDiagnostics() {
@@ -375,6 +410,7 @@ public static class FuturesBacktestPage
         `tradesCount=${result.tradesCount || 0}`,
         `openAtBacktestEndCount=${result.openAtBacktestEndCount || 0}`,
         `openAtBacktestEndUnrealizedPnl=${Number(result.openAtBacktestEndUnrealizedPnl || 0)}`,
+        `hardRiskCapBlockedCount=${result.hardRiskCapBlockedCount || 0}`,
         `optimizationWindow=${result.optimizationWindowLabel || '-'}`,
         `outOfSampleWindow=${result.outOfSampleWindowLabel || '-'}`,
         `liveUseEligibleStrategyGatesOnly=${Boolean(result.liveUseEligibleStrategyGatesOnly)}`,
@@ -399,6 +435,7 @@ public static class FuturesBacktestPage
         tableBlock('BEST_SYMBOLS', result.bestSymbols || []),
         tableBlock('WORST_SYMBOLS', result.worstSymbols || []),
         tableBlock('LONG_SHORT', result.longShort || []),
+        tableBlock('GATE_DIAGNOSTICS', result.gateDiagnostics || []),
         tableBlock('STRATEGY_PERFORMANCE', result.strategyPerformance || []),
         tableBlock('PATTERN', result.patternPerformance || []),
         tableBlock('WEEKDAY', result.weekdayPerformance || []),

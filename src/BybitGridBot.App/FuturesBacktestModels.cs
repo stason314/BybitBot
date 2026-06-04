@@ -27,6 +27,10 @@ public sealed class FuturesBacktestRequest
     public decimal? SlippagePercent { get; init; }
 
     public decimal? FundingPercentPer8h { get; init; }
+
+    public decimal? MaxTradeLossEquityPercent { get; init; }
+
+    public decimal? MaxProjectedDrawdownEquityPercent { get; init; }
 }
 
 public sealed class FuturesBacktestStatusResponse
@@ -64,6 +68,8 @@ public sealed class FuturesBacktestResult
 
     public int TrueBreakoutBlockedCount { get; init; }
 
+    public int HardRiskCapBlockedCount { get; init; }
+
     public int OpenAtBacktestEndCount { get; init; }
 
     public decimal OpenAtBacktestEndUnrealizedPnl { get; init; }
@@ -99,6 +105,8 @@ public sealed class FuturesBacktestResult
     public IReadOnlyList<string> OpenProfitableStrategySymbolDirections { get; init; } = [];
 
     public IReadOnlyList<string> MarkToMarketProfitableStrategySymbolDirections { get; init; } = [];
+
+    public IReadOnlyList<FuturesBacktestGateDiagnostic> GateDiagnostics { get; init; } = [];
 
     public IReadOnlyList<FuturesBacktestSymbolPerformance> BestSymbols { get; init; } = [];
 
@@ -144,6 +152,47 @@ public sealed class FuturesBacktestMetrics
     public decimal AverageR { get; init; }
 
     public decimal TradesPerDay { get; init; }
+}
+
+public sealed class FuturesBacktestGateDiagnostic
+{
+    public string Key { get; init; } = string.Empty;
+
+    public string StrategyName { get; init; } = string.Empty;
+
+    public string Symbol { get; init; } = string.Empty;
+
+    public string Direction { get; init; } = string.Empty;
+
+    public bool IsLiveAllowed { get; init; }
+
+    public string Reason { get; init; } = string.Empty;
+
+    public int OptimizationTrades { get; init; }
+
+    public decimal OptimizationNetPnl { get; init; }
+
+    public decimal OptimizationProfitFactor { get; init; }
+
+    public decimal OptimizationAverageR { get; init; }
+
+    public int OosClosedTrades { get; init; }
+
+    public decimal OosClosedNetPnl { get; init; }
+
+    public decimal OosClosedProfitFactor { get; init; }
+
+    public decimal OosClosedAverageR { get; init; }
+
+    public int OosOpenTrades { get; init; }
+
+    public decimal OosOpenNetPnl { get; init; }
+
+    public int OosMarkToMarketTrades { get; init; }
+
+    public decimal OosMarkToMarketNetPnl { get; init; }
+
+    public decimal OosMarkToMarketAverageR { get; init; }
 }
 
 public sealed class FuturesBacktestSymbolPerformance

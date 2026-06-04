@@ -45,6 +45,14 @@ public sealed class FuturesRiskOptions
     [Range(typeof(decimal), "0", "100")]
     public decimal MaxDrawdownEquityPercent { get; init; } = 0m;
 
+    [ConfigurationKeyName("FUTURES_MAX_TRADE_LOSS_EQUITY_PERCENT")]
+    [Range(typeof(decimal), "0", "100")]
+    public decimal MaxTradeLossEquityPercent { get; init; } = 0m;
+
+    [ConfigurationKeyName("FUTURES_MAX_PROJECTED_DRAWDOWN_EQUITY_PERCENT")]
+    [Range(typeof(decimal), "0", "100")]
+    public decimal MaxProjectedDrawdownEquityPercent { get; init; } = 0m;
+
     [ConfigurationKeyName("FUTURES_MAX_OPEN_POSITIONS")]
     [Range(0, 1000)]
     public int MaxOpenPositions { get; init; } = 1;

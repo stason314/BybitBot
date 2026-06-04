@@ -80,6 +80,26 @@ public sealed class FuturesRiskManager
                 return Block("Insufficient available futures margin.", RiskSeverity.Warning, RiskSuggestedAction.BlockNewOrders);
             }
 
+            var projectedStopLoss = ResolveProjectedStopLossUsdt(context);
+            if (projectedStopLoss > 0m)
+            {
+                if (context.AccountEquityUsdt > 0m &&
+                    context.RiskOptions.MaxTradeLossEquityPercent > 0m &&
+                    projectedStopLoss / context.AccountEquityUsdt * 100m > context.RiskOptions.MaxTradeLossEquityPercent)
+                {
+                    return Block("FUTURES_MAX_TRADE_LOSS_EQUITY_PERCENT would be exceeded.", RiskSeverity.Warning, RiskSuggestedAction.BlockNewOrders);
+                }
+
+                var projectedDrawdownPercent = context.AccountEquityUsdt > 0m
+                    ? (context.CurrentDrawdownUsdt + projectedStopLoss) / context.AccountEquityUsdt * 100m
+                    : 0m;
+                if (context.RiskOptions.MaxProjectedDrawdownEquityPercent > 0m &&
+                    projectedDrawdownPercent > context.RiskOptions.MaxProjectedDrawdownEquityPercent)
+                {
+                    return Block("FUTURES_MAX_PROJECTED_DRAWDOWN_EQUITY_PERCENT would be exceeded.", RiskSeverity.Warning, RiskSuggestedAction.BlockNewOrders);
+                }
+            }
+
             var liquidationBuffer = ResolveLiquidationBufferPercent(context);
             if (liquidationBuffer < context.RiskOptions.MinLiquidationBufferPercent)
             {
@@ -129,6 +149,33 @@ public sealed class FuturesRiskManager
         }
 
         return Math.Abs(referencePrice - liquidationPrice) / referencePrice * 100m;
+    }
+
+    private static decimal ResolveProjectedStopLossUsdt(FuturesRiskEvaluationContext context)
+    {
+        if (context.Intent.StopLossPrice is not { } stopLoss ||
+            context.Intent.Price <= 0m ||
+            context.Intent.Quantity <= 0m)
+        {
+            return 0m;
+        }
+
+        var isShortIntent = context.Intent.Action == FuturesTradeAction.OpenShort;
+        var riskPerUnit = isShortIntent
+            ? stopLoss - context.Intent.Price
+            : context.Intent.Price - stopLoss;
+        var projectedRisk = riskPerUnit > 0m ? riskPerUnit * context.Intent.Quantity : 0m;
+        if (context.Position.Size <= 0m || context.Position.EntryPrice <= 0m)
+        {
+            return projectedRisk;
+        }
+
+        var existingRiskPerUnit = isShortIntent && IsShort(context.Position.Side)
+            ? stopLoss - context.Position.EntryPrice
+            : !isShortIntent && IsLong(context.Position.Side)
+                ? context.Position.EntryPrice - stopLoss
+                : 0m;
+        return projectedRisk + (existingRiskPerUnit > 0m ? existingRiskPerUnit * context.Position.Size : 0m);
     }
 
     private static decimal ResolveMaxDailyLossUsdt(FuturesRiskEvaluationContext context)
