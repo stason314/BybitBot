@@ -20,6 +20,12 @@ public sealed class FuturesBacktestOptions
     [ConfigurationKeyName("FUTURES_BACKTEST_MODE")]
     public string Mode { get; init; } = "ScoreBasedRouter";
 
+    [ConfigurationKeyName("FUTURES_BACKTEST_TURTLE_ALLOWED_WEEKDAYS")]
+    public string TurtleAllowedWeekdays { get; init; } = string.Empty;
+
+    [ConfigurationKeyName("FUTURES_BACKTEST_TURTLE_ALLOWED_NY_HOURS")]
+    public string TurtleAllowedNyHours { get; init; } = string.Empty;
+
     [ConfigurationKeyName("FUTURES_BACKTEST_ENTRY_NOTIONAL_USDT")]
     [Range(typeof(decimal), "0.00000001", "999999999")]
     public decimal EntryNotionalUsdt { get; init; } = 100m;

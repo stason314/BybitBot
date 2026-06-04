@@ -111,6 +111,14 @@ public static class FuturesBacktestPage
             <option value="TurtleOnly">Turtle only</option>
           </select>
         </div>
+        <div class="run-field">
+          <label for="weekdaysInput">Weekdays</label>
+          <input id="weekdaysInput" type="text" value="" placeholder="Mon,Tue" />
+        </div>
+        <div class="run-field">
+          <label for="hoursInput">NY hours</label>
+          <input id="hoursInput" type="text" value="" placeholder="10,11" />
+        </div>
         <button class="btn secondary" id="copyDiagnostics" type="button">Copy diagnostics</button>
         <button class="btn" id="start" type="button">Start</button>
         <button class="btn danger" id="stop" type="button">Stop</button>
@@ -208,10 +216,12 @@ public static class FuturesBacktestPage
       const days = clampInt(byId('daysInput').value, 1, 365, 90);
       const symbols = clampInt(byId('symbolsInput').value, 1, 200, 20);
       const mode = byId('modeInput').value || 'ScoreBasedRouter';
+      const turtleAllowedWeekdays = byId('weekdaysInput').value || '';
+      const turtleAllowedNyHours = byId('hoursInput').value || '';
       const response = await fetch('/api/futures/backtest/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ days, symbols, mode })
+        body: JSON.stringify({ days, symbols, mode, turtleAllowedWeekdays, turtleAllowedNyHours })
       });
       if (!response.ok) throw new Error(`Start ${response.status}`);
       render(await response.json());
@@ -245,6 +255,8 @@ public static class FuturesBacktestPage
       byId('daysInput').disabled = Boolean(data.isRunning);
       byId('symbolsInput').disabled = Boolean(data.isRunning);
       byId('modeInput').disabled = Boolean(data.isRunning);
+      byId('weekdaysInput').disabled = Boolean(data.isRunning);
+      byId('hoursInput').disabled = Boolean(data.isRunning);
       byId('copyDiagnostics').disabled = !data.result;
 
       const result = data.result;
@@ -270,7 +282,7 @@ public static class FuturesBacktestPage
       byId('eligibleCount').textContent = `${Number(result.liveAllowedStrategyGatesCount ?? eligibleGates.length)}`;
       byId('openAtEnd').textContent = `${result.openAtBacktestEndCount || 0} (${pnl(openUnrealizedPnl)})`;
       byId('wfSymbols').innerHTML = walkForwardSymbolRows(eligibleGates, excludedGates);
-      byId('wfMetrics').innerHTML = walkForwardMetricRows(result.optimizationMetrics || {}, result.outOfSampleMetrics || {}, result.filteredOutOfSampleMetrics || {});
+      byId('wfMetrics').innerHTML = walkForwardMetricRows(result);
       byId('best').innerHTML = perfRows(result.bestSymbols || [], 'symbol');
       byId('worst').innerHTML = perfRows(result.worstSymbols || [], 'symbol');
       byId('sides').innerHTML = sideRows(result.longShort || []);
@@ -297,11 +309,16 @@ public static class FuturesBacktestPage
       return `<tr><td>${eligible.slice(0, 60).join(', ') || '-'}</td><td>${excluded.slice(0, 60).join(', ') || '-'}</td></tr>`;
     }
 
-    function walkForwardMetricRows(optimization, outOfSample, filteredOutOfSample) {
+    function walkForwardMetricRows(result) {
+      const optimization = result.optimizationMetrics || {};
+      const outOfSample = result.outOfSampleMetrics || {};
+      const filteredOutOfSample = result.filteredOutOfSampleMetrics || {};
+      const optimizationLabel = result.optimizationWindowLabel || 'optimization';
+      const outOfSampleLabel = result.outOfSampleWindowLabel || 'out-of-sample';
       return [
-        ['60d optimization', optimization],
-        ['30d out-of-sample', outOfSample],
-        ['30d OOS filtered', filteredOutOfSample]
+        [optimizationLabel, optimization],
+        [outOfSampleLabel, outOfSample],
+        [`${outOfSampleLabel} live-gated`, filteredOutOfSample]
       ].map(([label, item]) => `
         <tr>
           <td>${label}</td>
@@ -358,6 +375,8 @@ public static class FuturesBacktestPage
         `tradesCount=${result.tradesCount || 0}`,
         `openAtBacktestEndCount=${result.openAtBacktestEndCount || 0}`,
         `openAtBacktestEndUnrealizedPnl=${Number(result.openAtBacktestEndUnrealizedPnl || 0)}`,
+        `optimizationWindow=${result.optimizationWindowLabel || '-'}`,
+        `outOfSampleWindow=${result.outOfSampleWindowLabel || '-'}`,
         `liveUseEligibleStrategyGatesOnly=${Boolean(result.liveUseEligibleStrategyGatesOnly)}`,
         `liveAllowedStrategyGatesCount=${Number(result.liveAllowedStrategyGatesCount || 0)}`,
         `liveEligibleGateSizeMultiplier=${Number(result.liveEligibleGateSizeMultiplier || 0)}`,
@@ -366,11 +385,13 @@ public static class FuturesBacktestPage
         `trueBreakoutBlockedCount=${result.trueBreakoutBlockedCount || 0}`,
         '',
         metricBlock('MAIN_OOS_ALL_SYMBOLS', result.metrics || {}),
-        metricBlock('OPTIMIZATION_60D', result.optimizationMetrics || {}),
-        metricBlock('OUT_OF_SAMPLE_30D_ALL_SYMBOLS', result.outOfSampleMetrics || {}),
-        metricBlock('OUT_OF_SAMPLE_30D_ELIGIBLE_ONLY', result.filteredOutOfSampleMetrics || {}),
+        metricBlock('OPTIMIZATION', result.optimizationMetrics || {}),
+        metricBlock('OUT_OF_SAMPLE_ALL_SYMBOLS', result.outOfSampleMetrics || {}),
+        metricBlock('OUT_OF_SAMPLE_LIVE_GATED', result.filteredOutOfSampleMetrics || {}),
         '',
-        `liveAllowedStrategySymbolDirections(${(result.eligibleStrategySymbolDirections || []).length})=${(result.eligibleStrategySymbolDirections || []).join(', ') || '-'}`,
+        `liveAllowedClosedStrategySymbolDirections(${(result.eligibleStrategySymbolDirections || []).length})=${(result.eligibleStrategySymbolDirections || []).join(', ') || '-'}`,
+        `diagnosticOpenProfitableStrategySymbolDirections(${(result.openProfitableStrategySymbolDirections || []).length})=${(result.openProfitableStrategySymbolDirections || []).join(', ') || '-'}`,
+        `diagnosticMarkToMarketProfitableStrategySymbolDirections(${(result.markToMarketProfitableStrategySymbolDirections || []).length})=${(result.markToMarketProfitableStrategySymbolDirections || []).join(', ') || '-'}`,
         `excludedStrategySymbolDirections(${(result.excludedStrategySymbolDirections || []).length})=${(result.excludedStrategySymbolDirections || []).join(', ') || '-'}`,
         `legacyEligibleSymbols_symbolOnly_notLiveGate(${(result.eligibleSymbols || []).length})=${(result.eligibleSymbols || []).join(', ') || '-'}`,
         `legacyExcludedSymbols_symbolOnly_notLiveGate(${(result.excludedSymbols || []).length})=${(result.excludedSymbols || []).join(', ') || '-'}`,

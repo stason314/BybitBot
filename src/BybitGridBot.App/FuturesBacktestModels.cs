@@ -14,6 +14,10 @@ public sealed class FuturesBacktestRequest
 
     public string? Mode { get; init; }
 
+    public string? TurtleAllowedWeekdays { get; init; }
+
+    public string? TurtleAllowedNyHours { get; init; }
+
     public decimal? EntryNotionalUsdt { get; init; }
 
     public decimal? TakerFeePercent { get; init; }
@@ -64,6 +68,10 @@ public sealed class FuturesBacktestResult
 
     public decimal OpenAtBacktestEndUnrealizedPnl { get; init; }
 
+    public string OptimizationWindowLabel { get; init; } = "Optimization";
+
+    public string OutOfSampleWindowLabel { get; init; } = "Out-of-sample";
+
     public FuturesBacktestMetrics Metrics { get; init; } = new();
 
     public FuturesBacktestMetrics OptimizationMetrics { get; init; } = new();
@@ -87,6 +95,10 @@ public sealed class FuturesBacktestResult
     public IReadOnlyList<string> EligibleStrategySymbolDirections { get; init; } = [];
 
     public IReadOnlyList<string> ExcludedStrategySymbolDirections { get; init; } = [];
+
+    public IReadOnlyList<string> OpenProfitableStrategySymbolDirections { get; init; } = [];
+
+    public IReadOnlyList<string> MarkToMarketProfitableStrategySymbolDirections { get; init; } = [];
 
     public IReadOnlyList<FuturesBacktestSymbolPerformance> BestSymbols { get; init; } = [];
 

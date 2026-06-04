@@ -48,7 +48,7 @@ public sealed class StrategyRoutingOptions
 
     [ConfigurationKeyName("MIN_TRADES_FOR_STRATEGY_SYMBOL_GATING")]
     [Range(1, 10000)]
-    public int MinTradesForStrategySymbolGating { get; init; } = 3;
+    public int MinTradesForStrategySymbolGating { get; init; } = 5;
 
     [ConfigurationKeyName("MIN_PROFIT_FACTOR_TO_ENABLE")]
     [Range(typeof(decimal), "0", "1000")]
@@ -60,7 +60,7 @@ public sealed class StrategyRoutingOptions
 
     [ConfigurationKeyName("MIN_OOS_TRADES_FOR_STRATEGY_SYMBOL_GATING")]
     [Range(1, 10000)]
-    public int MinOosTradesForStrategySymbolGating { get; init; } = 1;
+    public int MinOosTradesForStrategySymbolGating { get; init; } = 3;
 
     [ConfigurationKeyName("MIN_OOS_PROFIT_FACTOR_TO_ENABLE")]
     [Range(typeof(decimal), "0", "1000")]

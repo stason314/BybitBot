@@ -437,6 +437,11 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                 continue;
             }
 
+            if (!IsTurtleBacktestTimeAllowed(current.OpenTime, settings))
+            {
+                continue;
+            }
+
             var signal = TryBuildTurtleOnlySignal(symbol, current, indicators, index);
             if (signal is null)
             {
@@ -2083,7 +2088,10 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         var holdingHours = decimal.Max(0m, (decimal)(exitTime - signal.SignalCandleOpenTime).TotalHours);
         var fundingCost = totalEntryNotional * settings.FundingPercentPer8h / 100m * holdingHours / 8m;
         var netPnl = grossPnl - fees - fundingCost;
-        var initialRiskUsdt = nValue * _turtleOptions.StopAtrMultiplier * unitQuantity;
+        var aggregateRiskUsdt = CalculateTurtleAggregateRisk(entryPrices, quantities, protectedStop, isShort);
+        var initialRiskUsdt = aggregateRiskUsdt > 0m
+            ? aggregateRiskUsdt
+            : nValue * _turtleOptions.StopAtrMultiplier * unitQuantity;
         var rMultiple = initialRiskUsdt > 0m ? netPnl / initialRiskUsdt : 0m;
 
         return new BacktestTradeInternal(
@@ -2104,6 +2112,27 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             rMultiple,
             exitReason,
             exitIndex);
+    }
+
+    private static decimal CalculateTurtleAggregateRisk(
+        IReadOnlyList<decimal> entryPrices,
+        IReadOnlyList<decimal> quantities,
+        decimal stopPrice,
+        bool isShort)
+    {
+        var risk = 0m;
+        for (var index = 0; index < entryPrices.Count && index < quantities.Count; index++)
+        {
+            var riskPerUnit = isShort
+                ? stopPrice - entryPrices[index]
+                : entryPrices[index] - stopPrice;
+            if (riskPerUnit > 0m)
+            {
+                risk += riskPerUnit * quantities[index];
+            }
+        }
+
+        return risk;
     }
 
     private bool IsBacktestTurtleChannelExit(
@@ -2208,6 +2237,8 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         {
             splitAt = periodStart.AddTicks((periodEnd - periodStart).Ticks * 2 / 3);
         }
+        var optimizationWindowLabel = BuildWindowLabel("optimization", periodStart, splitAt);
+        var outOfSampleWindowLabel = BuildWindowLabel("out-of-sample", splitAt, periodEnd);
 
         var closedTrades = trades
             .Where(trade => !IsOpenAtBacktestEnd(trade))
@@ -2238,6 +2269,8 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             .Where(trade => trade.EntryTime >= splitAt)
             .OrderBy(trade => trade.EntryTime)
             .ToArray();
+        var outOfSampleOpenStrategyGates = BuildStrategyGatePerformance(outOfSampleOpenTrades);
+        var outOfSampleMarkToMarketStrategyGates = BuildStrategyGatePerformance(outOfSampleTrades.Concat(outOfSampleOpenTrades).ToArray());
         var outOfSampleStrategyGates = BuildStrategyGatePerformance(outOfSampleTrades)
             .ToDictionary(
                 item => BuildStrategyGateKey(item.StrategyName, item.Symbol, item.Direction),
@@ -2253,6 +2286,10 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             .Select(item => BuildStrategyGateKey(item.StrategyName, item.Symbol, item.Direction))
             .OrderBy(key => key)
             .ToArray();
+        var openProfitableStrategySymbolDirections = BuildProfitableDiagnosticGateKeys(outOfSampleOpenStrategyGates, minTrades: 1);
+        var markToMarketProfitableStrategySymbolDirections = BuildProfitableDiagnosticGateKeys(
+            outOfSampleMarkToMarketStrategyGates,
+            _strategyRoutingOptions.MinOosTradesForStrategySymbolGating);
         var eligibleStrategyGateSet = eligibleStrategySymbolDirections.ToHashSet(StringComparer.OrdinalIgnoreCase);
         var filteredOutOfSampleTrades = outOfSampleTrades
             .Where(trade => eligibleStrategyGateSet.Contains(BuildStrategyGateKey(trade.Pattern, trade.Symbol, trade.Side)))
@@ -2296,6 +2333,8 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             TrueBreakoutBlockedCount = trueBreakoutBlockedCount,
             OpenAtBacktestEndCount = openAtBacktestEndTrades.Length,
             OpenAtBacktestEndUnrealizedPnl = openAtBacktestEndTrades.Sum(trade => trade.NetPnl),
+            OptimizationWindowLabel = optimizationWindowLabel,
+            OutOfSampleWindowLabel = outOfSampleWindowLabel,
             Metrics = BuildMetrics(outOfSampleTrades, splitAt, periodEnd, settings.InitialEquityUsdt, outOfSampleOpenTrades),
             OptimizationMetrics = BuildMetrics(optimizationTrades, periodStart, splitAt, settings.InitialEquityUsdt),
             OutOfSampleMetrics = BuildMetrics(outOfSampleTrades, splitAt, periodEnd, settings.InitialEquityUsdt, outOfSampleOpenTrades),
@@ -2307,6 +2346,8 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             ExcludedSymbols = excludedSymbols,
             EligibleStrategySymbolDirections = eligibleStrategySymbolDirections,
             ExcludedStrategySymbolDirections = excludedStrategySymbolDirections,
+            OpenProfitableStrategySymbolDirections = openProfitableStrategySymbolDirections,
+            MarkToMarketProfitableStrategySymbolDirections = markToMarketProfitableStrategySymbolDirections,
             BestSymbols = BuildSymbolPerformance(outOfSampleTrades).OrderByDescending(item => item.NetPnl).Take(10).ToArray(),
             WorstSymbols = BuildSymbolPerformance(outOfSampleTrades).OrderBy(item => item.NetPnl).Take(10).ToArray(),
             LongShort = BuildSidePerformance(outOfSampleTrades),
@@ -2335,6 +2376,17 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                 group.Sum(trade => trade.NetPnl),
                 CalculateProfitFactor(group),
                 group.Any() ? group.Average(trade => trade.RMultiple) : 0m))
+            .ToArray();
+
+    private IReadOnlyList<string> BuildProfitableDiagnosticGateKeys(
+        IReadOnlyList<StrategyGatePerformance> gates,
+        int minTrades) =>
+        gates
+            .Where(item => IsLiveGateStrategyEnabled(item.StrategyName))
+            .Where(item => item.TradesCount >= minTrades)
+            .Where(item => item.NetPnl > 0m && item.ProfitFactor >= 1m && item.AverageR > 0m)
+            .Select(item => BuildStrategyGateKey(item.StrategyName, item.Symbol, item.Direction))
+            .OrderBy(key => key)
             .ToArray();
 
     private static bool IsOpenAtBacktestEnd(BacktestTradeInternal trade) =>
@@ -2367,6 +2419,12 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             outOfSampleGate.NetPnl >= 0m;
     }
 
+    private static string BuildWindowLabel(string suffix, DateTimeOffset start, DateTimeOffset end)
+    {
+        var days = decimal.Max(0m, (decimal)(end - start).TotalDays);
+        return $"{decimal.Round(days, 1):0.#}d {suffix}";
+    }
+
     private bool IsLiveGateStrategyEnabled(string strategyName) =>
         string.Equals(strategyName, TurtleTrendStrategy.Name, StringComparison.OrdinalIgnoreCase) ||
         (string.Equals(strategyName, NYSweepReversalStrategy.Name, StringComparison.OrdinalIgnoreCase) &&
@@ -2379,6 +2437,47 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                 .Select(part => int.TryParse(part, out var hour) ? hour : -1)
                 .Where(hour => hour is >= 0 and <= 23)
                 .ToHashSet();
+
+    private static IReadOnlySet<DayOfWeek> ParseAllowedWeekdays(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return new HashSet<DayOfWeek>();
+        }
+
+        var result = new HashSet<DayOfWeek>();
+        foreach (var part in value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (Enum.TryParse<DayOfWeek>(part, ignoreCase: true, out var day))
+            {
+                result.Add(day);
+                continue;
+            }
+
+            var alias = part.ToLowerInvariant();
+            if (alias is "sun" or "mon" or "tue" or "wed" or "thu" or "fri" or "sat")
+            {
+                result.Add(alias switch
+                {
+                    "sun" => DayOfWeek.Sunday,
+                    "mon" => DayOfWeek.Monday,
+                    "tue" => DayOfWeek.Tuesday,
+                    "wed" => DayOfWeek.Wednesday,
+                    "thu" => DayOfWeek.Thursday,
+                    "fri" => DayOfWeek.Friday,
+                    _ => DayOfWeek.Saturday
+                });
+                continue;
+            }
+
+            if (int.TryParse(part, out var number) && number is >= 0 and <= 6)
+            {
+                result.Add((DayOfWeek)number);
+            }
+        }
+
+        return result;
+    }
 
     private static string BuildStrategyGateKey(string strategyName, string symbol, string direction) =>
         $"{NormalizeStrategyGateText(strategyName)}:{NormalizeStrategyGateSymbol(symbol)}:{NormalizeStrategyGateText(direction)}";
@@ -2735,6 +2834,8 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         Math.Clamp(request.Symbols ?? _backtestOptions.Symbols, 1, 200),
         Math.Clamp(_backtestOptions.MaxConcurrency, 1, 20),
         ResolveBacktestMode(request.Mode, _backtestOptions.Mode),
+        ParseAllowedWeekdays(request.TurtleAllowedWeekdays ?? _backtestOptions.TurtleAllowedWeekdays),
+        ParseAllowedHours(request.TurtleAllowedNyHours ?? _backtestOptions.TurtleAllowedNyHours),
         request.EntryNotionalUsdt ?? _backtestOptions.EntryNotionalUsdt,
         request.TakerFeePercent ?? _backtestOptions.TakerFeePercent,
         request.MakerFeePercent ?? _backtestOptions.MakerFeePercent,
@@ -2820,6 +2921,18 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             ? sweepExtreme - boundary
             : boundary - sweepExtreme;
         return decimal.Max(0m, distance / boundary * 100m);
+    }
+
+    private static bool IsTurtleBacktestTimeAllowed(DateTimeOffset signalTime, BacktestRunSettings settings)
+    {
+        if (settings.TurtleAllowedWeekdays.Count == 0 && settings.TurtleAllowedNyHours.Count == 0)
+        {
+            return true;
+        }
+
+        var nyTime = TimeZoneInfo.ConvertTime(signalTime, ResolveNewYorkTimeZone());
+        return (settings.TurtleAllowedWeekdays.Count == 0 || settings.TurtleAllowedWeekdays.Contains(nyTime.DayOfWeek)) &&
+            (settings.TurtleAllowedNyHours.Count == 0 || settings.TurtleAllowedNyHours.Contains(nyTime.Hour));
     }
 
     private static decimal CalculateMidlineRoomR(string side, decimal rangeHigh, decimal rangeLow, decimal entryPrice, decimal risk)
@@ -3054,6 +3167,8 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         int Symbols,
         int MaxConcurrency,
         FuturesBacktestMode Mode,
+        IReadOnlySet<DayOfWeek> TurtleAllowedWeekdays,
+        IReadOnlySet<int> TurtleAllowedNyHours,
         decimal EntryNotionalUsdt,
         decimal TakerFeePercent,
         decimal MakerFeePercent,
