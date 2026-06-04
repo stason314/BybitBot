@@ -138,6 +138,8 @@ public sealed class FuturesBacktestResult
 
     public IReadOnlyList<string> MarkToMarketProfitableStrategySymbolDirections { get; init; } = [];
 
+    public IReadOnlyList<string> WatchlistStrategySymbolDirections { get; init; } = [];
+
     public IReadOnlyList<FuturesBacktestGateDiagnostic> GateDiagnostics { get; init; } = [];
 
     public IReadOnlyList<FuturesBacktestGateWalkForwardPerformance> WalkForwardStrategyGates { get; init; } = [];

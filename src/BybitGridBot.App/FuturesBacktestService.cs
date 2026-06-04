@@ -2668,6 +2668,9 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             outOfSampleMarkToMarketStrategyGates,
             _strategyRoutingOptions.MinOosTradesForStrategySymbolGating);
         var eligibleStrategyGateSet = eligibleStrategySymbolDirections.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var watchlistStrategySymbolDirections = BuildWatchlistStrategyGateKeys(
+            outOfSampleStrategyGates,
+            eligibleStrategyGateSet);
         var gateDiagnostics = BuildGateDiagnostics(
             optimizationStrategyGateMap,
             outOfSampleStrategyGates,
@@ -2760,6 +2763,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             ExcludedStrategySymbolDirections = excludedStrategySymbolDirections,
             OpenProfitableStrategySymbolDirections = openProfitableStrategySymbolDirections,
             MarkToMarketProfitableStrategySymbolDirections = markToMarketProfitableStrategySymbolDirections,
+            WatchlistStrategySymbolDirections = watchlistStrategySymbolDirections,
             GateDiagnostics = gateDiagnostics,
             WalkForwardStrategyGates = walkForwardStrategyGates,
             BestSymbols = BuildSymbolPerformance(outOfSampleTrades).OrderByDescending(item => item.NetPnl).Take(10).ToArray(),
@@ -2847,6 +2851,21 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             .Where(item => IsLiveGateStrategyEnabled(item.StrategyName))
             .Where(item => item.TradesCount >= minTrades)
             .Where(item => item.NetPnl > 0m && item.ProfitFactor >= 1m && item.AverageR > 0m)
+            .Select(BuildStrategyGateKey)
+            .OrderBy(key => key)
+            .ToArray();
+
+    private IReadOnlyList<string> BuildWatchlistStrategyGateKeys(
+        IReadOnlyDictionary<string, StrategyGatePerformance> oosClosedGates,
+        IReadOnlySet<string> liveAllowedKeys) =>
+        oosClosedGates
+            .Where(pair => !liveAllowedKeys.Contains(pair.Key))
+            .Select(pair => pair.Value)
+            .Where(item => IsLiveGateStrategyEnabled(item.StrategyName))
+            .Where(item => item.NetPnl > 0m)
+            .Where(item => item.ProfitFactor > 1.5m)
+            .Where(item => item.MaxDrawdownPercent < 15m)
+            .Where(item => item.AverageR > 0m)
             .Select(BuildStrategyGateKey)
             .OrderBy(key => key)
             .ToArray();

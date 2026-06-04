@@ -492,6 +492,7 @@ public static class FuturesBacktestPage
         `liveAllowedClosedStrategySymbolDirections(${(result.eligibleStrategySymbolDirections || []).length})=${(result.eligibleStrategySymbolDirections || []).join(', ') || '-'}`,
         `diagnosticOpenProfitableStrategySymbolDirections(${(result.openProfitableStrategySymbolDirections || []).length})=${(result.openProfitableStrategySymbolDirections || []).join(', ') || '-'}`,
         `diagnosticMarkToMarketProfitableStrategySymbolDirections(${(result.markToMarketProfitableStrategySymbolDirections || []).length})=${(result.markToMarketProfitableStrategySymbolDirections || []).join(', ') || '-'}`,
+        `watchlistStrategySymbolDirections(${(result.watchlistStrategySymbolDirections || []).length})=${(result.watchlistStrategySymbolDirections || []).join(', ') || '-'}`,
         `excludedStrategySymbolDirections(${(result.excludedStrategySymbolDirections || []).length})=${(result.excludedStrategySymbolDirections || []).join(', ') || '-'}`,
         `legacyEligibleSymbols_symbolOnly_notLiveGate(${(result.eligibleSymbols || []).length})=${(result.eligibleSymbols || []).join(', ') || '-'}`,
         `legacyExcludedSymbols_symbolOnly_notLiveGate(${(result.excludedSymbols || []).length})=${(result.excludedSymbols || []).join(', ') || '-'}`,
