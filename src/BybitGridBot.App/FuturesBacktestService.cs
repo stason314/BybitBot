@@ -2870,6 +2870,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             TurtleRiskPerUnitPercent = ResolveTurtleRiskPerUnitPercent(settings),
             OpenAtBacktestEndCount = openAtBacktestEndTrades.Length,
             OpenAtBacktestEndUnrealizedPnl = openAtBacktestEndTrades.Sum(trade => trade.NetPnl),
+            InitialEquityUsdt = settings.InitialEquityUsdt,
             OptimizationWindowLabel = optimizationWindowLabel,
             OutOfSampleWindowLabel = outOfSampleWindowLabel,
             Metrics = BuildMetrics(outOfSampleTrades, splitAt, periodEnd, settings.InitialEquityUsdt, outOfSampleOpenTrades, outOfSampleForcedClosedTrades),
@@ -3447,6 +3448,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         var forcedClosedMetricTrades = forcedClosedTrades is { Count: > 0 }
             ? trades.Concat(forcedClosedTrades).ToArray()
             : trades;
+        var pnlWithoutTop = CalculatePnlWithoutTopSymbols(trades);
         var forcedClosedMaxDrawdown = CalculateMaxDrawdown(forcedClosedMetricTrades, initialEquity);
         return new FuturesBacktestMetrics
         {
@@ -3457,6 +3459,8 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             MarkToMarketNetPnl = markToMarketNetPnl,
             ForcedClosedNetPnl = forcedClosedNetPnl,
             ForcedClosedExitCost = forcedClosedExitCost,
+            PnlWithoutTop1 = pnlWithoutTop.WithoutTop1,
+            PnlWithoutTop2 = pnlWithoutTop.WithoutTop2,
             MaxDrawdown = maxDrawdown,
             MaxDrawdownPercent = initialEquity > 0m ? maxDrawdown / initialEquity * 100m : 0m,
             MarkToMarketMaxDrawdown = markToMarketMaxDrawdown,
@@ -3495,9 +3499,25 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                 NetPnl = group.Sum(trade => trade.NetPnl),
                 WinRate = group.Any() ? (decimal)group.Count(trade => trade.NetPnl > 0m) / group.Count() * 100m : 0m,
                 ProfitFactor = CalculateProfitFactor(group),
-                AverageR = group.Any() ? group.Average(trade => trade.RMultiple) : 0m
+                AverageR = group.Any() ? group.Average(trade => trade.RMultiple) : 0m,
+                LargestWinGrossProfitPercent = CalculateLargestWinGrossProfitPercent(group)
             })
             .ToArray();
+
+    private static (decimal WithoutTop1, decimal WithoutTop2) CalculatePnlWithoutTopSymbols(IReadOnlyList<BacktestTradeInternal> trades)
+    {
+        var closedNetPnl = trades.Sum(trade => trade.NetPnl);
+        var topSymbolPnls = trades
+            .GroupBy(trade => trade.Symbol)
+            .Select(group => group.Sum(trade => trade.NetPnl))
+            .OrderByDescending(netPnl => netPnl)
+            .Take(2)
+            .ToArray();
+
+        var withoutTop1 = closedNetPnl - (topSymbolPnls.Length >= 1 ? topSymbolPnls[0] : 0m);
+        var withoutTop2 = withoutTop1 - (topSymbolPnls.Length >= 2 ? topSymbolPnls[1] : 0m);
+        return (withoutTop1, withoutTop2);
+    }
 
     private static IReadOnlyList<FuturesBacktestSidePerformance> BuildSidePerformance(IReadOnlyList<BacktestTradeInternal> trades) =>
         trades
@@ -3811,7 +3831,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         request.MakerFeePercent ?? _backtestOptions.MakerFeePercent,
         request.SlippagePercent ?? _backtestOptions.SlippagePercent,
         request.FundingPercentPer8h ?? _backtestOptions.FundingPercentPer8h,
-        _backtestOptions.InitialEquityUsdt,
+        request.InitialEquityUsdt ?? _backtestOptions.InitialEquityUsdt,
         request.Leverage ?? _backtestOptions.Leverage,
         request.MinLiquidationBufferPercent ?? _backtestOptions.MinLiquidationBufferPercent,
         request.MaxTradeLossEquityPercent ?? _backtestOptions.MaxTradeLossEquityPercent,
@@ -3883,6 +3903,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         MakerFeePercent = settings.MakerFeePercent,
         SlippagePercent = settings.SlippagePercent,
         FundingPercentPer8h = settings.FundingPercentPer8h,
+        InitialEquityUsdt = settings.InitialEquityUsdt,
         Leverage = settings.Leverage,
         MinLiquidationBufferPercent = settings.MinLiquidationBufferPercent,
         MaxTradeLossEquityPercent = settings.MaxTradeLossEquityPercent,

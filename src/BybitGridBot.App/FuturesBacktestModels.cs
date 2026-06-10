@@ -36,6 +36,8 @@ public sealed class FuturesBacktestRequest
 
     public decimal? FundingPercentPer8h { get; init; }
 
+    public decimal? InitialEquityUsdt { get; init; }
+
     public decimal? Leverage { get; init; }
 
     public decimal? MinLiquidationBufferPercent { get; init; }
@@ -105,6 +107,8 @@ public sealed class FuturesBacktestResult
     public int OpenAtBacktestEndCount { get; init; }
 
     public decimal OpenAtBacktestEndUnrealizedPnl { get; init; }
+
+    public decimal InitialEquityUsdt { get; init; }
 
     public string OptimizationWindowLabel { get; init; } = "Optimization";
 
@@ -195,6 +199,10 @@ public sealed class FuturesBacktestMetrics
     public decimal ForcedClosedNetPnl { get; init; }
 
     public decimal ForcedClosedExitCost { get; init; }
+
+    public decimal PnlWithoutTop1 { get; init; }
+
+    public decimal PnlWithoutTop2 { get; init; }
 
     public decimal MaxDrawdown { get; init; }
 
@@ -306,6 +314,8 @@ public sealed class FuturesBacktestSymbolPerformance
     public decimal ProfitFactor { get; init; }
 
     public decimal AverageR { get; init; }
+
+    public decimal LargestWinGrossProfitPercent { get; init; }
 }
 
 public sealed class FuturesBacktestSidePerformance

@@ -61,7 +61,7 @@ public sealed class FuturesBacktestOptions
 
     [ConfigurationKeyName("FUTURES_BACKTEST_INITIAL_EQUITY_USDT")]
     [Range(typeof(decimal), "0.00000001", "999999999")]
-    public decimal InitialEquityUsdt { get; init; } = 10000m;
+    public decimal InitialEquityUsdt { get; init; } = 1000m;
 
     [ConfigurationKeyName("FUTURES_BACKTEST_LEVERAGE")]
     [Range(typeof(decimal), "1", "1000")]

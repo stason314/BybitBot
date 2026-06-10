@@ -138,6 +138,10 @@ public static class FuturesBacktestPage
           <input id="turtleRiskInput" type="number" min="0" max="100" step="0.05" value="0" />
         </div>
         <div class="run-field">
+          <label for="initialEquityInput">Capital</label>
+          <input id="initialEquityInput" type="number" min="0.00000001" max="999999999" step="1" value="1000" />
+        </div>
+        <div class="run-field">
           <label for="weekdaysInput">Weekdays</label>
           <input id="weekdaysInput" type="text" value="" placeholder="Mon,Tue" />
         </div>
@@ -202,11 +206,11 @@ public static class FuturesBacktestPage
       </div>
       <div class="panel">
         <h2>Best symbols</h2>
-        <table><thead><tr><th>Symbol</th><th>Trades</th><th>PnL</th><th>WR</th></tr></thead><tbody id="best"><tr><td colspan="4" class="empty">Нет данных</td></tr></tbody></table>
+        <table><thead><tr><th>Symbol</th><th>Trades</th><th>PnL</th><th>WR</th><th>Largest win</th></tr></thead><tbody id="best"><tr><td colspan="5" class="empty">Нет данных</td></tr></tbody></table>
       </div>
       <div class="panel">
         <h2>Worst symbols</h2>
-        <table><thead><tr><th>Symbol</th><th>Trades</th><th>PnL</th><th>WR</th></tr></thead><tbody id="worst"><tr><td colspan="4" class="empty">Нет данных</td></tr></tbody></table>
+        <table><thead><tr><th>Symbol</th><th>Trades</th><th>PnL</th><th>WR</th><th>Largest win</th></tr></thead><tbody id="worst"><tr><td colspan="5" class="empty">Нет данных</td></tr></tbody></table>
       </div>
       <div class="panel">
         <h2>Long vs short</h2>
@@ -257,6 +261,7 @@ public static class FuturesBacktestPage
       'turtleDirectionsInput',
       'turtleSystemsInput',
       'turtleRiskInput',
+      'initialEquityInput',
       'weekdaysInput',
       'hoursInput',
       'maxTradeLossInput',
@@ -291,6 +296,7 @@ public static class FuturesBacktestPage
         turtleAllowedDirections: byId('turtleDirectionsInput').value || '',
         turtleAllowedSystems: byId('turtleSystemsInput').value || '',
         turtleRiskPerUnitPercent: clampDecimal(byId('turtleRiskInput').value, 0, 100, 0),
+        initialEquityUsdt: clampDecimal(byId('initialEquityInput').value, 0.00000001, 999999999, 1000),
         turtleAllowedWeekdays: byId('weekdaysInput').value || '',
         turtleAllowedNyHours: byId('hoursInput').value || '',
         maxTradeLossEquityPercent: clampDecimal(byId('maxTradeLossInput').value, 0, 100, 0),
@@ -307,6 +313,7 @@ public static class FuturesBacktestPage
       setValue('turtleDirectionsInput', settings.turtleAllowedDirections);
       setValue('turtleSystemsInput', settings.turtleAllowedSystems);
       setValue('turtleRiskInput', settings.turtleRiskPerUnitPercent);
+      setValue('initialEquityInput', settings.initialEquityUsdt);
       setValue('weekdaysInput', settings.turtleAllowedWeekdays);
       setValue('hoursInput', settings.turtleAllowedNyHours);
       setValue('maxTradeLossInput', settings.maxTradeLossEquityPercent);
@@ -366,6 +373,7 @@ public static class FuturesBacktestPage
       byId('turtleDirectionsInput').disabled = Boolean(data.isRunning);
       byId('turtleSystemsInput').disabled = Boolean(data.isRunning);
       byId('turtleRiskInput').disabled = Boolean(data.isRunning);
+      byId('initialEquityInput').disabled = Boolean(data.isRunning);
       byId('weekdaysInput').disabled = Boolean(data.isRunning);
       byId('hoursInput').disabled = Boolean(data.isRunning);
       byId('maxTradeLossInput').disabled = Boolean(data.isRunning);
@@ -401,8 +409,8 @@ public static class FuturesBacktestPage
       byId('gateDiagnostics').innerHTML = gateDiagnosticRows(result.gateDiagnostics || []);
       byId('wfMetrics').innerHTML = walkForwardMetricRows(result);
       byId('timings').innerHTML = timingRows(result.timings || []);
-      byId('best').innerHTML = perfRows(result.bestSymbols || [], 'symbol');
-      byId('worst').innerHTML = perfRows(result.worstSymbols || [], 'symbol');
+      byId('best').innerHTML = symbolRows(result.bestSymbols || []);
+      byId('worst').innerHTML = symbolRows(result.worstSymbols || []);
       byId('sides').innerHTML = sideRows(result.longShort || []);
       byId('strategies').innerHTML = strategyRows(result.strategyPerformance || []);
       byId('patterns').innerHTML = perfRows(result.patternPerformance || [], 'bucket');
@@ -420,6 +428,17 @@ public static class FuturesBacktestPage
           <td class="${cls(item.markToMarketNetPnl ?? item.netPnl)}">${pnl(item.markToMarketNetPnl ?? item.netPnl)}</td>
           <td>${pct(item.winRate)}</td>
         </tr>`).join('') : '<tr><td colspan="4" class="empty">Нет данных</td></tr>';
+    }
+
+    function symbolRows(items) {
+      return items.length ? items.map(item => `
+        <tr>
+          <td>${item.symbol || '-'}</td>
+          <td>${item.trades || 0}</td>
+          <td class="${cls(item.netPnl)}">${pnl(item.netPnl)}</td>
+          <td>${pct(item.winRate)}</td>
+          <td>${pct(item.largestWinGrossProfitPercent)}</td>
+        </tr>`).join('') : '<tr><td colspan="5" class="empty">Нет данных</td></tr>';
     }
 
     function walkForwardSymbolRows(eligible, excluded) {
@@ -516,6 +535,7 @@ public static class FuturesBacktestPage
         `tradesCount=${result.tradesCount || 0}`,
         `openAtBacktestEndCount=${result.openAtBacktestEndCount || 0}`,
         `openAtBacktestEndUnrealizedPnl=${Number(result.openAtBacktestEndUnrealizedPnl || 0)}`,
+        `initialEquityUsdt=${Number(result.initialEquityUsdt || 0)}`,
         `hardRiskCapBlockedCount=${result.hardRiskCapBlockedCount || 0}`,
         `liquidationCount=${result.liquidationCount || 0}`,
         `maxTradeLossEquityPercent=${Number(result.maxTradeLossEquityPercent || 0)}`,
@@ -576,6 +596,8 @@ public static class FuturesBacktestPage
         `markToMarketNetPnl=${Number(item.markToMarketNetPnl ?? item.netPnl ?? 0)}`,
         `forcedClosedNetPnl=${Number(item.forcedClosedNetPnl ?? item.markToMarketNetPnl ?? item.netPnl ?? 0)}`,
         `forcedClosedExitCost=${Number(item.forcedClosedExitCost || 0)}`,
+        `pnlWithoutTop1=${Number(item.pnlWithoutTop1 || 0)}`,
+        `pnlWithoutTop2=${Number(item.pnlWithoutTop2 || 0)}`,
         `maxDrawdown=${Number(item.maxDrawdown || 0)}`,
         `maxDrawdownPercent=${Number(item.maxDrawdownPercent || 0)}`,
         `markToMarketMaxDrawdown=${Number(item.markToMarketMaxDrawdown ?? item.maxDrawdown ?? 0)}`,
