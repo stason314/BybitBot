@@ -60,6 +60,8 @@ public sealed class FuturesBacktestStatusResponse
     public DateTimeOffset? CompletedAt { get; init; }
 
     public FuturesBacktestResult? Result { get; init; }
+
+    public FuturesBacktestRequest AppliedSettings { get; init; } = new();
 }
 
 public sealed class FuturesBacktestResult

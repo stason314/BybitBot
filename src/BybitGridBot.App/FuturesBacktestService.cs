@@ -49,6 +49,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
     private readonly object _sync = new();
     private CancellationTokenSource? _runCancellation;
     private FuturesBacktestStatusResponse _status = new();
+    private FuturesBacktestRequest _appliedSettings = new();
 
     public FuturesBacktestService(
         IBybitRestClient bybitRestClient,
@@ -68,13 +69,18 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         _scoreBasedSignalEngine = scoreBasedSignalEngine;
         _strategyPerformanceTracker = strategyPerformanceTracker;
         _logger = logger;
+        _appliedSettings = LoadAppliedSettings();
+        _status = new FuturesBacktestStatusResponse
+        {
+            AppliedSettings = _appliedSettings
+        };
     }
 
     public FuturesBacktestStatusResponse GetStatus()
     {
         lock (_sync)
         {
-            return _status;
+            return WithAppliedSettings(_status);
         }
     }
 
@@ -84,21 +90,25 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         {
             if (_status.IsRunning)
             {
-                return Task.FromResult(_status);
+                return Task.FromResult(WithAppliedSettings(_status));
             }
 
             _runCancellation?.Dispose();
             _runCancellation = new CancellationTokenSource();
+            var settings = ResolveSettings(request);
+            _appliedSettings = ToRequest(settings);
+            SaveAppliedSettings(_appliedSettings);
             _status = new FuturesBacktestStatusResponse
             {
                 IsRunning = true,
                 Status = "Starting 4H NY sweep/engulfing/pinbar/3-bar/breakout/shrinking backtest",
                 StartedAt = DateTimeOffset.UtcNow,
-                ProgressPercent = 0m
+                ProgressPercent = 0m,
+                AppliedSettings = _appliedSettings
             };
 
-            _ = Task.Run(() => RunBacktestAsync(request, _runCancellation.Token), CancellationToken.None);
-            return Task.FromResult(_status);
+            _ = Task.Run(() => RunBacktestAsync(_appliedSettings, _runCancellation.Token), CancellationToken.None);
+            return Task.FromResult(WithAppliedSettings(_status));
         }
     }
 
@@ -108,7 +118,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         {
             if (!_status.IsRunning)
             {
-                return _status;
+                return WithAppliedSettings(_status);
             }
 
             _runCancellation?.Cancel();
@@ -119,9 +129,10 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                 ProgressPercent = _status.ProgressPercent,
                 StartedAt = _status.StartedAt,
                 EstimatedCompletedAt = _status.EstimatedCompletedAt,
-                Result = _status.Result
+                Result = _status.Result,
+                AppliedSettings = _appliedSettings
             };
-            return _status;
+            return WithAppliedSettings(_status);
         }
     }
 
@@ -328,7 +339,8 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                     StartedAt = _status.StartedAt,
                     EstimatedCompletedAt = null,
                     CompletedAt = DateTimeOffset.UtcNow,
-                    Result = result
+                    Result = result,
+                    AppliedSettings = _appliedSettings
                 };
             }
         }
@@ -344,7 +356,8 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                     StartedAt = _status.StartedAt,
                     EstimatedCompletedAt = null,
                     CompletedAt = DateTimeOffset.UtcNow,
-                    Result = _status.Result
+                    Result = _status.Result,
+                    AppliedSettings = _appliedSettings
                 };
             }
         }
@@ -361,7 +374,8 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                     StartedAt = _status.StartedAt,
                     EstimatedCompletedAt = null,
                     CompletedAt = DateTimeOffset.UtcNow,
-                    Result = _status.Result
+                    Result = _status.Result,
+                    AppliedSettings = _appliedSettings
                 };
             }
         }
@@ -3769,6 +3783,98 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         request.MaxTradeLossEquityPercent ?? _backtestOptions.MaxTradeLossEquityPercent,
         request.MaxProjectedDrawdownEquityPercent ?? _backtestOptions.MaxProjectedDrawdownEquityPercent);
 
+    private FuturesBacktestRequest LoadAppliedSettings()
+    {
+        var fallback = ToRequest(ResolveSettings(new FuturesBacktestRequest()));
+        var path = ResolveAppliedSettingsPath();
+        if (!File.Exists(path))
+        {
+            return fallback;
+        }
+
+        try
+        {
+            using var stream = File.OpenRead(path);
+            var saved = JsonSerializer.Deserialize<FuturesBacktestRequest>(stream, _jsonOptions);
+            return saved is null
+                ? fallback
+                : ToRequest(ResolveSettings(saved));
+        }
+        catch (Exception exception)
+        {
+            _logger.LogWarning(exception, "Failed to read futures backtest applied settings {Path}", path);
+            return fallback;
+        }
+    }
+
+    private void SaveAppliedSettings(FuturesBacktestRequest settings)
+    {
+        var path = ResolveAppliedSettingsPath();
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(path) ?? ".");
+            using var stream = File.Create(path);
+            JsonSerializer.Serialize(stream, settings, _jsonOptions);
+        }
+        catch (Exception exception)
+        {
+            _logger.LogWarning(exception, "Failed to write futures backtest applied settings {Path}", path);
+        }
+    }
+
+    private string ResolveAppliedSettingsPath()
+    {
+        if (!string.IsNullOrWhiteSpace(_backtestOptions.AppliedSettingsPath))
+        {
+            return _backtestOptions.AppliedSettingsPath;
+        }
+
+        var dataPath = Path.GetDirectoryName(_backtestOptions.CandleCachePath);
+        return Path.Combine(string.IsNullOrWhiteSpace(dataPath) ? "." : dataPath, "backtest-settings.json");
+    }
+
+    private static FuturesBacktestRequest ToRequest(BacktestRunSettings settings) => new()
+    {
+        Days = settings.Days,
+        Symbols = settings.Symbols,
+        Mode = settings.Mode.ToString(),
+        TurtleAllowedWeekdays = FormatAllowedWeekdays(settings.TurtleAllowedWeekdays),
+        TurtleAllowedNyHours = FormatAllowedHours(settings.TurtleAllowedNyHours),
+        RunNyBounceRouter = settings.RunNyBounceRouter,
+        TurtleAllowedDirections = FormatAllowedTexts(settings.TurtleAllowedDirections, string.Empty),
+        TurtleAllowedSystems = FormatAllowedTexts(settings.TurtleAllowedSystems, string.Empty),
+        TurtleRiskPerUnitPercent = settings.TurtleRiskPerUnitPercent,
+        EntryNotionalUsdt = settings.EntryNotionalUsdt,
+        TakerFeePercent = settings.TakerFeePercent,
+        MakerFeePercent = settings.MakerFeePercent,
+        SlippagePercent = settings.SlippagePercent,
+        FundingPercentPer8h = settings.FundingPercentPer8h,
+        Leverage = settings.Leverage,
+        MinLiquidationBufferPercent = settings.MinLiquidationBufferPercent,
+        MaxTradeLossEquityPercent = settings.MaxTradeLossEquityPercent,
+        MaxProjectedDrawdownEquityPercent = settings.MaxProjectedDrawdownEquityPercent
+    };
+
+    private static string FormatAllowedWeekdays(IReadOnlySet<DayOfWeek> weekdays) =>
+        weekdays.Count == 0
+            ? string.Empty
+            : string.Join(",", weekdays.OrderBy(day => (int)day).Select(day => day.ToString()));
+
+    private static string FormatAllowedHours(IReadOnlySet<int> hours) =>
+        hours.Count == 0 ? string.Empty : string.Join(",", hours.OrderBy(hour => hour));
+
+    private FuturesBacktestStatusResponse WithAppliedSettings(FuturesBacktestStatusResponse status) => new()
+    {
+        IsRunning = status.IsRunning,
+        Status = status.Status,
+        ProgressPercent = status.ProgressPercent,
+        StartedAt = status.StartedAt,
+        EstimatedCompletedAt = status.EstimatedCompletedAt,
+        CompletedAt = status.CompletedAt,
+        Result = status.Result,
+        AppliedSettings = _appliedSettings
+    };
+
     private static FuturesBacktestMode ResolveBacktestMode(string? requestMode, string optionsMode)
     {
         var value = string.IsNullOrWhiteSpace(requestMode) ? optionsMode : requestMode;
@@ -3789,7 +3895,8 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                 ProgressPercent = roundedProgress,
                 StartedAt = _status.StartedAt,
                 EstimatedCompletedAt = EstimateCompletion(_status.StartedAt, roundedProgress),
-                Result = _status.Result
+                Result = _status.Result,
+                AppliedSettings = _appliedSettings
             };
         }
     }

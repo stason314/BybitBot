@@ -247,6 +247,21 @@ public static class FuturesBacktestPage
     const pnl = v => `${Number(v) >= 0 ? '+' : ''}${money.format(Number(v || 0))}`;
     const pct = v => `${fmt.format(Number(v || 0))}%`;
     let latestStatus = null;
+    let settingsHydrated = false;
+    let settingsDirty = false;
+    const settingsFieldIds = [
+      'daysInput',
+      'symbolsInput',
+      'modeInput',
+      'nyBounceInput',
+      'turtleDirectionsInput',
+      'turtleSystemsInput',
+      'turtleRiskInput',
+      'weekdaysInput',
+      'hoursInput',
+      'maxTradeLossInput',
+      'maxDrawdownInput'
+    ];
 
     async function status() {
       const response = await fetch('/api/futures/backtest', { cache: 'no-store' });
@@ -256,24 +271,57 @@ public static class FuturesBacktestPage
 
     async function start() {
       byId('start').disabled = true;
-      const days = clampInt(byId('daysInput').value, 1, 365, 90);
-      const symbols = clampInt(byId('symbolsInput').value, 1, 200, 20);
-      const mode = byId('modeInput').value || 'ScoreBasedRouter';
-      const runNyBounceRouter = byId('nyBounceInput').checked;
-      const turtleAllowedDirections = byId('turtleDirectionsInput').value || '';
-      const turtleAllowedSystems = byId('turtleSystemsInput').value || '';
-      const turtleRiskPerUnitPercent = clampDecimal(byId('turtleRiskInput').value, 0, 100, 0);
-      const turtleAllowedWeekdays = byId('weekdaysInput').value || '';
-      const turtleAllowedNyHours = byId('hoursInput').value || '';
-      const maxTradeLossEquityPercent = clampDecimal(byId('maxTradeLossInput').value, 0, 100, 0);
-      const maxProjectedDrawdownEquityPercent = clampDecimal(byId('maxDrawdownInput').value, 0, 100, 0);
+      const payload = readSettings();
       const response = await fetch('/api/futures/backtest/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ days, symbols, mode, runNyBounceRouter, turtleAllowedDirections, turtleAllowedSystems, turtleRiskPerUnitPercent, turtleAllowedWeekdays, turtleAllowedNyHours, maxTradeLossEquityPercent, maxProjectedDrawdownEquityPercent })
+        body: JSON.stringify(payload)
       });
       if (!response.ok) throw new Error(`Start ${response.status}`);
+      settingsDirty = false;
       render(await response.json());
+    }
+
+    function readSettings() {
+      return {
+        days: clampInt(byId('daysInput').value, 1, 365, 90),
+        symbols: clampInt(byId('symbolsInput').value, 1, 200, 20),
+        mode: byId('modeInput').value || 'ScoreBasedRouter',
+        runNyBounceRouter: byId('nyBounceInput').checked,
+        turtleAllowedDirections: byId('turtleDirectionsInput').value || '',
+        turtleAllowedSystems: byId('turtleSystemsInput').value || '',
+        turtleRiskPerUnitPercent: clampDecimal(byId('turtleRiskInput').value, 0, 100, 0),
+        turtleAllowedWeekdays: byId('weekdaysInput').value || '',
+        turtleAllowedNyHours: byId('hoursInput').value || '',
+        maxTradeLossEquityPercent: clampDecimal(byId('maxTradeLossInput').value, 0, 100, 0),
+        maxProjectedDrawdownEquityPercent: clampDecimal(byId('maxDrawdownInput').value, 0, 100, 0)
+      };
+    }
+
+    function applySettings(settings) {
+      if (!settings) return;
+      setValue('daysInput', settings.days);
+      setValue('symbolsInput', settings.symbols);
+      setValue('modeInput', settings.mode);
+      setChecked('nyBounceInput', settings.runNyBounceRouter);
+      setValue('turtleDirectionsInput', settings.turtleAllowedDirections);
+      setValue('turtleSystemsInput', settings.turtleAllowedSystems);
+      setValue('turtleRiskInput', settings.turtleRiskPerUnitPercent);
+      setValue('weekdaysInput', settings.turtleAllowedWeekdays);
+      setValue('hoursInput', settings.turtleAllowedNyHours);
+      setValue('maxTradeLossInput', settings.maxTradeLossEquityPercent);
+      setValue('maxDrawdownInput', settings.maxProjectedDrawdownEquityPercent);
+      settingsHydrated = true;
+    }
+
+    function setValue(id, value) {
+      if (value === undefined || value === null) return;
+      byId(id).value = String(value);
+    }
+
+    function setChecked(id, value) {
+      if (value === undefined || value === null) return;
+      byId(id).checked = Boolean(value);
     }
 
     function clampInt(value, min, max, fallback) {
@@ -297,6 +345,10 @@ public static class FuturesBacktestPage
 
     function render(data) {
       latestStatus = data;
+      if (data.appliedSettings && (!settingsHydrated || (!data.isRunning && !settingsDirty))) {
+        applySettings(data.appliedSettings);
+      }
+
       const progress = Number(data.progressPercent || 0);
       const statusText = data.status || 'Not started';
       const isStopping = statusText.toLowerCase().startsWith('stopping');
@@ -600,6 +652,11 @@ public static class FuturesBacktestPage
     byId('start').addEventListener('click', () => start().catch(error => { byId('status').textContent = error.message; }));
     byId('stop').addEventListener('click', () => stop().catch(error => { byId('status').textContent = error.message; }));
     byId('copyDiagnostics').addEventListener('click', () => copyDiagnostics());
+    for (const id of settingsFieldIds) {
+      byId(id).addEventListener('input', () => { settingsDirty = true; });
+      byId(id).addEventListener('change', () => { settingsDirty = true; });
+    }
+
     byId('copyDiagnostics').disabled = true;
     status().catch(error => { byId('status').textContent = error.message; });
     setInterval(() => status().catch(() => {}), 5000);

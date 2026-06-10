@@ -84,4 +84,7 @@ public sealed class FuturesBacktestOptions
 
     [ConfigurationKeyName("FUTURES_BACKTEST_CANDLE_CACHE_PATH")]
     public string CandleCachePath { get; init; } = "/app/data/backtest-candles";
+
+    [ConfigurationKeyName("FUTURES_BACKTEST_APPLIED_SETTINGS_PATH")]
+    public string AppliedSettingsPath { get; init; } = "/app/data/backtest-settings.json";
 }
