@@ -420,7 +420,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         {
             return timings.Measure(
                 "symbol.backtest_turtle_only",
-                () => BacktestTurtleOnlySymbol(symbol, periodStart, fiveMinuteSeries, turtleSeries, turtleIndicators, btc15mSeries, fiveMinuteTurtleExits, settings, cancellationToken));
+                () => BacktestTurtleOnlySymbol(symbol, periodStart, fiveMinuteSeries, turtleSeries, turtleIndicators, btc15m, fiveMinuteTurtleExits, settings, cancellationToken));
         }
 
         var trades = new List<BacktestTradeInternal>();
@@ -436,7 +436,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                     fiveMinuteSeries,
                     turtleSeries,
                     turtleIndicators,
-                    btc15mSeries,
+                    btc15m,
                     fiveMinuteTurtleExits,
                     settings,
                     trades,
