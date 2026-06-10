@@ -301,13 +301,17 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                     hardRiskCapBlockedCount += output.HardRiskCapBlockedCount;
                 }
             });
+            var portfolioRiskPass = ApplyPortfolioHardRiskCaps(
+                allTrades.OrderBy(trade => trade.EntryTime).ToArray(),
+                settings);
+            hardRiskCapBlockedCount += portfolioRiskPass.BlockedCount;
 
             var result = BuildResult(
                 periodStart,
                 periodEnd,
                 symbols.Length,
                 processed,
-                allTrades.OrderBy(trade => trade.EntryTime).ToArray(),
+                portfolioRiskPass.Trades,
                 falseBreakoutCount,
                 trueBreakoutBlockedCount,
                 hardRiskCapBlockedCount,
@@ -2119,6 +2123,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             netPnl,
             rMultiple,
             exitReason,
+            initialRiskUsdt,
             exitIndex);
     }
 
@@ -2377,6 +2382,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             netPnl,
             rMultiple,
             exitReason,
+            initialRiskUsdt,
             exitIndex);
     }
 
@@ -2448,6 +2454,81 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             : 0m;
         return settings.MaxProjectedDrawdownEquityPercent <= 0m ||
             projectedDrawdownPercent <= settings.MaxProjectedDrawdownEquityPercent;
+    }
+
+    private static BacktestPortfolioRiskPass ApplyPortfolioHardRiskCaps(
+        IReadOnlyList<BacktestTradeInternal> trades,
+        BacktestRunSettings settings)
+    {
+        if (trades.Count == 0 ||
+            settings.InitialEquityUsdt <= 0m ||
+            (settings.MaxTradeLossEquityPercent <= 0m && settings.MaxProjectedDrawdownEquityPercent <= 0m))
+        {
+            return new BacktestPortfolioRiskPass(trades.OrderBy(trade => trade.EntryTime).ToArray(), 0);
+        }
+
+        var accepted = new List<BacktestTradeInternal>(trades.Count);
+        var blocked = 0;
+        foreach (var trade in trades
+            .OrderBy(trade => trade.EntryTime)
+            .ThenBy(trade => trade.ExitTime)
+            .ThenBy(trade => trade.Symbol, StringComparer.OrdinalIgnoreCase))
+        {
+            var accountEquity = settings.InitialEquityUsdt + accepted
+                .Where(acceptedTrade => acceptedTrade.ExitTime <= trade.EntryTime)
+                .Sum(acceptedTrade => acceptedTrade.NetPnl);
+            if (accountEquity <= 0m)
+            {
+                blocked++;
+                continue;
+            }
+
+            var tradeRiskPercent = trade.ProjectedRiskUsdt > 0m
+                ? trade.ProjectedRiskUsdt / accountEquity * 100m
+                : 0m;
+            if (settings.MaxTradeLossEquityPercent > 0m &&
+                tradeRiskPercent > settings.MaxTradeLossEquityPercent)
+            {
+                blocked++;
+                continue;
+            }
+
+            var peakEquity = CalculatePortfolioPeakEquity(accepted, settings.InitialEquityUsdt, trade.EntryTime);
+            var currentDrawdownUsdt = decimal.Max(0m, peakEquity - accountEquity);
+            var openRiskUsdt = accepted
+                .Where(acceptedTrade => acceptedTrade.EntryTime <= trade.EntryTime && acceptedTrade.ExitTime > trade.EntryTime)
+                .Sum(acceptedTrade => acceptedTrade.ProjectedRiskUsdt);
+            var projectedDrawdownPercent = (currentDrawdownUsdt + openRiskUsdt + trade.ProjectedRiskUsdt) /
+                settings.InitialEquityUsdt * 100m;
+            if (settings.MaxProjectedDrawdownEquityPercent > 0m &&
+                projectedDrawdownPercent > settings.MaxProjectedDrawdownEquityPercent)
+            {
+                blocked++;
+                continue;
+            }
+
+            accepted.Add(trade);
+        }
+
+        return new BacktestPortfolioRiskPass(accepted.OrderBy(trade => trade.EntryTime).ToArray(), blocked);
+    }
+
+    private static decimal CalculatePortfolioPeakEquity(
+        IReadOnlyList<BacktestTradeInternal> trades,
+        decimal initialEquity,
+        DateTimeOffset beforeOrAt)
+    {
+        var equity = initialEquity;
+        var peak = initialEquity;
+        foreach (var trade in trades
+            .Where(trade => trade.ExitTime <= beforeOrAt)
+            .OrderBy(trade => trade.ExitTime))
+        {
+            equity += trade.NetPnl;
+            peak = decimal.Max(peak, equity);
+        }
+
+        return peak;
     }
 
     private static decimal EstimateBacktestLiquidationPrice(decimal entryPrice, decimal leverage, bool isShort)
@@ -4460,6 +4541,8 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
 
     private sealed record BacktestFilterResult(bool IsAllowed, bool IsTrueBreakoutBlocked);
 
+    private sealed record BacktestPortfolioRiskPass(IReadOnlyList<BacktestTradeInternal> Trades, int BlockedCount);
+
     private sealed record StrategyGatePerformance(
         string StrategyName,
         string System,
@@ -4493,5 +4576,6 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         decimal NetPnl,
         decimal RMultiple,
         string ExitReason,
+        decimal ProjectedRiskUsdt,
         int ExitIndex);
 }
