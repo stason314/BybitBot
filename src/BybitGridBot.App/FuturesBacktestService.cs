@@ -312,8 +312,10 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                     hardRiskCapBlockedCount += output.HardRiskCapBlockedCount;
                 }
             });
-            var portfolioRiskPass = ApplyPortfolioHardRiskCaps(
+            var portfolioRiskPass = ApplyWindowedPortfolioHardRiskCaps(
                 allTrades.OrderBy(trade => trade.EntryTime).ToArray(),
+                periodStart,
+                periodEnd,
                 settings);
             hardRiskCapBlockedCount += portfolioRiskPass.BlockedCount;
 
@@ -2470,6 +2472,34 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             projectedDrawdownPercent <= settings.MaxProjectedDrawdownEquityPercent;
     }
 
+    private static BacktestPortfolioRiskPass ApplyWindowedPortfolioHardRiskCaps(
+        IReadOnlyList<BacktestTradeInternal> trades,
+        DateTimeOffset periodStart,
+        DateTimeOffset periodEnd,
+        BacktestRunSettings settings)
+    {
+        var splitAt = ResolveBacktestSplitAt(periodStart, periodEnd);
+        var optimizationPass = ApplyPortfolioHardRiskCaps(
+            trades
+                .Where(trade => trade.EntryTime < splitAt)
+                .OrderBy(trade => trade.EntryTime)
+                .ToArray(),
+            settings);
+        var outOfSamplePass = ApplyPortfolioHardRiskCaps(
+            trades
+                .Where(trade => trade.EntryTime >= splitAt)
+                .OrderBy(trade => trade.EntryTime)
+                .ToArray(),
+            settings);
+        var acceptedTrades = optimizationPass.Trades
+            .Concat(outOfSamplePass.Trades)
+            .OrderBy(trade => trade.EntryTime)
+            .ToArray();
+        return new BacktestPortfolioRiskPass(
+            acceptedTrades,
+            optimizationPass.BlockedCount + outOfSamplePass.BlockedCount);
+    }
+
     private static BacktestPortfolioRiskPass ApplyPortfolioHardRiskCaps(
         IReadOnlyList<BacktestTradeInternal> trades,
         BacktestRunSettings settings)
@@ -2543,6 +2573,14 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         }
 
         return peak;
+    }
+
+    private static DateTimeOffset ResolveBacktestSplitAt(DateTimeOffset periodStart, DateTimeOffset periodEnd)
+    {
+        var splitAt = periodEnd.AddDays(-30);
+        return splitAt > periodStart
+            ? splitAt
+            : periodStart.AddTicks((periodEnd - periodStart).Ticks * 2 / 3);
     }
 
     private static decimal EstimateBacktestLiquidationPrice(decimal entryPrice, decimal leverage, bool isShort)
@@ -2685,11 +2723,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         BacktestRunSettings settings,
         IReadOnlyList<FuturesBacktestTiming> timings)
     {
-        var splitAt = periodEnd.AddDays(-30);
-        if (splitAt <= periodStart)
-        {
-            splitAt = periodStart.AddTicks((periodEnd - periodStart).Ticks * 2 / 3);
-        }
+        var splitAt = ResolveBacktestSplitAt(periodStart, periodEnd);
         var optimizationWindowLabel = BuildWindowLabel("optimization", periodStart, splitAt);
         var outOfSampleWindowLabel = BuildWindowLabel("out-of-sample", splitAt, periodEnd);
 
