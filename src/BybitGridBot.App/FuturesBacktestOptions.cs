@@ -39,6 +39,44 @@ public sealed class FuturesBacktestOptions
     [Range(typeof(decimal), "0", "100")]
     public decimal TurtleRiskPerUnitPercent { get; init; } = 0m;
 
+    [ConfigurationKeyName("FUTURES_BACKTEST_TURTLE_BREAKOUT_ATR_BUFFER_MULTIPLIER")]
+    [Range(typeof(decimal), "0", "10")]
+    public decimal TurtleBreakoutAtrBufferMultiplier { get; init; } = 0.2m;
+
+    [ConfigurationKeyName("FUTURES_BACKTEST_TURTLE_MIN_ADX")]
+    [Range(typeof(decimal), "0", "100")]
+    public decimal TurtleMinAdx { get; init; } = 0m;
+
+    [ConfigurationKeyName("FUTURES_BACKTEST_TURTLE_VOLUME_MULTIPLIER")]
+    [Range(typeof(decimal), "0", "100")]
+    public decimal TurtleVolumeMultiplier { get; init; } = 0m;
+
+    [ConfigurationKeyName("FUTURES_BACKTEST_TURTLE_USE_MARKET_REGIME_FILTER")]
+    public bool TurtleUseMarketRegimeFilter { get; init; } = true;
+
+    [ConfigurationKeyName("FUTURES_BACKTEST_ENABLE_ROLLING_WALK_FORWARD_GATE")]
+    public bool EnableRollingWalkForwardGate { get; init; } = true;
+
+    [ConfigurationKeyName("FUTURES_BACKTEST_ROLLING_WALK_FORWARD_OPTIMIZATION_DAYS")]
+    [Range(1, 365)]
+    public int RollingWalkForwardOptimizationDays { get; init; } = 120;
+
+    [ConfigurationKeyName("FUTURES_BACKTEST_ROLLING_WALK_FORWARD_OUT_OF_SAMPLE_DAYS")]
+    [Range(1, 365)]
+    public int RollingWalkForwardOutOfSampleDays { get; init; } = 30;
+
+    [ConfigurationKeyName("FUTURES_BACKTEST_ROLLING_WALK_FORWARD_STEP_DAYS")]
+    [Range(1, 365)]
+    public int RollingWalkForwardStepDays { get; init; } = 30;
+
+    [ConfigurationKeyName("FUTURES_BACKTEST_ROLLING_WALK_FORWARD_MIN_WINDOWS")]
+    [Range(1, 100)]
+    public int RollingWalkForwardMinWindows { get; init; } = 3;
+
+    [ConfigurationKeyName("FUTURES_BACKTEST_ROLLING_WALK_FORWARD_MIN_PASS_PERCENT")]
+    [Range(typeof(decimal), "0", "100")]
+    public decimal RollingWalkForwardMinPassPercent { get; init; } = 60m;
+
     [ConfigurationKeyName("FUTURES_BACKTEST_ENTRY_NOTIONAL_USDT")]
     [Range(typeof(decimal), "0.00000001", "999999999")]
     public decimal EntryNotionalUsdt { get; init; } = 100m;

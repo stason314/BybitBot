@@ -264,10 +264,10 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                 .Select(ticker => ticker.Symbol)
                 .ToArray();
 
-            var btc15m = ShouldRunNyBounceRouter(settings)
+            var btc15m = ShouldRunNyBounceRouter(settings) || settings.TurtleUseMarketRegimeFilter
                 ? await timings.MeasureAsync(
                     "load.btc_15m",
-                    () => FetchHistoricalCandlesAsync("BTCUSDT", FifteenMinuteInterval, periodStart, periodEnd, cancellationToken))
+                    () => FetchHistoricalCandlesAsync("BTCUSDT", FifteenMinuteInterval, periodStart.AddDays(-10), periodEnd, cancellationToken))
                 : Array.Empty<Candle>();
             var btc15mSeries = BacktestCandleSeries.Create(btc15m, 15);
             var outputs = new ConcurrentBag<SymbolBacktestOutput>();
@@ -420,7 +420,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         {
             return timings.Measure(
                 "symbol.backtest_turtle_only",
-                () => BacktestTurtleOnlySymbol(symbol, periodStart, fiveMinuteSeries, turtleSeries, turtleIndicators, fiveMinuteTurtleExits, settings, cancellationToken));
+                () => BacktestTurtleOnlySymbol(symbol, periodStart, fiveMinuteSeries, turtleSeries, turtleIndicators, btc15mSeries, fiveMinuteTurtleExits, settings, cancellationToken));
         }
 
         var trades = new List<BacktestTradeInternal>();
@@ -436,6 +436,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                     fiveMinuteSeries,
                     turtleSeries,
                     turtleIndicators,
+                    btc15mSeries,
                     fiveMinuteTurtleExits,
                     settings,
                     trades,
@@ -525,6 +526,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         BacktestCandleSeries fiveMinuteCandles,
         BacktestCandleSeries turtleCandles,
         PrecomputedTurtleIndicators indicators,
+        BacktestCandleSeries btc15m,
         PrecomputedTurtleChannelExits turtleExits,
         BacktestRunSettings settings,
         CancellationToken cancellationToken)
@@ -543,6 +545,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             fiveMinuteCandles,
             turtleCandles,
             indicators,
+            btc15m,
             turtleExits,
             settings,
             trades,
@@ -558,6 +561,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         BacktestCandleSeries fiveMinuteCandles,
         BacktestCandleSeries turtleCandles,
         PrecomputedTurtleIndicators indicators,
+        BacktestCandleSeries btc15m,
         PrecomputedTurtleChannelExits turtleExits,
         BacktestRunSettings settings,
         List<BacktestTradeInternal> trades,
@@ -590,7 +594,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                 continue;
             }
 
-            var signal = TryBuildTurtleOnlySignal(symbol, current, indicators, index, settings);
+            var signal = TryBuildTurtleOnlySignal(symbol, current, indicators, index, btc15m, settings);
             if (signal is null)
             {
                 continue;
@@ -631,16 +635,22 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         Candle current,
         PrecomputedTurtleIndicators indicators,
         int index,
+        BacktestCandleSeries btc15m,
         BacktestRunSettings settings)
     {
-        var candidate = ResolvePrecomputedTurtleSignal(current, indicators, index, settings);
+        var nValue = indicators.TurtleN[index];
+        if (nValue <= 0m)
+        {
+            return null;
+        }
+
+        var candidate = ResolvePrecomputedTurtleSignal(current, indicators, index, nValue, settings);
         if (candidate.Side == StrategySide.None)
         {
             return null;
         }
 
-        var nValue = indicators.TurtleN[index];
-        if (nValue <= 0m)
+        if (!IsTurtleSignalQualityAllowed(current, indicators, index, candidate.Side, btc15m, settings))
         {
             return null;
         }
@@ -678,12 +688,14 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         Candle current,
         PrecomputedTurtleIndicators indicators,
         int index,
+        decimal nValue,
         BacktestRunSettings settings)
     {
+        var atrBuffer = nValue * settings.TurtleBreakoutAtrBufferMultiplier;
         var slowHigh = indicators.EntrySlowHigh[index];
         var slowLow = indicators.EntrySlowLow[index];
         if (slowHigh > 0m &&
-            current.Close > slowHigh &&
+            current.Close > slowHigh + atrBuffer &&
             IsTurtleBacktestSystemAllowed("S2", settings) &&
             IsTurtleBacktestDirectionAllowed(StrategySide.Long, settings))
         {
@@ -691,7 +703,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         }
 
         if (slowLow > 0m &&
-            current.Close < slowLow &&
+            current.Close < slowLow - atrBuffer &&
             IsTurtleBacktestSystemAllowed("S2", settings) &&
             IsTurtleBacktestDirectionAllowed(StrategySide.Short, settings))
         {
@@ -701,7 +713,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         var fastHigh = indicators.EntryFastHigh[index];
         var fastLow = indicators.EntryFastLow[index];
         if (fastHigh > 0m &&
-            current.Close > fastHigh &&
+            current.Close > fastHigh + atrBuffer &&
             IsTurtleBacktestSystemAllowed("S1", settings) &&
             IsTurtleBacktestDirectionAllowed(StrategySide.Long, settings))
         {
@@ -709,7 +721,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         }
 
         if (fastLow > 0m &&
-            current.Close < fastLow &&
+            current.Close < fastLow - atrBuffer &&
             IsTurtleBacktestSystemAllowed("S1", settings) &&
             IsTurtleBacktestDirectionAllowed(StrategySide.Short, settings))
         {
@@ -717,6 +729,57 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         }
 
         return new PrecomputedTurtleSignal(string.Empty, StrategySide.None, 0m);
+    }
+
+    private bool IsTurtleSignalQualityAllowed(
+        Candle current,
+        PrecomputedTurtleIndicators indicators,
+        int index,
+        StrategySide side,
+        BacktestCandleSeries btc15m,
+        BacktestRunSettings settings)
+    {
+        if (settings.TurtleMinAdx > 0m && indicators.Adx[index] < settings.TurtleMinAdx)
+        {
+            return false;
+        }
+
+        if (settings.TurtleVolumeMultiplier > 0m &&
+            indicators.VolumeSma[index] > 0m &&
+            current.Volume < indicators.VolumeSma[index] * settings.TurtleVolumeMultiplier)
+        {
+            return false;
+        }
+
+        return !settings.TurtleUseMarketRegimeFilter ||
+            IsTurtleMarketRegimeAllowed(side, current.OpenTime, btc15m);
+    }
+
+    private bool IsTurtleMarketRegimeAllowed(
+        StrategySide side,
+        DateTimeOffset signalOpenTime,
+        BacktestCandleSeries btc15m)
+    {
+        if (btc15m.Count < 220)
+        {
+            return false;
+        }
+
+        var signalCloseTime = signalOpenTime.AddMinutes(ResolveIntervalMinutes(_turtleOptions.Timeframe));
+        var closed = btc15m.CopyClosedUntil(signalCloseTime)
+            .Select(candle => candle.Close)
+            .ToArray();
+        if (closed.Length < 200)
+        {
+            return false;
+        }
+
+        var fast = TradingIndicatorMath.Ema(closed, 50);
+        var slow = TradingIndicatorMath.Ema(closed, 200);
+        var close = closed[^1];
+        return side == StrategySide.Long
+            ? close > slow && fast > slow
+            : close < slow && fast < slow;
     }
 
     private static bool IsNySessionComplete(DateOnly nyDate, TimeZoneInfo nyZone, DateTimeOffset periodEnd)
@@ -2777,6 +2840,10 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                 item => BuildStrategyGateKey(item),
                 StringComparer.OrdinalIgnoreCase);
         var robustnessPassedWindows = BuildRobustnessPassedWindowCounts(outOfSampleTrades, splitAt, periodEnd, settings.InitialEquityUsdt);
+        var rollingWalkForwardDiagnostics = BuildRollingWalkForwardDiagnostics(closedTrades, periodStart, periodEnd, settings);
+        var rollingWalkForwardMap = rollingWalkForwardDiagnostics.ToDictionary(
+            item => item.Key,
+            StringComparer.OrdinalIgnoreCase);
         var eligibleStrategySymbolDirections = optimizationStrategyGates
             .Where(item => IsLiveGateStrategyEnabled(item.StrategyName))
             .Where(item => IsLiveDirectionAllowed(item.Direction))
@@ -2789,6 +2856,9 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             .Where(item =>
                 robustnessPassedWindows.TryGetValue(BuildStrategyGateKey(item), out var passedWindows) &&
                 passedWindows >= _strategyRoutingOptions.MinRobustnessWindowsToEnable)
+            .Where(item => !settings.EnableRollingWalkForwardGate ||
+                rollingWalkForwardMap.TryGetValue(BuildStrategyGateKey(item), out var rolling) &&
+                rolling.IsLiveAllowed)
             .Select(BuildStrategyGateKey)
             .OrderBy(key => key)
             .ToArray();
@@ -2807,6 +2877,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             outOfSampleMarkToMarketStrategyGateMap,
             outOfSampleForcedClosedStrategyGateMap,
             robustnessPassedWindows,
+            rollingWalkForwardMap,
             eligibleStrategyGateSet);
         var walkForwardStrategyGates = BuildWalkForwardStrategyGates(
             optimizationTrades,
@@ -2868,6 +2939,16 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             TurtleAllowedDirections = FormatAllowedTexts(settings.TurtleAllowedDirections, "Long,Short"),
             TurtleAllowedSystems = FormatAllowedTexts(settings.TurtleAllowedSystems, "S1,S2"),
             TurtleRiskPerUnitPercent = ResolveTurtleRiskPerUnitPercent(settings),
+            TurtleBreakoutAtrBufferMultiplier = settings.TurtleBreakoutAtrBufferMultiplier,
+            TurtleMinAdx = settings.TurtleMinAdx,
+            TurtleVolumeMultiplier = settings.TurtleVolumeMultiplier,
+            TurtleUseMarketRegimeFilter = settings.TurtleUseMarketRegimeFilter,
+            EnableRollingWalkForwardGate = settings.EnableRollingWalkForwardGate,
+            RollingWalkForwardOptimizationDays = settings.RollingWalkForwardOptimizationDays,
+            RollingWalkForwardOutOfSampleDays = settings.RollingWalkForwardOutOfSampleDays,
+            RollingWalkForwardStepDays = settings.RollingWalkForwardStepDays,
+            RollingWalkForwardMinWindows = settings.RollingWalkForwardMinWindows,
+            RollingWalkForwardMinPassPercent = settings.RollingWalkForwardMinPassPercent,
             OpenAtBacktestEndCount = openAtBacktestEndTrades.Length,
             OpenAtBacktestEndUnrealizedPnl = openAtBacktestEndTrades.Sum(trade => trade.NetPnl),
             InitialEquityUsdt = settings.InitialEquityUsdt,
@@ -2896,6 +2977,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             WatchlistStrategySymbolDirections = watchlistStrategySymbolDirections,
             GateDiagnostics = gateDiagnostics,
             WalkForwardStrategyGates = walkForwardStrategyGates,
+            RollingWalkForwardDiagnostics = rollingWalkForwardDiagnostics,
             BestSymbols = BuildSymbolPerformance(outOfSampleTrades).OrderByDescending(item => item.NetPnl).Take(10).ToArray(),
             WorstSymbols = BuildSymbolPerformance(outOfSampleTrades).OrderBy(item => item.NetPnl).Take(10).ToArray(),
             LongShort = BuildSidePerformance(outOfSampleTrades),
@@ -2974,6 +3056,187 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         return counts;
     }
 
+    private IReadOnlyList<FuturesBacktestRollingWalkForwardDiagnostic> BuildRollingWalkForwardDiagnostics(
+        IReadOnlyList<BacktestTradeInternal> trades,
+        DateTimeOffset periodStart,
+        DateTimeOffset periodEnd,
+        BacktestRunSettings settings)
+    {
+        var optimizationDays = Math.Max(1, settings.RollingWalkForwardOptimizationDays);
+        var outOfSampleDays = Math.Max(1, settings.RollingWalkForwardOutOfSampleDays);
+        var stepDays = Math.Max(1, settings.RollingWalkForwardStepDays);
+        var windows = new List<(DateTimeOffset OptimizationStart, DateTimeOffset SplitAt, DateTimeOffset OutOfSampleEnd)>();
+        for (var start = periodStart; start.AddDays(optimizationDays + outOfSampleDays) <= periodEnd; start = start.AddDays(stepDays))
+        {
+            windows.Add((start, start.AddDays(optimizationDays), start.AddDays(optimizationDays + outOfSampleDays)));
+        }
+
+        var keys = GroupTradesByGate(trades).Keys.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var summaries = keys.ToDictionary(
+            key => key,
+            key => new RollingWalkForwardAccumulator(key),
+            StringComparer.OrdinalIgnoreCase);
+
+        var windowIndex = 0;
+        foreach (var window in windows)
+        {
+            var optimizationTrades = trades
+                .Where(trade => trade.EntryTime >= window.OptimizationStart && trade.EntryTime < window.SplitAt)
+                .OrderBy(trade => trade.EntryTime)
+                .ToArray();
+            var outOfSampleTrades = trades
+                .Where(trade => trade.EntryTime >= window.SplitAt && trade.EntryTime < window.OutOfSampleEnd)
+                .OrderBy(trade => trade.EntryTime)
+                .ToArray();
+            var optimizationGates = BuildStrategyGatePerformance(optimizationTrades, settings.InitialEquityUsdt)
+                .ToDictionary(item => BuildStrategyGateKey(item), StringComparer.OrdinalIgnoreCase);
+            var outOfSampleGates = BuildStrategyGatePerformance(outOfSampleTrades, settings.InitialEquityUsdt)
+                .ToDictionary(item => BuildStrategyGateKey(item), StringComparer.OrdinalIgnoreCase);
+            var windowKeys = summaries.Keys
+                .Concat(optimizationGates.Keys)
+                .Concat(outOfSampleGates.Keys)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            foreach (var key in windowKeys)
+            {
+                if (!summaries.TryGetValue(key, out var summary))
+                {
+                    summary = new RollingWalkForwardAccumulator(key);
+                    summary.Windows = windowIndex;
+                    summaries[key] = summary;
+                }
+
+                optimizationGates.TryGetValue(key, out var optimizationGate);
+                outOfSampleGates.TryGetValue(key, out var outOfSampleGate);
+                var windowOosTrades = outOfSampleTrades
+                    .Where(trade => string.Equals(BuildStrategyGateKey(trade), key, StringComparison.OrdinalIgnoreCase))
+                    .ToArray();
+                summary.Windows++;
+                summary.TotalOosTrades.AddRange(windowOosTrades);
+                if (outOfSampleGate is not null)
+                {
+                    summary.OosAverageRs.Add(outOfSampleGate.AverageR);
+                }
+
+                if (optimizationGate is not null &&
+                    IsOptimizationGateConfirmed(optimizationGate) &&
+                    IsOosGateConfirmed(optimizationGate, outOfSampleGates))
+                {
+                    summary.PassedWindows++;
+                }
+            }
+
+            windowIndex++;
+        }
+
+        return summaries.Values
+            .Select(summary => BuildRollingWalkForwardDiagnostic(summary, settings))
+            .OrderByDescending(item => item.IsLiveAllowed)
+            .ThenByDescending(item => item.TotalOosNetPnl)
+            .ThenBy(item => item.Key)
+            .ToArray();
+    }
+
+    private FuturesBacktestRollingWalkForwardDiagnostic BuildRollingWalkForwardDiagnostic(
+        RollingWalkForwardAccumulator summary,
+        BacktestRunSettings settings)
+    {
+        var source = summary.TotalOosTrades.FirstOrDefault();
+        var windows = summary.Windows;
+        var passPercent = windows > 0 ? (decimal)summary.PassedWindows / windows * 100m : 0m;
+        var totalOosNetPnl = summary.TotalOosTrades.Sum(trade => trade.NetPnl);
+        var pnlWithoutTop1 = CalculatePnlWithoutLargestWinningTrade(summary.TotalOosTrades);
+        var medianOosAverageR = CalculateMedian(summary.OosAverageRs);
+        var isLiveAllowed =
+            windows >= settings.RollingWalkForwardMinWindows &&
+            passPercent >= settings.RollingWalkForwardMinPassPercent &&
+            summary.PassedWindows > 0 &&
+            summary.TotalOosTrades.Count >= _strategyRoutingOptions.MinOosTradesForStrategySymbolGating &&
+            totalOosNetPnl > 0m &&
+            pnlWithoutTop1 > 0m &&
+            medianOosAverageR > 0m;
+
+        return new FuturesBacktestRollingWalkForwardDiagnostic
+        {
+            Key = summary.Key,
+            StrategyName = source?.Pattern ?? ResolveStrategyNameFromGateKey(summary.Key),
+            System = source is null ? ResolveSystemFromGateKey(summary.Key) : ResolveStrategyGateSystem(source),
+            Symbol = source?.Symbol ?? ResolveSymbolFromGateKey(summary.Key),
+            Direction = source?.Side ?? ResolveDirectionFromGateKey(summary.Key),
+            IsLiveAllowed = isLiveAllowed,
+            Windows = windows,
+            PassedWindows = summary.PassedWindows,
+            PassPercent = passPercent,
+            TotalOosTrades = summary.TotalOosTrades.Count,
+            TotalOosNetPnl = totalOosNetPnl,
+            OosPnlWithoutTop1 = pnlWithoutTop1,
+            MedianOosAverageR = medianOosAverageR,
+            Reason = isLiveAllowed
+                ? "Rolling walk-forward passed."
+                : BuildRollingWalkForwardRejectReason(summary, settings, passPercent, totalOosNetPnl, pnlWithoutTop1, medianOosAverageR)
+        };
+    }
+
+    private string BuildRollingWalkForwardRejectReason(
+        RollingWalkForwardAccumulator summary,
+        BacktestRunSettings settings,
+        decimal passPercent,
+        decimal totalOosNetPnl,
+        decimal pnlWithoutTop1,
+        decimal medianOosAverageR)
+    {
+        if (summary.Windows < settings.RollingWalkForwardMinWindows)
+        {
+            return $"Rolling WF windows {summary.Windows} < {settings.RollingWalkForwardMinWindows}.";
+        }
+
+        if (passPercent < settings.RollingWalkForwardMinPassPercent)
+        {
+            return $"Rolling WF pass {passPercent:0.####}% < {settings.RollingWalkForwardMinPassPercent:0.####}%.";
+        }
+
+        if (summary.TotalOosTrades.Count < _strategyRoutingOptions.MinOosTradesForStrategySymbolGating)
+        {
+            return $"Rolling WF OOS trades {summary.TotalOosTrades.Count} < {_strategyRoutingOptions.MinOosTradesForStrategySymbolGating}.";
+        }
+
+        if (totalOosNetPnl <= 0m)
+        {
+            return $"Rolling WF OOS PnL {totalOosNetPnl:0.####} <= 0.";
+        }
+
+        if (pnlWithoutTop1 <= 0m)
+        {
+            return $"Rolling WF OOS PnL without largest win {pnlWithoutTop1:0.####} <= 0.";
+        }
+
+        if (medianOosAverageR <= 0m)
+        {
+            return $"Rolling WF median OOS AvgR {medianOosAverageR:0.####} <= 0.";
+        }
+
+        return "Rolling walk-forward rejected.";
+    }
+
+    private bool IsOptimizationGateConfirmed(StrategyGatePerformance gate) =>
+        IsLiveGateStrategyEnabled(gate.StrategyName) &&
+        IsLiveDirectionAllowed(gate.Direction) &&
+        gate.TradesCount >= _strategyRoutingOptions.MinTradesForStrategySymbolGating &&
+        gate.ProfitFactor >= _strategyRoutingOptions.MinProfitFactorToEnable &&
+        gate.AverageR >= _strategyRoutingOptions.MinAverageRToEnable &&
+        gate.NetPnl > 0m;
+
+    private static decimal CalculatePnlWithoutLargestWinningTrade(IReadOnlyList<BacktestTradeInternal> trades)
+    {
+        var netPnl = trades.Sum(trade => trade.NetPnl);
+        var largestWin = trades
+            .Where(trade => trade.NetPnl > 0m)
+            .Select(trade => trade.NetPnl)
+            .DefaultIfEmpty(0m)
+            .Max();
+        return netPnl - largestWin;
+    }
+
     private IReadOnlyList<string> BuildProfitableDiagnosticGateKeys(
         IReadOnlyList<StrategyGatePerformance> gates,
         int minTrades) =>
@@ -3007,6 +3270,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         IReadOnlyDictionary<string, StrategyGatePerformance> oosMarkToMarketGates,
         IReadOnlyDictionary<string, StrategyGatePerformance> oosForcedClosedGates,
         IReadOnlyDictionary<string, int> robustnessPassedWindows,
+        IReadOnlyDictionary<string, FuturesBacktestRollingWalkForwardDiagnostic> rollingWalkForwardDiagnostics,
         IReadOnlySet<string> liveAllowedKeys)
     {
         var keys = optimizationGates.Keys
@@ -3026,6 +3290,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                 oosOpenGates.TryGetValue(key, out var oosOpen);
                 oosMarkToMarketGates.TryGetValue(key, out var oosMarkToMarket);
                 oosForcedClosedGates.TryGetValue(key, out var oosForcedClosed);
+                rollingWalkForwardDiagnostics.TryGetValue(key, out var rollingWalkForward);
                 var identity = optimization ?? oosClosed ?? oosOpen ?? oosMarkToMarket ?? oosForcedClosed;
                 var isLiveAllowed = liveAllowedKeys.Contains(key);
                 robustnessPassedWindows.TryGetValue(key, out var passedWindows);
@@ -3037,7 +3302,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                     Symbol = identity?.Symbol ?? string.Empty,
                     Direction = identity?.Direction ?? string.Empty,
                     IsLiveAllowed = isLiveAllowed,
-                    Reason = isLiveAllowed ? "Allowed by closed optimization, closed OOS edge, and robustness windows." : BuildGateRejectReason(optimization, oosClosed, passedWindows),
+                    Reason = isLiveAllowed ? "Allowed by closed optimization, closed OOS edge, robustness windows, and rolling walk-forward." : BuildGateRejectReason(optimization, oosClosed, passedWindows, rollingWalkForward),
                     OptimizationTrades = optimization?.TradesCount ?? 0,
                     OptimizationNetPnl = optimization?.NetPnl ?? 0m,
                     OptimizationProfitFactor = optimization?.ProfitFactor ?? 0m,
@@ -3049,6 +3314,12 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                     OosClosedMaxDrawdownPercent = oosClosed?.MaxDrawdownPercent ?? 0m,
                     OosClosedLargestWinGrossProfitPercent = oosClosed?.LargestWinGrossProfitPercent ?? 0m,
                     OosClosedMedianR = oosClosed?.MedianR ?? 0m,
+                    RollingWalkForwardWindows = rollingWalkForward?.Windows ?? 0,
+                    RollingWalkForwardPassedWindows = rollingWalkForward?.PassedWindows ?? 0,
+                    RollingWalkForwardPassPercent = rollingWalkForward?.PassPercent ?? 0m,
+                    RollingWalkForwardOosNetPnl = rollingWalkForward?.TotalOosNetPnl ?? 0m,
+                    RollingWalkForwardOosPnlWithoutTop1 = rollingWalkForward?.OosPnlWithoutTop1 ?? 0m,
+                    RollingWalkForwardMedianOosAverageR = rollingWalkForward?.MedianOosAverageR ?? 0m,
                     OosOpenTrades = oosOpen?.TradesCount ?? 0,
                     OosOpenNetPnl = oosOpen?.NetPnl ?? 0m,
                     OosMarkToMarketTrades = oosMarkToMarket?.TradesCount ?? 0,
@@ -3112,7 +3383,11 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             .GroupBy(BuildStrategyGateKey, StringComparer.OrdinalIgnoreCase)
             .ToDictionary(group => group.Key, group => group.OrderBy(trade => trade.EntryTime).ToArray(), StringComparer.OrdinalIgnoreCase);
 
-    private string BuildGateRejectReason(StrategyGatePerformance? optimization, StrategyGatePerformance? oosClosed, int robustnessPassedWindows)
+    private string BuildGateRejectReason(
+        StrategyGatePerformance? optimization,
+        StrategyGatePerformance? oosClosed,
+        int robustnessPassedWindows,
+        FuturesBacktestRollingWalkForwardDiagnostic? rollingWalkForward)
     {
         if (optimization is null)
         {
@@ -3196,6 +3471,16 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         if (robustnessPassedWindows < _strategyRoutingOptions.MinRobustnessWindowsToEnable)
         {
             return $"Robustness windows passed {robustnessPassedWindows} < {_strategyRoutingOptions.MinRobustnessWindowsToEnable}.";
+        }
+
+        if (rollingWalkForward is null)
+        {
+            return "No rolling walk-forward windows.";
+        }
+
+        if (!rollingWalkForward.IsLiveAllowed)
+        {
+            return rollingWalkForward.Reason;
         }
 
         return "Rejected by closed-edge gate.";
@@ -3373,6 +3658,40 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         return normalizedSystem == "-"
             ? $"{normalizedStrategy}:{normalizedSymbol}:{normalizedDirection}"
             : $"{normalizedStrategy}:{normalizedSystem}:{normalizedSymbol}:{normalizedDirection}";
+    }
+
+    private static string ResolveStrategyNameFromGateKey(string key)
+    {
+        var parts = key.Split(':', StringSplitOptions.TrimEntries);
+        return parts.Length >= 3 ? parts[0] : string.Empty;
+    }
+
+    private static string ResolveSystemFromGateKey(string key)
+    {
+        var parts = key.Split(':', StringSplitOptions.TrimEntries);
+        return parts.Length == 4 ? parts[1] : string.Empty;
+    }
+
+    private static string ResolveSymbolFromGateKey(string key)
+    {
+        var parts = key.Split(':', StringSplitOptions.TrimEntries);
+        return parts.Length switch
+        {
+            3 => parts[1],
+            4 => parts[2],
+            _ => string.Empty
+        };
+    }
+
+    private static string ResolveDirectionFromGateKey(string key)
+    {
+        var parts = key.Split(':', StringSplitOptions.TrimEntries);
+        return parts.Length switch
+        {
+            3 => parts[2],
+            4 => parts[3],
+            _ => string.Empty
+        };
     }
 
     private static bool IsStrategyGateKeyForSymbol(string key, string symbol)
@@ -3584,6 +3903,20 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         return values.Length % 2 == 1
             ? values[middle]
             : (values[middle - 1] + values[middle]) / 2m;
+    }
+
+    private static decimal CalculateMedian(IEnumerable<decimal> values)
+    {
+        var ordered = values.OrderBy(value => value).ToArray();
+        if (ordered.Length == 0)
+        {
+            return 0m;
+        }
+
+        var middle = ordered.Length / 2;
+        return ordered.Length % 2 == 1
+            ? ordered[middle]
+            : (ordered[middle - 1] + ordered[middle]) / 2m;
     }
 
     private static FuturesBacktestTrade ToPublicTrade(BacktestTradeInternal trade) => new()
@@ -3826,6 +4159,16 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         ParseAllowedTexts(request.TurtleAllowedDirections ?? _backtestOptions.TurtleAllowedDirections),
         ParseAllowedTexts(request.TurtleAllowedSystems ?? _backtestOptions.TurtleAllowedSystems),
         request.TurtleRiskPerUnitPercent ?? _backtestOptions.TurtleRiskPerUnitPercent,
+        request.TurtleBreakoutAtrBufferMultiplier ?? _backtestOptions.TurtleBreakoutAtrBufferMultiplier,
+        request.TurtleMinAdx ?? _backtestOptions.TurtleMinAdx,
+        request.TurtleVolumeMultiplier ?? _backtestOptions.TurtleVolumeMultiplier,
+        request.TurtleUseMarketRegimeFilter ?? _backtestOptions.TurtleUseMarketRegimeFilter,
+        request.EnableRollingWalkForwardGate ?? _backtestOptions.EnableRollingWalkForwardGate,
+        Math.Clamp(request.RollingWalkForwardOptimizationDays ?? _backtestOptions.RollingWalkForwardOptimizationDays, 1, 365),
+        Math.Clamp(request.RollingWalkForwardOutOfSampleDays ?? _backtestOptions.RollingWalkForwardOutOfSampleDays, 1, 365),
+        Math.Clamp(request.RollingWalkForwardStepDays ?? _backtestOptions.RollingWalkForwardStepDays, 1, 365),
+        Math.Clamp(request.RollingWalkForwardMinWindows ?? _backtestOptions.RollingWalkForwardMinWindows, 1, 100),
+        Math.Clamp(request.RollingWalkForwardMinPassPercent ?? _backtestOptions.RollingWalkForwardMinPassPercent, 0m, 100m),
         request.EntryNotionalUsdt ?? _backtestOptions.EntryNotionalUsdt,
         request.TakerFeePercent ?? _backtestOptions.TakerFeePercent,
         request.MakerFeePercent ?? _backtestOptions.MakerFeePercent,
@@ -3898,6 +4241,16 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         TurtleAllowedDirections = FormatAllowedTexts(settings.TurtleAllowedDirections, string.Empty),
         TurtleAllowedSystems = FormatAllowedTexts(settings.TurtleAllowedSystems, string.Empty),
         TurtleRiskPerUnitPercent = settings.TurtleRiskPerUnitPercent,
+        TurtleBreakoutAtrBufferMultiplier = settings.TurtleBreakoutAtrBufferMultiplier,
+        TurtleMinAdx = settings.TurtleMinAdx,
+        TurtleVolumeMultiplier = settings.TurtleVolumeMultiplier,
+        TurtleUseMarketRegimeFilter = settings.TurtleUseMarketRegimeFilter,
+        EnableRollingWalkForwardGate = settings.EnableRollingWalkForwardGate,
+        RollingWalkForwardOptimizationDays = settings.RollingWalkForwardOptimizationDays,
+        RollingWalkForwardOutOfSampleDays = settings.RollingWalkForwardOutOfSampleDays,
+        RollingWalkForwardStepDays = settings.RollingWalkForwardStepDays,
+        RollingWalkForwardMinWindows = settings.RollingWalkForwardMinWindows,
+        RollingWalkForwardMinPassPercent = settings.RollingWalkForwardMinPassPercent,
         EntryNotionalUsdt = settings.EntryNotionalUsdt,
         TakerFeePercent = settings.TakerFeePercent,
         MakerFeePercent = settings.MakerFeePercent,
@@ -4279,6 +4632,16 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         IReadOnlySet<string> TurtleAllowedDirections,
         IReadOnlySet<string> TurtleAllowedSystems,
         decimal TurtleRiskPerUnitPercent,
+        decimal TurtleBreakoutAtrBufferMultiplier,
+        decimal TurtleMinAdx,
+        decimal TurtleVolumeMultiplier,
+        bool TurtleUseMarketRegimeFilter,
+        bool EnableRollingWalkForwardGate,
+        int RollingWalkForwardOptimizationDays,
+        int RollingWalkForwardOutOfSampleDays,
+        int RollingWalkForwardStepDays,
+        int RollingWalkForwardMinWindows,
+        decimal RollingWalkForwardMinPassPercent,
         decimal EntryNotionalUsdt,
         decimal TakerFeePercent,
         decimal MakerFeePercent,
@@ -4393,7 +4756,9 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             decimal[] exitFastLow,
             decimal[] exitSlowHigh,
             decimal[] exitSlowLow,
-            decimal[] turtleN)
+            decimal[] turtleN,
+            decimal[] adx,
+            decimal[] volumeSma)
         {
             EntryFastHigh = entryFastHigh;
             EntryFastLow = entryFastLow;
@@ -4404,6 +4769,8 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             ExitSlowHigh = exitSlowHigh;
             ExitSlowLow = exitSlowLow;
             TurtleN = turtleN;
+            Adx = adx;
+            VolumeSma = volumeSma;
         }
 
         public decimal[] EntryFastHigh { get; }
@@ -4424,6 +4791,10 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
 
         public decimal[] TurtleN { get; }
 
+        public decimal[] Adx { get; }
+
+        public decimal[] VolumeSma { get; }
+
         public static PrecomputedTurtleIndicators Build(
             IReadOnlyList<Candle> candles,
             TurtleTrendOptions options,
@@ -4438,7 +4809,9 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                 ComputeDonchianLow(candles, options.ExitFastPeriod, cancellationToken: cancellationToken),
                 ComputeDonchianHigh(candles, options.ExitSlowPeriod, cancellationToken: cancellationToken),
                 ComputeDonchianLow(candles, options.ExitSlowPeriod, cancellationToken: cancellationToken),
-                ComputeTurtleN(candles, options.AtrPeriod, cancellationToken));
+                ComputeTurtleN(candles, options.AtrPeriod, cancellationToken),
+                ComputeAdx(candles, options.AtrPeriod, cancellationToken),
+                ComputeVolumeSma(candles, 20, cancellationToken));
         }
     }
 
@@ -4592,6 +4965,106 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         return result;
     }
 
+    private static decimal[] ComputeAdx(
+        IReadOnlyList<Candle> candles,
+        int period,
+        CancellationToken cancellationToken)
+    {
+        var result = new decimal[candles.Count];
+        if (period <= 0 || candles.Count < period + 2)
+        {
+            return result;
+        }
+
+        var plusDm = new decimal[candles.Count];
+        var minusDm = new decimal[candles.Count];
+        var trueRanges = new decimal[candles.Count];
+        for (var index = 1; index < candles.Count; index++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var current = candles[index];
+            var previous = candles[index - 1];
+            var upMove = current.High - previous.High;
+            var downMove = previous.Low - current.Low;
+            plusDm[index] = upMove > downMove && upMove > 0m ? upMove : 0m;
+            minusDm[index] = downMove > upMove && downMove > 0m ? downMove : 0m;
+            trueRanges[index] = decimal.Max(
+                current.High - current.Low,
+                decimal.Max(Math.Abs(current.High - previous.Close), Math.Abs(current.Low - previous.Close)));
+        }
+
+        var dxValues = new decimal[candles.Count];
+        for (var end = period; end < candles.Count; end++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var tr = 0m;
+            var plus = 0m;
+            var minus = 0m;
+            for (var index = end - period + 1; index <= end; index++)
+            {
+                tr += trueRanges[index];
+                plus += plusDm[index];
+                minus += minusDm[index];
+            }
+
+            if (tr <= 0m)
+            {
+                continue;
+            }
+
+            var plusDi = plus / tr * 100m;
+            var minusDi = minus / tr * 100m;
+            var denominator = plusDi + minusDi;
+            dxValues[end] = denominator > 0m ? Math.Abs(plusDi - minusDi) / denominator * 100m : 0m;
+        }
+
+        for (var end = period * 2; end < candles.Count; end++)
+        {
+            var sum = 0m;
+            for (var index = end - period + 1; index <= end; index++)
+            {
+                sum += dxValues[index];
+            }
+
+            result[end] = sum / period;
+        }
+
+        return result;
+    }
+
+    private static decimal[] ComputeVolumeSma(
+        IReadOnlyList<Candle> candles,
+        int period,
+        CancellationToken cancellationToken)
+    {
+        var result = new decimal[candles.Count];
+        if (period <= 0)
+        {
+            return result;
+        }
+
+        var rolling = 0m;
+        for (var index = 0; index < candles.Count; index++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (index > 0)
+            {
+                rolling += candles[index - 1].Volume;
+            }
+
+            var removeIndex = index - period - 1;
+            if (removeIndex >= 0)
+            {
+                rolling -= candles[removeIndex].Volume;
+            }
+
+            var count = Math.Min(index, period);
+            result[index] = count > 0 ? rolling / count : 0m;
+        }
+
+        return result;
+    }
+
     private sealed record SymbolBacktestOutput(
         string Symbol,
         IReadOnlyList<BacktestTradeInternal> Trades,
@@ -4718,6 +5191,19 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         decimal MaxDrawdownPercent,
         decimal LargestWinGrossProfitPercent,
         decimal MedianR);
+
+    private sealed class RollingWalkForwardAccumulator(string key)
+    {
+        public string Key { get; } = key;
+
+        public int Windows { get; set; }
+
+        public int PassedWindows { get; set; }
+
+        public List<BacktestTradeInternal> TotalOosTrades { get; } = [];
+
+        public List<decimal> OosAverageRs { get; } = [];
+    }
 
     private sealed record BacktestTradeInternal(
         string Symbol,

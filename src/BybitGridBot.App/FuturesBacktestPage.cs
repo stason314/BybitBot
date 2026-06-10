@@ -138,6 +138,46 @@ public static class FuturesBacktestPage
           <input id="turtleRiskInput" type="number" min="0" max="100" step="0.05" value="0" />
         </div>
         <div class="run-field">
+          <label for="turtleAtrBufferInput">ATR buffer</label>
+          <input id="turtleAtrBufferInput" type="number" min="0" max="10" step="0.05" value="0.2" />
+        </div>
+        <div class="run-field">
+          <label for="turtleAdxInput">Min ADX</label>
+          <input id="turtleAdxInput" type="number" min="0" max="100" step="1" value="0" />
+        </div>
+        <div class="run-field">
+          <label for="turtleVolumeInput">Volume x</label>
+          <input id="turtleVolumeInput" type="number" min="0" max="100" step="0.05" value="0" />
+        </div>
+        <div class="run-field check">
+          <label for="marketRegimeInput">Regime</label>
+          <input id="marketRegimeInput" type="checkbox" checked />
+        </div>
+        <div class="run-field check">
+          <label for="rollingWfInput">Rolling WF</label>
+          <input id="rollingWfInput" type="checkbox" checked />
+        </div>
+        <div class="run-field">
+          <label for="wfOptDaysInput">WF opt d</label>
+          <input id="wfOptDaysInput" type="number" min="1" max="365" step="1" value="120" />
+        </div>
+        <div class="run-field">
+          <label for="wfOosDaysInput">WF OOS d</label>
+          <input id="wfOosDaysInput" type="number" min="1" max="365" step="1" value="30" />
+        </div>
+        <div class="run-field">
+          <label for="wfStepDaysInput">WF step d</label>
+          <input id="wfStepDaysInput" type="number" min="1" max="365" step="1" value="30" />
+        </div>
+        <div class="run-field">
+          <label for="wfMinWindowsInput">WF min</label>
+          <input id="wfMinWindowsInput" type="number" min="1" max="100" step="1" value="3" />
+        </div>
+        <div class="run-field">
+          <label for="wfPassInput">WF pass %</label>
+          <input id="wfPassInput" type="number" min="0" max="100" step="1" value="60" />
+        </div>
+        <div class="run-field">
           <label for="initialEquityInput">Capital</label>
           <input id="initialEquityInput" type="number" min="0.00000001" max="999999999" step="1" value="1000" />
         </div>
@@ -261,6 +301,16 @@ public static class FuturesBacktestPage
       'turtleDirectionsInput',
       'turtleSystemsInput',
       'turtleRiskInput',
+      'turtleAtrBufferInput',
+      'turtleAdxInput',
+      'turtleVolumeInput',
+      'marketRegimeInput',
+      'rollingWfInput',
+      'wfOptDaysInput',
+      'wfOosDaysInput',
+      'wfStepDaysInput',
+      'wfMinWindowsInput',
+      'wfPassInput',
       'initialEquityInput',
       'weekdaysInput',
       'hoursInput',
@@ -296,6 +346,16 @@ public static class FuturesBacktestPage
         turtleAllowedDirections: byId('turtleDirectionsInput').value || '',
         turtleAllowedSystems: byId('turtleSystemsInput').value || '',
         turtleRiskPerUnitPercent: clampDecimal(byId('turtleRiskInput').value, 0, 100, 0),
+        turtleBreakoutAtrBufferMultiplier: clampDecimal(byId('turtleAtrBufferInput').value, 0, 10, 0.2),
+        turtleMinAdx: clampDecimal(byId('turtleAdxInput').value, 0, 100, 0),
+        turtleVolumeMultiplier: clampDecimal(byId('turtleVolumeInput').value, 0, 100, 0),
+        turtleUseMarketRegimeFilter: byId('marketRegimeInput').checked,
+        enableRollingWalkForwardGate: byId('rollingWfInput').checked,
+        rollingWalkForwardOptimizationDays: clampInt(byId('wfOptDaysInput').value, 1, 365, 120),
+        rollingWalkForwardOutOfSampleDays: clampInt(byId('wfOosDaysInput').value, 1, 365, 30),
+        rollingWalkForwardStepDays: clampInt(byId('wfStepDaysInput').value, 1, 365, 30),
+        rollingWalkForwardMinWindows: clampInt(byId('wfMinWindowsInput').value, 1, 100, 3),
+        rollingWalkForwardMinPassPercent: clampDecimal(byId('wfPassInput').value, 0, 100, 60),
         initialEquityUsdt: clampDecimal(byId('initialEquityInput').value, 0.00000001, 999999999, 1000),
         turtleAllowedWeekdays: byId('weekdaysInput').value || '',
         turtleAllowedNyHours: byId('hoursInput').value || '',
@@ -313,6 +373,16 @@ public static class FuturesBacktestPage
       setValue('turtleDirectionsInput', settings.turtleAllowedDirections);
       setValue('turtleSystemsInput', settings.turtleAllowedSystems);
       setValue('turtleRiskInput', settings.turtleRiskPerUnitPercent);
+      setValue('turtleAtrBufferInput', settings.turtleBreakoutAtrBufferMultiplier);
+      setValue('turtleAdxInput', settings.turtleMinAdx);
+      setValue('turtleVolumeInput', settings.turtleVolumeMultiplier);
+      setChecked('marketRegimeInput', settings.turtleUseMarketRegimeFilter);
+      setChecked('rollingWfInput', settings.enableRollingWalkForwardGate);
+      setValue('wfOptDaysInput', settings.rollingWalkForwardOptimizationDays);
+      setValue('wfOosDaysInput', settings.rollingWalkForwardOutOfSampleDays);
+      setValue('wfStepDaysInput', settings.rollingWalkForwardStepDays);
+      setValue('wfMinWindowsInput', settings.rollingWalkForwardMinWindows);
+      setValue('wfPassInput', settings.rollingWalkForwardMinPassPercent);
       setValue('initialEquityInput', settings.initialEquityUsdt);
       setValue('weekdaysInput', settings.turtleAllowedWeekdays);
       setValue('hoursInput', settings.turtleAllowedNyHours);
@@ -373,6 +443,16 @@ public static class FuturesBacktestPage
       byId('turtleDirectionsInput').disabled = Boolean(data.isRunning);
       byId('turtleSystemsInput').disabled = Boolean(data.isRunning);
       byId('turtleRiskInput').disabled = Boolean(data.isRunning);
+      byId('turtleAtrBufferInput').disabled = Boolean(data.isRunning);
+      byId('turtleAdxInput').disabled = Boolean(data.isRunning);
+      byId('turtleVolumeInput').disabled = Boolean(data.isRunning);
+      byId('marketRegimeInput').disabled = Boolean(data.isRunning);
+      byId('rollingWfInput').disabled = Boolean(data.isRunning);
+      byId('wfOptDaysInput').disabled = Boolean(data.isRunning);
+      byId('wfOosDaysInput').disabled = Boolean(data.isRunning);
+      byId('wfStepDaysInput').disabled = Boolean(data.isRunning);
+      byId('wfMinWindowsInput').disabled = Boolean(data.isRunning);
+      byId('wfPassInput').disabled = Boolean(data.isRunning);
       byId('initialEquityInput').disabled = Boolean(data.isRunning);
       byId('weekdaysInput').disabled = Boolean(data.isRunning);
       byId('hoursInput').disabled = Boolean(data.isRunning);
@@ -473,7 +553,7 @@ public static class FuturesBacktestPage
           <td>${item.reason || '-'}</td>
           <td>${item.optimizationTrades || 0} / ${pnl(item.optimizationNetPnl)} / PF ${fmt.format(item.optimizationProfitFactor || 0)}</td>
           <td>${item.oosClosedTrades || 0} / ${pnl(item.oosClosedNetPnl)} / PF ${fmt.format(item.oosClosedProfitFactor || 0)} / DD ${pct(item.oosClosedMaxDrawdownPercent)} / medR ${fmt.format(item.oosClosedMedianR || 0)}</td>
-          <td>${item.oosOpenTrades || 0} / ${pnl(item.oosOpenNetPnl)} / MTM ${pnl(item.oosMarkToMarketNetPnl)}</td>
+          <td>${item.oosOpenTrades || 0} / ${pnl(item.oosOpenNetPnl)} / MTM ${pnl(item.oosMarkToMarketNetPnl)} / RWF ${item.rollingWalkForwardPassedWindows || 0}/${item.rollingWalkForwardWindows || 0} ${pct(item.rollingWalkForwardPassPercent)}</td>
           <td>${item.oosForcedClosedTrades || 0} / ${pnl(item.oosForcedClosedNetPnl)} / DD ${pct(item.oosForcedClosedMaxDrawdownPercent)}</td>
         </tr>`).join('') : '<tr><td colspan="7" class="empty">Нет данных</td></tr>';
     }
@@ -546,6 +626,16 @@ public static class FuturesBacktestPage
         `turtleAllowedDirections=${result.turtleAllowedDirections || '-'}`,
         `turtleAllowedSystems=${result.turtleAllowedSystems || '-'}`,
         `turtleRiskPerUnitPercent=${Number(result.turtleRiskPerUnitPercent || 0)}`,
+        `turtleBreakoutAtrBufferMultiplier=${Number(result.turtleBreakoutAtrBufferMultiplier || 0)}`,
+        `turtleMinAdx=${Number(result.turtleMinAdx || 0)}`,
+        `turtleVolumeMultiplier=${Number(result.turtleVolumeMultiplier || 0)}`,
+        `turtleUseMarketRegimeFilter=${Boolean(result.turtleUseMarketRegimeFilter)}`,
+        `enableRollingWalkForwardGate=${Boolean(result.enableRollingWalkForwardGate)}`,
+        `rollingWalkForwardOptimizationDays=${Number(result.rollingWalkForwardOptimizationDays || 0)}`,
+        `rollingWalkForwardOutOfSampleDays=${Number(result.rollingWalkForwardOutOfSampleDays || 0)}`,
+        `rollingWalkForwardStepDays=${Number(result.rollingWalkForwardStepDays || 0)}`,
+        `rollingWalkForwardMinWindows=${Number(result.rollingWalkForwardMinWindows || 0)}`,
+        `rollingWalkForwardMinPassPercent=${Number(result.rollingWalkForwardMinPassPercent || 0)}`,
         `optimizationWindow=${result.optimizationWindowLabel || '-'}`,
         `outOfSampleWindow=${result.outOfSampleWindowLabel || '-'}`,
         `liveUseEligibleStrategyGatesOnly=${Boolean(result.liveUseEligibleStrategyGatesOnly)}`,
@@ -570,6 +660,8 @@ public static class FuturesBacktestPage
         `legacyExcludedSymbols_symbolOnly_notLiveGate(${(result.excludedSymbols || []).length})=${(result.excludedSymbols || []).join(', ') || '-'}`,
         '',
         walkForwardGateBlock(result.walkForwardStrategyGates || []),
+        '',
+        tableBlock('ROLLING_WALK_FORWARD', result.rollingWalkForwardDiagnostics || []),
         '',
         tableBlock('BEST_SYMBOLS', result.bestSymbols || []),
         tableBlock('WORST_SYMBOLS', result.worstSymbols || []),

@@ -26,6 +26,26 @@ public sealed class FuturesBacktestRequest
 
     public decimal? TurtleRiskPerUnitPercent { get; init; }
 
+    public decimal? TurtleBreakoutAtrBufferMultiplier { get; init; }
+
+    public decimal? TurtleMinAdx { get; init; }
+
+    public decimal? TurtleVolumeMultiplier { get; init; }
+
+    public bool? TurtleUseMarketRegimeFilter { get; init; }
+
+    public bool? EnableRollingWalkForwardGate { get; init; }
+
+    public int? RollingWalkForwardOptimizationDays { get; init; }
+
+    public int? RollingWalkForwardOutOfSampleDays { get; init; }
+
+    public int? RollingWalkForwardStepDays { get; init; }
+
+    public int? RollingWalkForwardMinWindows { get; init; }
+
+    public decimal? RollingWalkForwardMinPassPercent { get; init; }
+
     public decimal? EntryNotionalUsdt { get; init; }
 
     public decimal? TakerFeePercent { get; init; }
@@ -104,6 +124,26 @@ public sealed class FuturesBacktestResult
 
     public decimal TurtleRiskPerUnitPercent { get; init; }
 
+    public decimal TurtleBreakoutAtrBufferMultiplier { get; init; }
+
+    public decimal TurtleMinAdx { get; init; }
+
+    public decimal TurtleVolumeMultiplier { get; init; }
+
+    public bool TurtleUseMarketRegimeFilter { get; init; }
+
+    public bool EnableRollingWalkForwardGate { get; init; }
+
+    public int RollingWalkForwardOptimizationDays { get; init; }
+
+    public int RollingWalkForwardOutOfSampleDays { get; init; }
+
+    public int RollingWalkForwardStepDays { get; init; }
+
+    public int RollingWalkForwardMinWindows { get; init; }
+
+    public decimal RollingWalkForwardMinPassPercent { get; init; }
+
     public int OpenAtBacktestEndCount { get; init; }
 
     public decimal OpenAtBacktestEndUnrealizedPnl { get; init; }
@@ -149,6 +189,8 @@ public sealed class FuturesBacktestResult
     public IReadOnlyList<FuturesBacktestGateDiagnostic> GateDiagnostics { get; init; } = [];
 
     public IReadOnlyList<FuturesBacktestGateWalkForwardPerformance> WalkForwardStrategyGates { get; init; } = [];
+
+    public IReadOnlyList<FuturesBacktestRollingWalkForwardDiagnostic> RollingWalkForwardDiagnostics { get; init; } = [];
 
     public IReadOnlyList<FuturesBacktestSymbolPerformance> BestSymbols { get; init; } = [];
 
@@ -263,6 +305,18 @@ public sealed class FuturesBacktestGateDiagnostic
 
     public decimal OosClosedMedianR { get; init; }
 
+    public int RollingWalkForwardWindows { get; init; }
+
+    public int RollingWalkForwardPassedWindows { get; init; }
+
+    public decimal RollingWalkForwardPassPercent { get; init; }
+
+    public decimal RollingWalkForwardOosNetPnl { get; init; }
+
+    public decimal RollingWalkForwardOosPnlWithoutTop1 { get; init; }
+
+    public decimal RollingWalkForwardMedianOosAverageR { get; init; }
+
     public int OosOpenTrades { get; init; }
 
     public decimal OosOpenNetPnl { get; init; }
@@ -299,6 +353,37 @@ public sealed class FuturesBacktestGateWalkForwardPerformance
     public FuturesBacktestMetrics OptimizationMetrics { get; init; } = new();
 
     public FuturesBacktestMetrics OutOfSampleMetrics { get; init; } = new();
+}
+
+public sealed class FuturesBacktestRollingWalkForwardDiagnostic
+{
+    public string Key { get; init; } = string.Empty;
+
+    public string StrategyName { get; init; } = string.Empty;
+
+    public string System { get; init; } = string.Empty;
+
+    public string Symbol { get; init; } = string.Empty;
+
+    public string Direction { get; init; } = string.Empty;
+
+    public bool IsLiveAllowed { get; init; }
+
+    public int Windows { get; init; }
+
+    public int PassedWindows { get; init; }
+
+    public decimal PassPercent { get; init; }
+
+    public int TotalOosTrades { get; init; }
+
+    public decimal TotalOosNetPnl { get; init; }
+
+    public decimal OosPnlWithoutTop1 { get; init; }
+
+    public decimal MedianOosAverageR { get; init; }
+
+    public string Reason { get; init; } = string.Empty;
 }
 
 public sealed class FuturesBacktestSymbolPerformance
