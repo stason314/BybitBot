@@ -264,12 +264,20 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                 .Select(ticker => ticker.Symbol)
                 .ToArray();
 
-            var btc15m = ShouldRunNyBounceRouter(settings) || settings.TurtleUseMarketRegimeFilter
+            var btc15m = ShouldRunNyBounceRouter(settings)
                 ? await timings.MeasureAsync(
                     "load.btc_15m",
                     () => FetchHistoricalCandlesAsync("BTCUSDT", FifteenMinuteInterval, periodStart.AddDays(-10), periodEnd, cancellationToken))
                 : Array.Empty<Candle>();
             var btc15mSeries = BacktestCandleSeries.Create(btc15m, 15);
+            var btcMarketRegimeIntervalMinutes = ResolveIntervalMinutes(settings.TurtleMarketRegimeTimeframe);
+            var btcMarketRegimeWarmupStart = periodStart.AddMinutes(-btcMarketRegimeIntervalMinutes * 220d);
+            var btcMarketRegime = settings.TurtleUseMarketRegimeFilter
+                ? await timings.MeasureAsync(
+                    $"load.btc_regime_{settings.TurtleMarketRegimeTimeframe}",
+                    () => FetchHistoricalCandlesAsync("BTCUSDT", settings.TurtleMarketRegimeTimeframe, btcMarketRegimeWarmupStart, periodEnd, cancellationToken))
+                : Array.Empty<Candle>();
+            var btcMarketRegimeSeries = BacktestCandleSeries.Create(btcMarketRegime, btcMarketRegimeIntervalMinutes);
             var outputs = new ConcurrentBag<SymbolBacktestOutput>();
             var processed = 0;
             await Parallel.ForEachAsync(
@@ -283,7 +291,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             {
                 try
                 {
-                    outputs.Add(await BacktestSymbolAsync(symbol, periodStart, periodEnd, btc15mSeries, settings, timings, token));
+                    outputs.Add(await BacktestSymbolAsync(symbol, periodStart, periodEnd, btc15mSeries, btcMarketRegimeSeries, settings, timings, token));
                 }
                 catch (Exception exception) when (exception is not OperationCanceledException)
                 {
@@ -388,6 +396,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         DateTimeOffset periodStart,
         DateTimeOffset periodEnd,
         BacktestCandleSeries btc15m,
+        BacktestCandleSeries btcMarketRegime,
         BacktestRunSettings settings,
         BacktestTimingCollector timings,
         CancellationToken cancellationToken)
@@ -420,7 +429,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         {
             return timings.Measure(
                 "symbol.backtest_turtle_only",
-                () => BacktestTurtleOnlySymbol(symbol, periodStart, fiveMinuteSeries, turtleSeries, turtleIndicators, btc15m, fiveMinuteTurtleExits, settings, cancellationToken));
+                () => BacktestTurtleOnlySymbol(symbol, periodStart, fiveMinuteSeries, turtleSeries, turtleIndicators, btcMarketRegime, fiveMinuteTurtleExits, settings, cancellationToken));
         }
 
         var trades = new List<BacktestTradeInternal>();
@@ -436,7 +445,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                     fiveMinuteSeries,
                     turtleSeries,
                     turtleIndicators,
-                    btc15m,
+                    btcMarketRegime,
                     fiveMinuteTurtleExits,
                     settings,
                     trades,
@@ -526,7 +535,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         BacktestCandleSeries fiveMinuteCandles,
         BacktestCandleSeries turtleCandles,
         PrecomputedTurtleIndicators indicators,
-        BacktestCandleSeries btc15m,
+        BacktestCandleSeries btcMarketRegime,
         PrecomputedTurtleChannelExits turtleExits,
         BacktestRunSettings settings,
         CancellationToken cancellationToken)
@@ -545,7 +554,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             fiveMinuteCandles,
             turtleCandles,
             indicators,
-            btc15m,
+            btcMarketRegime,
             turtleExits,
             settings,
             trades,
@@ -561,7 +570,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         BacktestCandleSeries fiveMinuteCandles,
         BacktestCandleSeries turtleCandles,
         PrecomputedTurtleIndicators indicators,
-        BacktestCandleSeries btc15m,
+        BacktestCandleSeries btcMarketRegime,
         PrecomputedTurtleChannelExits turtleExits,
         BacktestRunSettings settings,
         List<BacktestTradeInternal> trades,
@@ -594,7 +603,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                 continue;
             }
 
-            var signal = TryBuildTurtleOnlySignal(symbol, current, indicators, index, btc15m, settings);
+            var signal = TryBuildTurtleOnlySignal(symbol, current, indicators, index, btcMarketRegime, settings);
             if (signal is null)
             {
                 continue;
@@ -635,7 +644,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         Candle current,
         PrecomputedTurtleIndicators indicators,
         int index,
-        BacktestCandleSeries btc15m,
+        BacktestCandleSeries btcMarketRegime,
         BacktestRunSettings settings)
     {
         var nValue = indicators.TurtleN[index];
@@ -650,7 +659,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             return null;
         }
 
-        if (!IsTurtleSignalQualityAllowed(current, indicators, index, candidate.Side, btc15m, settings))
+        if (!IsTurtleSignalQualityAllowed(current, indicators, index, candidate.Side, btcMarketRegime, settings))
         {
             return null;
         }
@@ -736,7 +745,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         PrecomputedTurtleIndicators indicators,
         int index,
         StrategySide side,
-        BacktestCandleSeries btc15m,
+        BacktestCandleSeries btcMarketRegime,
         BacktestRunSettings settings)
     {
         if (settings.TurtleMinAdx > 0m && indicators.Adx[index] < settings.TurtleMinAdx)
@@ -752,21 +761,21 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         }
 
         return !settings.TurtleUseMarketRegimeFilter ||
-            IsTurtleMarketRegimeAllowed(side, current.OpenTime, btc15m);
+            IsTurtleMarketRegimeAllowed(side, current.OpenTime, btcMarketRegime);
     }
 
     private bool IsTurtleMarketRegimeAllowed(
         StrategySide side,
         DateTimeOffset signalOpenTime,
-        BacktestCandleSeries btc15m)
+        BacktestCandleSeries btcMarketRegime)
     {
-        if (btc15m.Count < 220)
+        if (btcMarketRegime.Count < 220)
         {
             return false;
         }
 
         var signalCloseTime = signalOpenTime.AddMinutes(ResolveIntervalMinutes(_turtleOptions.Timeframe));
-        var closed = btc15m.CopyClosedUntil(signalCloseTime)
+        var closed = btcMarketRegime.CopyClosedUntil(signalCloseTime)
             .Select(candle => candle.Close)
             .ToArray();
         if (closed.Length < 200)
@@ -2943,6 +2952,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             TurtleMinAdx = settings.TurtleMinAdx,
             TurtleVolumeMultiplier = settings.TurtleVolumeMultiplier,
             TurtleUseMarketRegimeFilter = settings.TurtleUseMarketRegimeFilter,
+            TurtleMarketRegimeTimeframe = settings.TurtleMarketRegimeTimeframe,
             EnableRollingWalkForwardGate = settings.EnableRollingWalkForwardGate,
             RollingWalkForwardOptimizationDays = settings.RollingWalkForwardOptimizationDays,
             RollingWalkForwardOutOfSampleDays = settings.RollingWalkForwardOutOfSampleDays,
@@ -4148,6 +4158,29 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             _ => 60
         };
 
+    private static string NormalizeInterval(string? interval)
+    {
+        var value = interval?.Trim();
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return "240";
+        }
+
+        value = value.ToUpperInvariant();
+        return value switch
+        {
+            "1H" => "60",
+            "2H" => "120",
+            "4H" => "240",
+            "6H" => "360",
+            "12H" => "720",
+            "1D" => "D",
+            "1W" => "W",
+            "1M" => "M",
+            _ => value
+        };
+    }
+
     private BacktestRunSettings ResolveSettings(FuturesBacktestRequest request) => new(
         Math.Clamp(request.Days ?? _backtestOptions.Days, 1, 365),
         Math.Clamp(request.Symbols ?? _backtestOptions.Symbols, 1, 200),
@@ -4163,6 +4196,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         request.TurtleMinAdx ?? _backtestOptions.TurtleMinAdx,
         request.TurtleVolumeMultiplier ?? _backtestOptions.TurtleVolumeMultiplier,
         request.TurtleUseMarketRegimeFilter ?? _backtestOptions.TurtleUseMarketRegimeFilter,
+        NormalizeInterval(request.TurtleMarketRegimeTimeframe ?? _backtestOptions.TurtleMarketRegimeTimeframe),
         request.EnableRollingWalkForwardGate ?? _backtestOptions.EnableRollingWalkForwardGate,
         Math.Clamp(request.RollingWalkForwardOptimizationDays ?? _backtestOptions.RollingWalkForwardOptimizationDays, 1, 365),
         Math.Clamp(request.RollingWalkForwardOutOfSampleDays ?? _backtestOptions.RollingWalkForwardOutOfSampleDays, 1, 365),
@@ -4245,6 +4279,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         TurtleMinAdx = settings.TurtleMinAdx,
         TurtleVolumeMultiplier = settings.TurtleVolumeMultiplier,
         TurtleUseMarketRegimeFilter = settings.TurtleUseMarketRegimeFilter,
+        TurtleMarketRegimeTimeframe = settings.TurtleMarketRegimeTimeframe,
         EnableRollingWalkForwardGate = settings.EnableRollingWalkForwardGate,
         RollingWalkForwardOptimizationDays = settings.RollingWalkForwardOptimizationDays,
         RollingWalkForwardOutOfSampleDays = settings.RollingWalkForwardOutOfSampleDays,
@@ -4636,6 +4671,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         decimal TurtleMinAdx,
         decimal TurtleVolumeMultiplier,
         bool TurtleUseMarketRegimeFilter,
+        string TurtleMarketRegimeTimeframe,
         bool EnableRollingWalkForwardGate,
         int RollingWalkForwardOptimizationDays,
         int RollingWalkForwardOutOfSampleDays,

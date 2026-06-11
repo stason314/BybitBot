@@ -54,6 +54,9 @@ public sealed class FuturesBacktestOptions
     [ConfigurationKeyName("FUTURES_BACKTEST_TURTLE_USE_MARKET_REGIME_FILTER")]
     public bool TurtleUseMarketRegimeFilter { get; init; } = true;
 
+    [ConfigurationKeyName("FUTURES_BACKTEST_TURTLE_MARKET_REGIME_TIMEFRAME")]
+    public string TurtleMarketRegimeTimeframe { get; init; } = "240";
+
     [ConfigurationKeyName("FUTURES_BACKTEST_ENABLE_ROLLING_WALK_FORWARD_GATE")]
     public bool EnableRollingWalkForwardGate { get; init; } = true;
 

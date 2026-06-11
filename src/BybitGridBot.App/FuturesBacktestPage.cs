@@ -153,6 +153,10 @@ public static class FuturesBacktestPage
           <label for="marketRegimeInput">Regime</label>
           <input id="marketRegimeInput" type="checkbox" checked />
         </div>
+        <div class="run-field">
+          <label for="marketRegimeTfInput">Regime TF</label>
+          <input id="marketRegimeTfInput" type="text" value="240" placeholder="240" />
+        </div>
         <div class="run-field check">
           <label for="rollingWfInput">Rolling WF</label>
           <input id="rollingWfInput" type="checkbox" checked />
@@ -350,6 +354,7 @@ public static class FuturesBacktestPage
         turtleMinAdx: clampDecimal(byId('turtleAdxInput').value, 0, 100, 0),
         turtleVolumeMultiplier: clampDecimal(byId('turtleVolumeInput').value, 0, 100, 0),
         turtleUseMarketRegimeFilter: byId('marketRegimeInput').checked,
+        turtleMarketRegimeTimeframe: byId('marketRegimeTfInput').value || '240',
         enableRollingWalkForwardGate: byId('rollingWfInput').checked,
         rollingWalkForwardOptimizationDays: clampInt(byId('wfOptDaysInput').value, 1, 365, 120),
         rollingWalkForwardOutOfSampleDays: clampInt(byId('wfOosDaysInput').value, 1, 365, 30),
@@ -377,6 +382,7 @@ public static class FuturesBacktestPage
       setValue('turtleAdxInput', settings.turtleMinAdx);
       setValue('turtleVolumeInput', settings.turtleVolumeMultiplier);
       setChecked('marketRegimeInput', settings.turtleUseMarketRegimeFilter);
+      setValue('marketRegimeTfInput', settings.turtleMarketRegimeTimeframe);
       setChecked('rollingWfInput', settings.enableRollingWalkForwardGate);
       setValue('wfOptDaysInput', settings.rollingWalkForwardOptimizationDays);
       setValue('wfOosDaysInput', settings.rollingWalkForwardOutOfSampleDays);
@@ -630,6 +636,7 @@ public static class FuturesBacktestPage
         `turtleMinAdx=${Number(result.turtleMinAdx || 0)}`,
         `turtleVolumeMultiplier=${Number(result.turtleVolumeMultiplier || 0)}`,
         `turtleUseMarketRegimeFilter=${Boolean(result.turtleUseMarketRegimeFilter)}`,
+        `turtleMarketRegimeTimeframe=${result.turtleMarketRegimeTimeframe || '-'}`,
         `enableRollingWalkForwardGate=${Boolean(result.enableRollingWalkForwardGate)}`,
         `rollingWalkForwardOptimizationDays=${Number(result.rollingWalkForwardOptimizationDays || 0)}`,
         `rollingWalkForwardOutOfSampleDays=${Number(result.rollingWalkForwardOutOfSampleDays || 0)}`,

@@ -34,6 +34,8 @@ public sealed class FuturesBacktestRequest
 
     public bool? TurtleUseMarketRegimeFilter { get; init; }
 
+    public string? TurtleMarketRegimeTimeframe { get; init; }
+
     public bool? EnableRollingWalkForwardGate { get; init; }
 
     public int? RollingWalkForwardOptimizationDays { get; init; }
@@ -131,6 +133,8 @@ public sealed class FuturesBacktestResult
     public decimal TurtleVolumeMultiplier { get; init; }
 
     public bool TurtleUseMarketRegimeFilter { get; init; }
+
+    public string TurtleMarketRegimeTimeframe { get; init; } = "240";
 
     public bool EnableRollingWalkForwardGate { get; init; }
 
