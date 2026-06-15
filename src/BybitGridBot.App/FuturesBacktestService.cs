@@ -37,6 +37,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
     private const int KlinePageLimit = 1000;
 
     private readonly IBybitRestClient _bybitRestClient;
+    private readonly AppOptions _appOptions;
     private readonly FuturesBacktestOptions _backtestOptions;
     private readonly ILogger<FuturesBacktestService> _logger;
     private readonly ScoreBasedSignalEngine _scoreBasedSignalEngine;
@@ -53,6 +54,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
 
     public FuturesBacktestService(
         IBybitRestClient bybitRestClient,
+        IOptions<AppOptions> appOptions,
         IOptions<FuturesBacktestOptions> backtestOptions,
         IOptions<NySessionBreakoutOptions> strategyOptions,
         IOptions<StrategyRoutingOptions> strategyRoutingOptions,
@@ -62,6 +64,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         ILogger<FuturesBacktestService> logger)
     {
         _bybitRestClient = bybitRestClient;
+        _appOptions = appOptions.Value;
         _backtestOptions = backtestOptions.Value;
         _strategyOptions = strategyOptions.Value;
         _strategyRoutingOptions = strategyRoutingOptions.Value;
@@ -138,6 +141,11 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
 
     public bool IsSymbolAllowedForTrading(string symbol, bool requireCompletedBacktest)
     {
+        if (CanBypassStrategyGatesForPaper())
+        {
+            return true;
+        }
+
         lock (_sync)
         {
             var result = _status.Result;
@@ -186,6 +194,11 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             return true;
         }
 
+        if (CanBypassStrategyGatesForPaper())
+        {
+            return true;
+        }
+
         lock (_sync)
         {
             var result = _status.Result;
@@ -229,11 +242,20 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         string direction,
         bool requireCompletedBacktest)
     {
+        if (CanBypassStrategyGatesForPaper())
+        {
+            return decimal.Max(0m, _strategyRoutingOptions.PaperBypassStrategyGateSizeMultiplier);
+        }
+
         var isAllowed = IsStrategySymbolDirectionAllowedForTrading(strategyName, system, symbol, direction, requireCompletedBacktest);
         return isAllowed
             ? decimal.Max(0m, _strategyRoutingOptions.LiveEligibleGateSizeMultiplier)
             : decimal.Max(0m, _strategyRoutingOptions.LiveIneligibleGateSizeMultiplier);
     }
+
+    private bool CanBypassStrategyGatesForPaper() =>
+        _appOptions.TradingMode == TradingMode.Paper &&
+        _strategyRoutingOptions.PaperBypassStrategyGates;
 
     private bool RequiresEligibleStrategyGates(bool requireCompletedBacktest) =>
         requireCompletedBacktest || _strategyRoutingOptions.LiveUseEligibleStrategyGatesOnly;

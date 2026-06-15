@@ -32,6 +32,13 @@ public sealed class StrategyRoutingOptions
     [ConfigurationKeyName("LIVE_USE_ELIGIBLE_STRATEGY_GATES_ONLY")]
     public bool LiveUseEligibleStrategyGatesOnly { get; init; } = true;
 
+    [ConfigurationKeyName("PAPER_BYPASS_STRATEGY_GATES")]
+    public bool PaperBypassStrategyGates { get; init; } = false;
+
+    [ConfigurationKeyName("PAPER_BYPASS_STRATEGY_GATE_SIZE_MULTIPLIER")]
+    [Range(typeof(decimal), "0", "100")]
+    public decimal PaperBypassStrategyGateSizeMultiplier { get; init; } = 1m;
+
     [ConfigurationKeyName("LIVE_ELIGIBLE_GATE_SIZE_MULTIPLIER")]
     [Range(typeof(decimal), "0", "100")]
     public decimal LiveEligibleGateSizeMultiplier { get; init; } = 0.5m;

@@ -70,6 +70,56 @@ public sealed class FuturesIntegrationSafetyTests
     }
 
     [Fact]
+    public void PaperBypassStrategyGates_AllowsPaperSignalsAndUsesPaperMultiplier()
+    {
+        var service = CreateBacktestService(
+            TradingMode.Paper,
+            new StrategyRoutingOptions
+            {
+                PaperBypassStrategyGates = true,
+                PaperBypassStrategyGateSizeMultiplier = 0.75m
+            });
+
+        Assert.True(service.IsStrategySymbolDirectionAllowedForTrading(
+            TurtleTrendStrategy.Name,
+            "S2",
+            "BCHUSDT",
+            "Short",
+            requireCompletedBacktest: true));
+        Assert.Equal(0.75m, service.ResolveStrategySymbolDirectionSizeMultiplier(
+            TurtleTrendStrategy.Name,
+            "S2",
+            "BCHUSDT",
+            "Short",
+            requireCompletedBacktest: true));
+    }
+
+    [Fact]
+    public void PaperBypassStrategyGates_DoesNotBypassOutsidePaper()
+    {
+        var service = CreateBacktestService(
+            TradingMode.Testnet,
+            new StrategyRoutingOptions
+            {
+                PaperBypassStrategyGates = true,
+                PaperBypassStrategyGateSizeMultiplier = 1m
+            });
+
+        Assert.False(service.IsStrategySymbolDirectionAllowedForTrading(
+            TurtleTrendStrategy.Name,
+            "S2",
+            "BCHUSDT",
+            "Short",
+            requireCompletedBacktest: true));
+        Assert.Equal(0m, service.ResolveStrategySymbolDirectionSizeMultiplier(
+            TurtleTrendStrategy.Name,
+            "S2",
+            "BCHUSDT",
+            "Short",
+            requireCompletedBacktest: true));
+    }
+
+    [Fact]
     public void DailyLossBlocksOpenLong_ButAllowsCloseLong()
     {
         var manager = new FuturesRiskManager();
@@ -382,6 +432,32 @@ public sealed class FuturesIntegrationSafetyTests
             repository);
     }
 
+    private static FuturesBacktestService CreateBacktestService(
+        TradingMode tradingMode,
+        StrategyRoutingOptions strategyRoutingOptions)
+    {
+        var nyOptions = new NySessionBreakoutOptions();
+        var turtleOptions = new TurtleTrendOptions();
+        var patterns = new PatternConfirmationEngine(nyOptions);
+        var signalEngine = new ScoreBasedSignalEngine(
+            new BreakoutClassifier(nyOptions, turtleOptions),
+            new NYSweepReversalStrategy(nyOptions, patterns),
+            new TurtleTrendStrategy(turtleOptions, patterns),
+            new BreakoutRetestStrategy(),
+            new NyStrategyRouter(strategyRoutingOptions));
+
+        return new FuturesBacktestService(
+            new FakeBybitRestClient(),
+            Options.Create(new AppOptions { TradingMode = tradingMode }),
+            Options.Create(new FuturesBacktestOptions()),
+            Options.Create(nyOptions),
+            Options.Create(strategyRoutingOptions),
+            Options.Create(turtleOptions),
+            signalEngine,
+            new StrategyPerformanceTracker(),
+            NullLogger<FuturesBacktestService>.Instance);
+    }
+
     private static async Task<FuturesPreflightService> CreatePreflightServiceAsync(FuturesOptions futuresOptions)
     {
         var repository = await CreateRepositoryAsync();
@@ -478,6 +554,9 @@ public sealed class FuturesIntegrationSafetyTests
         public Task<BybitTicker> GetTickerAsync(string category, string symbol, CancellationToken cancellationToken) =>
             Task.FromResult(new BybitTicker(symbol, 100m, 99m, 101m));
 
+        public Task<IReadOnlyList<BybitTicker>> GetTickersAsync(string category, CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<BybitTicker>>([]);
+
         public Task<BybitWalletBalance> GetWalletBalanceAsync(CancellationToken cancellationToken, params string[] coins) =>
             Task.FromResult(new BybitWalletBalance());
 
@@ -522,6 +601,9 @@ public sealed class FuturesIntegrationSafetyTests
                 MinOrderQty = 0.001m,
                 MinOrderAmount = 0.1m
             });
+
+        public Task<IReadOnlyList<BybitInstrumentInfo>> GetInstrumentsAsync(string category, CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<BybitInstrumentInfo>>([]);
 
         public Task<BybitPositionSnapshot?> GetPositionAsync(string category, string symbol, CancellationToken cancellationToken) =>
             Task.FromResult<BybitPositionSnapshot?>(Position ?? new BybitPositionSnapshot
