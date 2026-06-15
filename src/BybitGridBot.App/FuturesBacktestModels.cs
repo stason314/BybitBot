@@ -12,6 +12,10 @@ public sealed class FuturesBacktestRequest
 
     public int? Symbols { get; init; }
 
+    public string? RequiredSymbols { get; init; }
+
+    public string? ExcludedSymbols { get; init; }
+
     public string? Mode { get; init; }
 
     public string? TurtleAllowedWeekdays { get; init; }
@@ -99,6 +103,10 @@ public sealed class FuturesBacktestResult
     public int SymbolsRequested { get; init; }
 
     public int SymbolsProcessed { get; init; }
+
+    public string RequiredSymbols { get; init; } = string.Empty;
+
+    public string ExcludedUniverseSymbols { get; init; } = string.Empty;
 
     public int TradesCount { get; init; }
 

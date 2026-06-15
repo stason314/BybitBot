@@ -279,11 +279,29 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             var tickers = await timings.MeasureAsync(
                 "load.tickers",
                 () => _bybitRestClient.GetTickersAsync(Category, cancellationToken));
+            var excludedUniverseSymbols = settings.ExcludedUniverseSymbols.ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var requiredTradableSymbols = settings.RequiredSymbols
+                .Where(symbol => tradable.ContainsKey(symbol))
+                .ToArray();
+            var missingRequiredSymbols = settings.RequiredSymbols
+                .Where(symbol => !tradable.ContainsKey(symbol))
+                .ToArray();
+            if (missingRequiredSymbols.Length > 0)
+            {
+                _logger.LogWarning(
+                    "Backtest required symbols are not tradable and will be skipped: {Symbols}",
+                    string.Join(",", missingRequiredSymbols));
+            }
+
             var symbols = tickers
                 .Where(ticker => tradable.ContainsKey(ticker.Symbol))
+                .Where(ticker => !excludedUniverseSymbols.Contains(ticker.Symbol))
                 .OrderByDescending(ticker => ticker.Turnover24h)
                 .Take(settings.Symbols)
                 .Select(ticker => ticker.Symbol)
+                .Concat(requiredTradableSymbols)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Where(symbol => !excludedUniverseSymbols.Contains(symbol))
                 .ToArray();
 
             var btc15m = ShouldRunNyBounceRouter(settings)
@@ -2969,6 +2987,8 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             PeriodEnd = periodEnd,
             SymbolsRequested = symbolsRequested,
             SymbolsProcessed = symbolsProcessed,
+            RequiredSymbols = FormatAllowedTexts(settings.RequiredSymbols, string.Empty),
+            ExcludedUniverseSymbols = FormatAllowedTexts(settings.ExcludedUniverseSymbols, string.Empty),
             TradesCount = outOfSampleTrades.Length,
             FalseBreakoutCount = falseBreakoutCount,
             TrueBreakoutBlockedCount = trueBreakoutBlockedCount,
@@ -3356,18 +3376,23 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                 metrics);
         }
 
+        var allOosGateMap = BuildStrategyGatePerformance(candidateTrades, initialEquity)
+            .ToDictionary(BuildStrategyGateKey, StringComparer.OrdinalIgnoreCase);
         var keys = BuildStrategyGatePerformance(crashTrades, initialEquity)
             .Where(gate => IsLiveGateStrategyEnabled(gate.StrategyName))
             .Where(gate => IsLiveDirectionAllowed(gate.Direction))
             .Where(gate => allowedSystems.Count == 0 || allowedSystems.Contains(gate.System))
             .Where(gate => gate.NetPnl > 0m && gate.AverageR > 0m)
+            .Where(gate =>
+                allOosGateMap.TryGetValue(BuildStrategyGateKey(gate), out var allOosGate) &&
+                (allOosGate.NetPnl >= 0m || allOosGate.MaxDrawdownPercent < 1.5m))
             .Select(BuildStrategyGateKey)
             .OrderBy(key => key)
             .ToArray();
         if (keys.Length == 0)
         {
             return TurtleCrashShortPortfolioGateResult.Rejected(
-                "Crash OOS profile passed, but no positive per-symbol Turtle Short gate remained.",
+                "Crash OOS profile passed, but no per-symbol Turtle Short gate passed crash-regime and all-OOS filters.",
                 candidateTrades.Length,
                 crashTrades.Length,
                 metrics);
@@ -3554,6 +3579,9 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                     (turtleCrashShortAllowedSystems.Count == 0 || turtleCrashShortAllowedSystems.Contains(identity.System));
                 robustnessPassedWindows.TryGetValue(key, out var passedWindows);
                 var standardGateReason = BuildGateRejectReason(optimization, oosClosed, passedWindows, rollingWalkForward);
+                var turtleCrashShortRejectReason = turtleCrashShortGate.Keys.Count > 0
+                    ? "Portfolio crash gate passed, but this symbol was not selected by per-symbol crash gate."
+                    : $"Turtle crash-short portfolio gate rejected: {turtleCrashShortGate.Reason}";
                 return new FuturesBacktestGateDiagnostic
                 {
                     Key = key,
@@ -3567,7 +3595,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                             ? "Allowed by Turtle crash-short portfolio gate: OOS crash profile passed without optimization/rolling WF."
                             : "Allowed by closed optimization, closed OOS edge, robustness windows, and rolling walk-forward."
                         : isTurtleCrashShortCandidate && _strategyRoutingOptions.TurtleCrashShortGateEnabled
-                            ? $"Turtle crash-short gate rejected: {turtleCrashShortGate.Reason} Standard gate: {standardGateReason}"
+                            ? $"{turtleCrashShortRejectReason} Standard gate: {standardGateReason}"
                             : standardGateReason,
                     OptimizationTrades = optimization?.TradesCount ?? 0,
                     OptimizationNetPnl = optimization?.NetPnl ?? 0m,
@@ -3908,6 +3936,26 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             : value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
                 .Where(part => !string.IsNullOrWhiteSpace(part))
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+    private static IReadOnlySet<string> ParseSymbolList(string? value) =>
+        string.IsNullOrWhiteSpace(value)
+            ? new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            : value.Split(new[] { ',', ';', ' ', '\t', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Select(NormalizeBacktestSymbol)
+                .Where(symbol => !string.IsNullOrWhiteSpace(symbol))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+    private static string NormalizeBacktestSymbol(string value)
+    {
+        var symbol = new string(value
+                .Trim()
+                .ToUpperInvariant()
+                .Where(char.IsLetterOrDigit)
+                .ToArray());
+        return string.IsNullOrWhiteSpace(symbol) || symbol.EndsWith("USDT", StringComparison.OrdinalIgnoreCase)
+            ? symbol
+            : $"{symbol}USDT";
+    }
 
     private static string BuildStrategyGateKey(StrategyGatePerformance gate) =>
         BuildStrategyGateKey(gate.StrategyName, gate.System, gate.Symbol, gate.Direction);
@@ -4440,6 +4488,8 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
     private BacktestRunSettings ResolveSettings(FuturesBacktestRequest request) => new(
         Math.Clamp(request.Days ?? _backtestOptions.Days, 1, 365),
         Math.Clamp(request.Symbols ?? _backtestOptions.Symbols, 1, 200),
+        ParseSymbolList(request.RequiredSymbols),
+        ParseSymbolList(request.ExcludedSymbols),
         Math.Clamp(_backtestOptions.MaxConcurrency, 1, 20),
         ResolveBacktestMode(request.Mode, _backtestOptions.Mode),
         ParseAllowedWeekdays(request.TurtleAllowedWeekdays ?? _backtestOptions.TurtleAllowedWeekdays),
@@ -4524,6 +4574,8 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
     {
         Days = settings.Days,
         Symbols = settings.Symbols,
+        RequiredSymbols = FormatAllowedTexts(settings.RequiredSymbols, string.Empty),
+        ExcludedSymbols = FormatAllowedTexts(settings.ExcludedUniverseSymbols, string.Empty),
         Mode = settings.Mode.ToString(),
         TurtleAllowedWeekdays = FormatAllowedWeekdays(settings.TurtleAllowedWeekdays),
         TurtleAllowedNyHours = FormatAllowedHours(settings.TurtleAllowedNyHours),
@@ -4915,6 +4967,8 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
     private sealed record BacktestRunSettings(
         int Days,
         int Symbols,
+        IReadOnlySet<string> RequiredSymbols,
+        IReadOnlySet<string> ExcludedUniverseSymbols,
         int MaxConcurrency,
         FuturesBacktestMode Mode,
         IReadOnlySet<DayOfWeek> TurtleAllowedWeekdays,

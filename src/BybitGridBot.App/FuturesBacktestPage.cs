@@ -122,6 +122,14 @@ public static class FuturesBacktestPage
           <label for="symbolsInput">Pairs</label>
           <input id="symbolsInput" type="number" min="1" max="200" step="1" value="30" />
         </div>
+        <div class="run-field" style="min-width: 190px;">
+          <label for="requiredSymbolsInput">Force pairs</label>
+          <input id="requiredSymbolsInput" type="text" placeholder="BTCUSDT,ADAUSDT" />
+        </div>
+        <div class="run-field" style="min-width: 190px;">
+          <label for="excludedSymbolsInput">Skip pairs</label>
+          <input id="excludedSymbolsInput" type="text" placeholder="AVAXUSDT,BCHUSDT" />
+        </div>
         <div class="run-field">
           <label for="modeInput">Mode</label>
           <select id="modeInput">
@@ -328,6 +336,8 @@ public static class FuturesBacktestPage
     const requestFieldNames = [
       'days',
       'symbols',
+      'requiredSymbols',
+      'excludedSymbols',
       'mode',
       'turtleAllowedWeekdays',
       'turtleAllowedNyHours',
@@ -361,6 +371,13 @@ public static class FuturesBacktestPage
       capital: 'initialEquityUsdt',
       initialEquity: 'initialEquityUsdt',
       pairs: 'symbols',
+      forceSymbols: 'requiredSymbols',
+      forcedSymbols: 'requiredSymbols',
+      includeSymbols: 'requiredSymbols',
+      mandatorySymbols: 'requiredSymbols',
+      requireSymbols: 'requiredSymbols',
+      skipSymbols: 'excludedSymbols',
+      excludeSymbols: 'excludedSymbols',
       turtleSide: 'turtleAllowedDirections',
       turtleSys: 'turtleAllowedSystems',
       turtleSystem: 'turtleAllowedSystems',
@@ -387,6 +404,8 @@ public static class FuturesBacktestPage
     const visibleFields = {
       days: { id: 'daysInput', type: 'int', min: 1, max: 365, fallback: 90 },
       symbols: { id: 'symbolsInput', type: 'int', min: 1, max: 200, fallback: 20 },
+      requiredSymbols: { id: 'requiredSymbolsInput', type: 'string' },
+      excludedSymbols: { id: 'excludedSymbolsInput', type: 'string' },
       mode: { id: 'modeInput', type: 'string' },
       runNyBounceRouter: { id: 'nyBounceInput', type: 'bool' },
       turtleAllowedDirections: { id: 'turtleDirectionsInput', type: 'string' },
@@ -412,6 +431,8 @@ public static class FuturesBacktestPage
     const settingsFieldIds = [
       'daysInput',
       'symbolsInput',
+      'requiredSymbolsInput',
+      'excludedSymbolsInput',
       'modeInput',
       'nyBounceInput',
       'turtleDirectionsInput',
@@ -458,6 +479,8 @@ public static class FuturesBacktestPage
       const settings = {
         days: clampInt(byId('daysInput').value, 1, 365, 90),
         symbols: clampInt(byId('symbolsInput').value, 1, 200, 20),
+        requiredSymbols: byId('requiredSymbolsInput').value || '',
+        excludedSymbols: byId('excludedSymbolsInput').value || '',
         mode: byId('modeInput').value || 'ScoreBasedRouter',
         runNyBounceRouter: byId('nyBounceInput').checked,
         turtleAllowedDirections: byId('turtleDirectionsInput').value || '',
@@ -630,6 +653,8 @@ public static class FuturesBacktestPage
       byId('stop').disabled = !data.isRunning || isStopping;
       byId('daysInput').disabled = Boolean(data.isRunning);
       byId('symbolsInput').disabled = Boolean(data.isRunning);
+      byId('requiredSymbolsInput').disabled = Boolean(data.isRunning);
+      byId('excludedSymbolsInput').disabled = Boolean(data.isRunning);
       byId('modeInput').disabled = Boolean(data.isRunning);
       byId('nyBounceInput').disabled = Boolean(data.isRunning);
       byId('turtleDirectionsInput').disabled = Boolean(data.isRunning);
@@ -807,6 +832,8 @@ public static class FuturesBacktestPage
         `period=${result.periodStart || '-'} .. ${result.periodEnd || '-'}`,
         `symbolsRequested=${result.symbolsRequested || 0}`,
         `symbolsProcessed=${result.symbolsProcessed || 0}`,
+        `requiredSymbols=${result.requiredSymbols || '-'}`,
+        `excludedUniverseSymbols=${result.excludedUniverseSymbols || '-'}`,
         `tradesCount=${result.tradesCount || 0}`,
         `openAtBacktestEndCount=${result.openAtBacktestEndCount || 0}`,
         `openAtBacktestEndUnrealizedPnl=${Number(result.openAtBacktestEndUnrealizedPnl || 0)}`,
