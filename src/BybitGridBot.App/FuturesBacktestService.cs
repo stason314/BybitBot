@@ -336,7 +336,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                 catch (Exception exception) when (exception is not OperationCanceledException)
                 {
                     _logger.LogWarning(exception, "Backtest failed for {Symbol}", symbol);
-                    outputs.Add(new SymbolBacktestOutput(symbol, [], 0, 0, 0));
+                    outputs.Add(new SymbolBacktestOutput(symbol, [], [], 0, 0, 0));
                 }
                 finally
                 {
@@ -346,6 +346,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             });
 
             var allTrades = new List<BacktestTradeInternal>();
+            var missedProfitableTurtleSignals = new List<MissedTurtleSignalInternal>();
             var falseBreakoutCount = 0;
             var trueBreakoutBlockedCount = 0;
             var hardRiskCapBlockedCount = 0;
@@ -355,6 +356,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     allTrades.AddRange(output.Trades);
+                    missedProfitableTurtleSignals.AddRange(output.MissedProfitableTurtleSignals);
                     falseBreakoutCount += output.FalseBreakoutCount;
                     trueBreakoutBlockedCount += output.TrueBreakoutBlockedCount;
                     hardRiskCapBlockedCount += output.HardRiskCapBlockedCount;
@@ -373,6 +375,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                 symbols.Length,
                 processed,
                 portfolioRiskPass.Trades,
+                missedProfitableTurtleSignals,
                 falseBreakoutCount,
                 trueBreakoutBlockedCount,
                 hardRiskCapBlockedCount,
@@ -448,7 +451,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         var fiveMinuteSeries = BacktestCandleSeries.Create(fiveMinuteCandles, 5);
         if (fiveMinuteSeries.Count < 500)
         {
-            return new SymbolBacktestOutput(symbol, [], 0, 0, 0);
+            return new SymbolBacktestOutput(symbol, [], [], 0, 0, 0);
         }
 
         var shouldLoadTurtleCandles = settings.Mode == FuturesBacktestMode.TurtleOnly ||
@@ -474,6 +477,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         }
 
         var trades = new List<BacktestTradeInternal>();
+        var missedProfitableTurtleSignals = new List<MissedTurtleSignalInternal>();
         var hardRiskCapBlockedCount = 0;
         if (_strategyRoutingOptions.SignalSelectionMode == SignalSelectionMode.ScoreBased)
         {
@@ -490,6 +494,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                     fiveMinuteTurtleExits,
                     settings,
                     trades,
+                    missedProfitableTurtleSignals,
                     ref hardRiskCapBlockedCount,
                     cancellationToken);
             }
@@ -503,7 +508,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         var trueBreakoutBlockedCount = 0;
         if (!ShouldRunNyBounceRouter(settings))
         {
-            return new SymbolBacktestOutput(symbol, trades.OrderBy(trade => trade.EntryTime).ToArray(), falseBreakoutCount, trueBreakoutBlockedCount, hardRiskCapBlockedCount);
+            return new SymbolBacktestOutput(symbol, trades.OrderBy(trade => trade.EntryTime).ToArray(), missedProfitableTurtleSignals, falseBreakoutCount, trueBreakoutBlockedCount, hardRiskCapBlockedCount);
         }
 
         var fifteenMinuteCandles = await timings.MeasureAsync(
@@ -512,7 +517,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         var fifteenMinuteSeries = BacktestCandleSeries.Create(fifteenMinuteCandles, 15);
         if (fifteenMinuteSeries.Count < 200)
         {
-            return new SymbolBacktestOutput(symbol, trades.OrderBy(trade => trade.EntryTime).ToArray(), falseBreakoutCount, trueBreakoutBlockedCount, hardRiskCapBlockedCount);
+            return new SymbolBacktestOutput(symbol, trades.OrderBy(trade => trade.EntryTime).ToArray(), missedProfitableTurtleSignals, falseBreakoutCount, trueBreakoutBlockedCount, hardRiskCapBlockedCount);
         }
 
         var nyZone = ResolveNewYorkTimeZone();
@@ -567,7 +572,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             timings.AddElapsed("symbol.backtest_ny_router", Stopwatch.GetTimestamp() - nyStartedAt);
         }
 
-        return new SymbolBacktestOutput(symbol, trades.OrderBy(trade => trade.EntryTime).ToArray(), falseBreakoutCount, trueBreakoutBlockedCount, hardRiskCapBlockedCount);
+        return new SymbolBacktestOutput(symbol, trades.OrderBy(trade => trade.EntryTime).ToArray(), missedProfitableTurtleSignals, falseBreakoutCount, trueBreakoutBlockedCount, hardRiskCapBlockedCount);
     }
 
     private SymbolBacktestOutput BacktestTurtleOnlySymbol(
@@ -584,10 +589,11 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         var minCandles = Math.Max(_turtleOptions.EntrySlowPeriod, _turtleOptions.AtrPeriod) + 1;
         if (turtleCandles.Count < minCandles || fiveMinuteCandles.Count < 2)
         {
-            return new SymbolBacktestOutput(symbol, [], 0, 0, 0);
+            return new SymbolBacktestOutput(symbol, [], [], 0, 0, 0);
         }
 
         var trades = new List<BacktestTradeInternal>();
+        var missedProfitableTurtleSignals = new List<MissedTurtleSignalInternal>();
         var hardRiskCapBlockedCount = 0;
         BacktestTurtleSignals(
             symbol,
@@ -599,10 +605,11 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             turtleExits,
             settings,
             trades,
+            missedProfitableTurtleSignals,
             ref hardRiskCapBlockedCount,
             cancellationToken);
 
-        return new SymbolBacktestOutput(symbol, trades.OrderBy(trade => trade.EntryTime).ToArray(), 0, 0, hardRiskCapBlockedCount);
+        return new SymbolBacktestOutput(symbol, trades.OrderBy(trade => trade.EntryTime).ToArray(), missedProfitableTurtleSignals, 0, 0, hardRiskCapBlockedCount);
     }
 
     private void BacktestTurtleSignals(
@@ -615,6 +622,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         PrecomputedTurtleChannelExits turtleExits,
         BacktestRunSettings settings,
         List<BacktestTradeInternal> trades,
+        List<MissedTurtleSignalInternal> missedProfitableTurtleSignals,
         ref int hardRiskCapBlockedCount,
         CancellationToken cancellationToken)
     {
@@ -634,31 +642,83 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                 continue;
             }
 
-            if (HasOpenBacktestTrade(trades, current.OpenTime))
-            {
-                continue;
-            }
-
-            if (!IsTurtleBacktestTimeAllowed(current.OpenTime, settings))
-            {
-                continue;
-            }
-
-            var signal = TryBuildTurtleOnlySignal(symbol, current, indicators, index, btcMarketRegime, settings);
-            if (signal is null)
-            {
-                continue;
-            }
-
-            if (signal.TurtleSystem == "S1" && previousS1WasProfitable == true)
+            var rawSignal = TryBuildTurtleOnlySignal(symbol, current, indicators, index, btcMarketRegime, settings, applyQualityFilters: false);
+            if (rawSignal is null)
             {
                 continue;
             }
 
             var equity = settings.InitialEquityUsdt + CalculateClosedPnl(trades, current.OpenTime);
+            if (HasOpenBacktestTrade(trades, current.OpenTime))
+            {
+                TryAddMissedProfitableTurtleSignal(
+                    "AlreadyOpenTrade",
+                    symbol,
+                    rawSignal,
+                    fiveMinuteCandles,
+                    turtleExits,
+                    settings,
+                    equity,
+                    missedProfitableTurtleSignals,
+                    cancellationToken);
+                continue;
+            }
+
+            if (!IsTurtleBacktestTimeAllowed(current.OpenTime, settings))
+            {
+                TryAddMissedProfitableTurtleSignal(
+                    "TimeFilter",
+                    symbol,
+                    rawSignal,
+                    fiveMinuteCandles,
+                    turtleExits,
+                    settings,
+                    equity,
+                    missedProfitableTurtleSignals,
+                    cancellationToken);
+                continue;
+            }
+
+            var qualityBlockReason = GetTurtleSignalQualityBlockReason(
+                current,
+                indicators,
+                index,
+                Enum.Parse<StrategySide>(rawSignal.Side),
+                btcMarketRegime,
+                settings);
+            if (!string.IsNullOrEmpty(qualityBlockReason))
+            {
+                TryAddMissedProfitableTurtleSignal(
+                    qualityBlockReason,
+                    symbol,
+                    rawSignal,
+                    fiveMinuteCandles,
+                    turtleExits,
+                    settings,
+                    equity,
+                    missedProfitableTurtleSignals,
+                    cancellationToken);
+                continue;
+            }
+
+            if (rawSignal.TurtleSystem == "S1" && previousS1WasProfitable == true)
+            {
+                TryAddMissedProfitableTurtleSignal(
+                    "S1PreviousWinnerSkip",
+                    symbol,
+                    rawSignal,
+                    fiveMinuteCandles,
+                    turtleExits,
+                    settings,
+                    equity,
+                    missedProfitableTurtleSignals,
+                    cancellationToken);
+                continue;
+            }
+
             var trade = SimulateTrade(
                 symbol,
-                signal,
+                rawSignal,
                 fiveMinuteCandles.Candles,
                 fiveMinuteCandles.Candles,
                 turtleExits,
@@ -669,11 +729,21 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             if (trade is null)
             {
                 hardRiskCapBlockedCount++;
+                TryAddMissedProfitableTurtleSignal(
+                    "HardRiskOrLiquidationBuffer",
+                    symbol,
+                    rawSignal,
+                    fiveMinuteCandles,
+                    turtleExits,
+                    settings,
+                    settings.InitialEquityUsdt * 100m,
+                    missedProfitableTurtleSignals,
+                    cancellationToken);
                 continue;
             }
 
             trades.Add(trade);
-            if (signal.TurtleSystem == "S1")
+            if (rawSignal.TurtleSystem == "S1")
             {
                 previousS1WasProfitable = trade.NetPnl > 0m;
             }
@@ -686,7 +756,8 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         PrecomputedTurtleIndicators indicators,
         int index,
         BacktestCandleSeries btcMarketRegime,
-        BacktestRunSettings settings)
+        BacktestRunSettings settings,
+        bool applyQualityFilters = true)
     {
         var nValue = indicators.TurtleN[index];
         if (nValue <= 0m)
@@ -700,7 +771,8 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             return null;
         }
 
-        if (!IsTurtleSignalQualityAllowed(current, indicators, index, candidate.Side, btcMarketRegime, settings))
+        if (applyQualityFilters &&
+            !string.IsNullOrEmpty(GetTurtleSignalQualityBlockReason(current, indicators, index, candidate.Side, btcMarketRegime, settings)))
         {
             return null;
         }
@@ -732,6 +804,44 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             TurtleBreakoutLevel = candidate.BreakoutLevel,
             Reason = $"Turtle-only {candidate.System} {candidate.Side} breakout. Close={current.Close:F8}, breakoutLevel={candidate.BreakoutLevel:F8}, N={nValue:F8}."
         };
+    }
+
+    private void TryAddMissedProfitableTurtleSignal(
+        string reason,
+        string symbol,
+        NySessionSignal signal,
+        BacktestCandleSeries fiveMinuteCandles,
+        PrecomputedTurtleChannelExits turtleExits,
+        BacktestRunSettings settings,
+        decimal accountEquityUsdt,
+        List<MissedTurtleSignalInternal> missedProfitableTurtleSignals,
+        CancellationToken cancellationToken)
+    {
+        var shadowTrade = SimulateTrade(
+            symbol,
+            signal,
+            fiveMinuteCandles.Candles,
+            fiveMinuteCandles.Candles,
+            turtleExits,
+            0,
+            settings,
+            accountEquityUsdt,
+            cancellationToken);
+        if (shadowTrade is null || shadowTrade.NetPnl <= 0m)
+        {
+            return;
+        }
+
+        var duplicate = missedProfitableTurtleSignals.Any(item =>
+            string.Equals(item.Trade.Symbol, shadowTrade.Symbol, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(item.Trade.TurtleSystem, shadowTrade.TurtleSystem, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(item.Trade.Side, shadowTrade.Side, StringComparison.OrdinalIgnoreCase) &&
+            item.Trade.EntryTime == shadowTrade.EntryTime &&
+            string.Equals(item.Reason, reason, StringComparison.OrdinalIgnoreCase));
+        if (!duplicate)
+        {
+            missedProfitableTurtleSignals.Add(new MissedTurtleSignalInternal(reason, shadowTrade));
+        }
     }
 
     private static PrecomputedTurtleSignal ResolvePrecomputedTurtleSignal(
@@ -781,7 +891,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         return new PrecomputedTurtleSignal(string.Empty, StrategySide.None, 0m);
     }
 
-    private bool IsTurtleSignalQualityAllowed(
+    private string GetTurtleSignalQualityBlockReason(
         Candle current,
         PrecomputedTurtleIndicators indicators,
         int index,
@@ -791,18 +901,23 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
     {
         if (settings.TurtleMinAdx > 0m && indicators.Adx[index] < settings.TurtleMinAdx)
         {
-            return false;
+            return $"AdxFilter: ADX {indicators.Adx[index]:0.####} < {settings.TurtleMinAdx:0.####}";
         }
 
         if (settings.TurtleVolumeMultiplier > 0m &&
             indicators.VolumeSma[index] > 0m &&
             current.Volume < indicators.VolumeSma[index] * settings.TurtleVolumeMultiplier)
         {
-            return false;
+            return $"VolumeFilter: volume {current.Volume:0.####} < SMA*multiplier {(indicators.VolumeSma[index] * settings.TurtleVolumeMultiplier):0.####}";
         }
 
-        return !settings.TurtleUseMarketRegimeFilter ||
-            IsTurtleMarketRegimeAllowed(side, current.OpenTime, btcMarketRegime);
+        if (settings.TurtleUseMarketRegimeFilter &&
+            !IsTurtleMarketRegimeAllowed(side, current.OpenTime, btcMarketRegime))
+        {
+            return "MarketRegimeFilter";
+        }
+
+        return string.Empty;
     }
 
     private bool IsTurtleMarketRegimeAllowed(
@@ -2830,6 +2945,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         int symbolsRequested,
         int symbolsProcessed,
         IReadOnlyList<BacktestTradeInternal> trades,
+        IReadOnlyList<MissedTurtleSignalInternal> missedProfitableTurtleSignals,
         int falseBreakoutCount,
         int trueBreakoutBlockedCount,
         int hardRiskCapBlockedCount,
@@ -3059,6 +3175,12 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             HourPerformance = BuildBucketPerformance(outOfSampleTrades, trade => TimeZoneInfo.ConvertTime(trade.EntryTime, ResolveNewYorkTimeZone()).Hour.ToString("00")),
             RecentTrades = publicTrades.OrderByDescending(trade => trade.EntryTime).Take(100).ToArray(),
             OpenAtBacktestEndTrades = publicOpenAtEndTrades.OrderByDescending(trade => trade.EntryTime).Take(100).ToArray(),
+            MissedProfitableTurtleSignals = missedProfitableTurtleSignals
+                .OrderByDescending(item => item.Trade.NetPnl)
+                .ThenBy(item => item.Trade.EntryTime)
+                .Take(100)
+                .Select(ToPublicMissedTrade)
+                .ToArray(),
             Timings = timings
         };
     }
@@ -4254,6 +4376,28 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         ExitReason = trade.ExitReason
     };
 
+    private static FuturesBacktestMissedTrade ToPublicMissedTrade(MissedTurtleSignalInternal missed) => new()
+    {
+        MissedReason = missed.Reason,
+        Symbol = missed.Trade.Symbol,
+        StrategyName = missed.Trade.Pattern,
+        Side = missed.Trade.Side,
+        Pattern = missed.Trade.Pattern,
+        EntryTime = missed.Trade.EntryTime,
+        ExitTime = missed.Trade.ExitTime,
+        EntryPrice = missed.Trade.EntryPrice,
+        ExitPrice = missed.Trade.ExitPrice,
+        StopLoss = missed.Trade.StopLoss,
+        TakeProfit = missed.Trade.TakeProfit,
+        GrossPnl = missed.Trade.GrossPnl,
+        Fees = missed.Trade.Fees,
+        SlippageCost = missed.Trade.SlippageCost,
+        FundingCost = missed.Trade.FundingCost,
+        NetPnl = missed.Trade.NetPnl,
+        RMultiple = missed.Trade.RMultiple,
+        ExitReason = missed.Trade.ExitReason
+    };
+
     private async Task<IReadOnlyList<Candle>> FetchHistoricalCandlesAsync(
         string symbol,
         string interval,
@@ -5414,9 +5558,14 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
     private sealed record SymbolBacktestOutput(
         string Symbol,
         IReadOnlyList<BacktestTradeInternal> Trades,
+        IReadOnlyList<MissedTurtleSignalInternal> MissedProfitableTurtleSignals,
         int FalseBreakoutCount,
         int TrueBreakoutBlockedCount,
         int HardRiskCapBlockedCount);
+
+    private sealed record MissedTurtleSignalInternal(
+        string Reason,
+        BacktestTradeInternal Trade);
 
     private sealed class BacktestTimingCollector
     {

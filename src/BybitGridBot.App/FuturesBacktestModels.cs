@@ -238,6 +238,8 @@ public sealed class FuturesBacktestResult
 
     public IReadOnlyList<FuturesBacktestTrade> OpenAtBacktestEndTrades { get; init; } = [];
 
+    public IReadOnlyList<FuturesBacktestMissedTrade> MissedProfitableTurtleSignals { get; init; } = [];
+
     public IReadOnlyList<FuturesBacktestTiming> Timings { get; init; } = [];
 }
 
@@ -461,7 +463,7 @@ public sealed class FuturesBacktestBucketPerformance
     public decimal AverageR { get; init; }
 }
 
-public sealed class FuturesBacktestTrade
+public class FuturesBacktestTrade
 {
     public string Symbol { get; init; } = string.Empty;
 
@@ -496,4 +498,9 @@ public sealed class FuturesBacktestTrade
     public decimal RMultiple { get; init; }
 
     public string ExitReason { get; init; } = string.Empty;
+}
+
+public sealed class FuturesBacktestMissedTrade : FuturesBacktestTrade
+{
+    public string MissedReason { get; init; } = string.Empty;
 }

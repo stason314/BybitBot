@@ -876,6 +876,7 @@ public static class FuturesBacktestPage
         `liveEligibleDirections=${result.liveEligibleDirections || '-'}`,
         `falseBreakoutCount=${result.falseBreakoutCount || 0}`,
         `trueBreakoutBlockedCount=${result.trueBreakoutBlockedCount || 0}`,
+        `missedProfitableTurtleSignalsCount=${(result.missedProfitableTurtleSignals || []).length}`,
         '',
         metricBlock('MAIN_OOS_ALL_SYMBOLS', result.metrics || {}),
         metricBlock('OPTIMIZATION', result.optimizationMetrics || {}),
@@ -903,6 +904,7 @@ public static class FuturesBacktestPage
         tableBlock('WEEKDAY', result.weekdayPerformance || []),
         tableBlock('HOUR_NY', result.hourPerformance || []),
         tableBlock('TIMINGS', result.timings || []),
+        tableBlock('MISSED_PROFITABLE_TURTLE_SIGNALS', result.missedProfitableTurtleSignals || []),
         tableBlock('OPEN_AT_BACKTEST_END', result.openAtBacktestEndTrades || []),
         tableBlock('RECENT_TRADES', result.recentTrades || [])
       ];
