@@ -2877,10 +2877,11 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         var rollingWalkForwardMap = rollingWalkForwardDiagnostics.ToDictionary(
             item => item.Key,
             StringComparer.OrdinalIgnoreCase);
-        var turtleCrashShortGateKeys = BuildTurtleCrashShortPortfolioGateKeys(
+        var turtleCrashShortGate = BuildTurtleCrashShortPortfolioGate(
             outOfSampleTrades,
             btcMarketRegime,
             settings.InitialEquityUsdt);
+        var turtleCrashShortGateKeys = turtleCrashShortGate.Keys;
         var turtleCrashShortGateSet = turtleCrashShortGateKeys.ToHashSet(StringComparer.OrdinalIgnoreCase);
         var eligibleStrategySymbolDirections = optimizationStrategyGates
             .Where(item => IsLiveGateStrategyEnabled(item.StrategyName))
@@ -2919,7 +2920,8 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             robustnessPassedWindows,
             rollingWalkForwardMap,
             eligibleStrategyGateSet,
-            turtleCrashShortGateSet);
+            turtleCrashShortGateSet,
+            turtleCrashShortGate);
         var walkForwardStrategyGates = BuildWalkForwardStrategyGates(
             optimizationTrades,
             outOfSampleTrades,
@@ -2991,6 +2993,14 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             RollingWalkForwardStepDays = settings.RollingWalkForwardStepDays,
             RollingWalkForwardMinWindows = settings.RollingWalkForwardMinWindows,
             RollingWalkForwardMinPassPercent = settings.RollingWalkForwardMinPassPercent,
+            TurtleCrashShortGateEnabled = _strategyRoutingOptions.TurtleCrashShortGateEnabled,
+            TurtleCrashShortGateReason = turtleCrashShortGate.Reason,
+            TurtleCrashShortCandidateTrades = turtleCrashShortGate.CandidateTrades,
+            TurtleCrashShortRegimeTrades = turtleCrashShortGate.RegimeTrades,
+            TurtleCrashShortNetPnl = turtleCrashShortGate.NetPnl,
+            TurtleCrashShortPnlWithoutTop1 = turtleCrashShortGate.PnlWithoutTop1,
+            TurtleCrashShortPnlWithoutTop2 = turtleCrashShortGate.PnlWithoutTop2,
+            TurtleCrashShortMaxDrawdownPercent = turtleCrashShortGate.MaxDrawdownPercent,
             OpenAtBacktestEndCount = openAtBacktestEndTrades.Length,
             OpenAtBacktestEndUnrealizedPnl = openAtBacktestEndTrades.Sum(trade => trade.NetPnl),
             InitialEquityUsdt = settings.InitialEquityUsdt,
@@ -3268,44 +3278,85 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         gate.AverageR >= _strategyRoutingOptions.MinAverageRToEnable &&
         gate.NetPnl > 0m;
 
-    private IReadOnlyList<string> BuildTurtleCrashShortPortfolioGateKeys(
+    private TurtleCrashShortPortfolioGateResult BuildTurtleCrashShortPortfolioGate(
         IReadOnlyList<BacktestTradeInternal> outOfSampleTrades,
         BacktestCandleSeries btcMarketRegime,
         decimal initialEquity)
     {
-        if (!_strategyRoutingOptions.TurtleCrashShortGateEnabled ||
-            !IsLiveDirectionAllowed("Short") ||
-            btcMarketRegime.Count == 0)
+        if (!_strategyRoutingOptions.TurtleCrashShortGateEnabled)
         {
-            return [];
+            return TurtleCrashShortPortfolioGateResult.Rejected("Turtle crash-short gate disabled.");
+        }
+
+        if (!IsLiveDirectionAllowed("Short"))
+        {
+            return TurtleCrashShortPortfolioGateResult.Rejected("Short is not in live-eligible directions.");
+        }
+
+        if (btcMarketRegime.Count == 0)
+        {
+            return TurtleCrashShortPortfolioGateResult.Rejected("BTC crash-regime candles unavailable.");
         }
 
         var allowedSystems = ParseAllowedTexts(_strategyRoutingOptions.TurtleCrashShortAllowedSystems);
-        var crashTrades = outOfSampleTrades
+        var candidateTrades = outOfSampleTrades
             .Where(trade => string.Equals(trade.Pattern, TurtleTrendStrategy.Name, StringComparison.OrdinalIgnoreCase))
             .Where(trade => string.Equals(trade.Side, "Short", StringComparison.OrdinalIgnoreCase))
             .Where(trade => allowedSystems.Count == 0 || allowedSystems.Contains(ResolveStrategyGateSystem(trade)))
+            .ToArray();
+        var crashTrades = candidateTrades
             .Where(trade => IsTurtleCrashShortBacktestRegimeAllowed(trade.EntryTime, btcMarketRegime))
             .OrderBy(trade => trade.ExitTime)
             .ToArray();
         if (crashTrades.Length < _strategyRoutingOptions.TurtleCrashShortMinOosTrades)
         {
-            return [];
+            return TurtleCrashShortPortfolioGateResult.Rejected(
+                $"Crash-regime OOS trades {crashTrades.Length} < {_strategyRoutingOptions.TurtleCrashShortMinOosTrades} (candidates {candidateTrades.Length}).",
+                candidateTrades.Length,
+                crashTrades.Length);
         }
 
         var periodStart = crashTrades.Min(trade => trade.EntryTime);
         var periodEnd = crashTrades.Max(trade => trade.ExitTime);
         var metrics = BuildMetrics(crashTrades, periodStart, periodEnd, initialEquity);
-        if (metrics.NetPnl < _strategyRoutingOptions.TurtleCrashShortMinOosNetPnl ||
-            metrics.PnlWithoutTop1 <= 0m ||
-            (_strategyRoutingOptions.TurtleCrashShortRequireOosWithoutTop2Positive && metrics.PnlWithoutTop2 <= 0m) ||
-            (_strategyRoutingOptions.TurtleCrashShortMaxOosDrawdownPercent > 0m &&
-                metrics.MaxDrawdownPercent > _strategyRoutingOptions.TurtleCrashShortMaxOosDrawdownPercent))
+        if (metrics.NetPnl < _strategyRoutingOptions.TurtleCrashShortMinOosNetPnl)
         {
-            return [];
+            return TurtleCrashShortPortfolioGateResult.Rejected(
+                $"Crash OOS net PnL {metrics.NetPnl:0.####} < {_strategyRoutingOptions.TurtleCrashShortMinOosNetPnl:0.####}.",
+                candidateTrades.Length,
+                crashTrades.Length,
+                metrics);
         }
 
-        return BuildStrategyGatePerformance(crashTrades, initialEquity)
+        if (metrics.PnlWithoutTop1 <= 0m)
+        {
+            return TurtleCrashShortPortfolioGateResult.Rejected(
+                $"Crash OOS PnL without top1 {metrics.PnlWithoutTop1:0.####} <= 0.",
+                candidateTrades.Length,
+                crashTrades.Length,
+                metrics);
+        }
+
+        if (_strategyRoutingOptions.TurtleCrashShortRequireOosWithoutTop2Positive && metrics.PnlWithoutTop2 <= 0m)
+        {
+            return TurtleCrashShortPortfolioGateResult.Rejected(
+                $"Crash OOS PnL without top2 {metrics.PnlWithoutTop2:0.####} <= 0.",
+                candidateTrades.Length,
+                crashTrades.Length,
+                metrics);
+        }
+
+        if (_strategyRoutingOptions.TurtleCrashShortMaxOosDrawdownPercent > 0m &&
+            metrics.MaxDrawdownPercent > _strategyRoutingOptions.TurtleCrashShortMaxOosDrawdownPercent)
+        {
+            return TurtleCrashShortPortfolioGateResult.Rejected(
+                $"Crash OOS max DD {metrics.MaxDrawdownPercent:0.####}% > {_strategyRoutingOptions.TurtleCrashShortMaxOosDrawdownPercent:0.####}%.",
+                candidateTrades.Length,
+                crashTrades.Length,
+                metrics);
+        }
+
+        var keys = BuildStrategyGatePerformance(crashTrades, initialEquity)
             .Where(gate => IsLiveGateStrategyEnabled(gate.StrategyName))
             .Where(gate => IsLiveDirectionAllowed(gate.Direction))
             .Where(gate => allowedSystems.Count == 0 || allowedSystems.Contains(gate.System))
@@ -3313,6 +3364,24 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             .Select(BuildStrategyGateKey)
             .OrderBy(key => key)
             .ToArray();
+        if (keys.Length == 0)
+        {
+            return TurtleCrashShortPortfolioGateResult.Rejected(
+                "Crash OOS profile passed, but no positive per-symbol Turtle Short gate remained.",
+                candidateTrades.Length,
+                crashTrades.Length,
+                metrics);
+        }
+
+        return new TurtleCrashShortPortfolioGateResult(
+            keys,
+            $"Allowed by Turtle crash-short portfolio gate: regimeTrades={crashTrades.Length}, netPnl={metrics.NetPnl:0.####}, pnlWithoutTop1={metrics.PnlWithoutTop1:0.####}, pnlWithoutTop2={metrics.PnlWithoutTop2:0.####}, maxDD={metrics.MaxDrawdownPercent:0.####}%.",
+            candidateTrades.Length,
+            crashTrades.Length,
+            metrics.NetPnl,
+            metrics.PnlWithoutTop1,
+            metrics.PnlWithoutTop2,
+            metrics.MaxDrawdownPercent);
     }
 
     private bool IsTurtleCrashShortBacktestRegimeAllowed(
@@ -3334,7 +3403,13 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
 
         var current = closed[^1];
         var donchianLow = TradingIndicatorMath.DonchianLow(closed, donchianPeriod);
-        if (donchianLow <= 0m || current.Close >= donchianLow)
+        var closes = closed.Select(candle => candle.Close).ToArray();
+        var hasTrendFilter = closes.Length >= 200;
+        var ema50 = hasTrendFilter ? TradingIndicatorMath.Ema(closes, 50) : 0m;
+        var ema200 = hasTrendFilter ? TradingIndicatorMath.Ema(closes, 200) : 0m;
+        var donchianBreakdown = donchianLow > 0m && current.Close < donchianLow;
+        var bearishTrend = hasTrendFilter && current.Close < ema50 && ema50 < ema200;
+        if (!donchianBreakdown && !bearishTrend)
         {
             return false;
         }
@@ -3374,6 +3449,32 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         }
 
         return true;
+    }
+
+    private sealed record TurtleCrashShortPortfolioGateResult(
+        IReadOnlyList<string> Keys,
+        string Reason,
+        int CandidateTrades,
+        int RegimeTrades,
+        decimal NetPnl,
+        decimal PnlWithoutTop1,
+        decimal PnlWithoutTop2,
+        decimal MaxDrawdownPercent)
+    {
+        public static TurtleCrashShortPortfolioGateResult Rejected(
+            string reason,
+            int candidateTrades = 0,
+            int regimeTrades = 0,
+            FuturesBacktestMetrics? metrics = null) =>
+            new(
+                [],
+                reason,
+                candidateTrades,
+                regimeTrades,
+                metrics?.NetPnl ?? 0m,
+                metrics?.PnlWithoutTop1 ?? 0m,
+                metrics?.PnlWithoutTop2 ?? 0m,
+                metrics?.MaxDrawdownPercent ?? 0m);
     }
 
     private static decimal CalculatePnlWithoutLargestWinningTrade(IReadOnlyList<BacktestTradeInternal> trades)
@@ -3422,8 +3523,10 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         IReadOnlyDictionary<string, int> robustnessPassedWindows,
         IReadOnlyDictionary<string, FuturesBacktestRollingWalkForwardDiagnostic> rollingWalkForwardDiagnostics,
         IReadOnlySet<string> liveAllowedKeys,
-        IReadOnlySet<string> turtleCrashShortGateKeys)
+        IReadOnlySet<string> turtleCrashShortGateKeys,
+        TurtleCrashShortPortfolioGateResult turtleCrashShortGate)
     {
+        var turtleCrashShortAllowedSystems = ParseAllowedTexts(_strategyRoutingOptions.TurtleCrashShortAllowedSystems);
         var keys = optimizationGates.Keys
             .Concat(oosClosedGates.Keys)
             .Concat(oosOpenGates.Keys)
@@ -3445,7 +3548,12 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                 var identity = optimization ?? oosClosed ?? oosOpen ?? oosMarkToMarket ?? oosForcedClosed;
                 var isLiveAllowed = liveAllowedKeys.Contains(key);
                 var isTurtleCrashShortAllowed = turtleCrashShortGateKeys.Contains(key);
+                var isTurtleCrashShortCandidate = identity is not null &&
+                    string.Equals(identity.StrategyName, TurtleTrendStrategy.Name, StringComparison.OrdinalIgnoreCase) &&
+                    string.Equals(identity.Direction, "Short", StringComparison.OrdinalIgnoreCase) &&
+                    (turtleCrashShortAllowedSystems.Count == 0 || turtleCrashShortAllowedSystems.Contains(identity.System));
                 robustnessPassedWindows.TryGetValue(key, out var passedWindows);
+                var standardGateReason = BuildGateRejectReason(optimization, oosClosed, passedWindows, rollingWalkForward);
                 return new FuturesBacktestGateDiagnostic
                 {
                     Key = key,
@@ -3458,7 +3566,9 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                         ? isTurtleCrashShortAllowed
                             ? "Allowed by Turtle crash-short portfolio gate: OOS crash profile passed without optimization/rolling WF."
                             : "Allowed by closed optimization, closed OOS edge, robustness windows, and rolling walk-forward."
-                        : BuildGateRejectReason(optimization, oosClosed, passedWindows, rollingWalkForward),
+                        : isTurtleCrashShortCandidate && _strategyRoutingOptions.TurtleCrashShortGateEnabled
+                            ? $"Turtle crash-short gate rejected: {turtleCrashShortGate.Reason} Standard gate: {standardGateReason}"
+                            : standardGateReason,
                     OptimizationTrades = optimization?.TradesCount ?? 0,
                     OptimizationNetPnl = optimization?.NetPnl ?? 0m,
                     OptimizationProfitFactor = optimization?.ProfitFactor ?? 0m,

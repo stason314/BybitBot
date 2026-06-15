@@ -148,6 +148,22 @@ public sealed class FuturesBacktestResult
 
     public decimal RollingWalkForwardMinPassPercent { get; init; }
 
+    public bool TurtleCrashShortGateEnabled { get; init; }
+
+    public string TurtleCrashShortGateReason { get; init; } = string.Empty;
+
+    public int TurtleCrashShortCandidateTrades { get; init; }
+
+    public int TurtleCrashShortRegimeTrades { get; init; }
+
+    public decimal TurtleCrashShortNetPnl { get; init; }
+
+    public decimal TurtleCrashShortPnlWithoutTop1 { get; init; }
+
+    public decimal TurtleCrashShortPnlWithoutTop2 { get; init; }
+
+    public decimal TurtleCrashShortMaxDrawdownPercent { get; init; }
+
     public int OpenAtBacktestEndCount { get; init; }
 
     public decimal OpenAtBacktestEndUnrealizedPnl { get; init; }

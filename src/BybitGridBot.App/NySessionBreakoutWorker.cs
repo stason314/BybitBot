@@ -702,7 +702,7 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
         var donchianPeriod = Math.Max(2, _strategyRoutingOptions.TurtleCrashShortBtcDonchianPeriod);
         var adxPeriod = Math.Max(2, _strategyRoutingOptions.TurtleCrashShortBtcAdxPeriod);
         var dropLookback = Math.Max(1, _strategyRoutingOptions.TurtleCrashShortBtcDropLookbackBars);
-        var lookback = Math.Max(donchianPeriod + adxPeriod + 5, dropLookback + 5);
+        var lookback = Math.Max(Math.Max(donchianPeriod + adxPeriod + 5, dropLookback + 5), 220);
         var btcCandles = (await _bybitRestClient.GetKlinesAsync(
                 Category,
                 "BTCUSDT",
@@ -718,9 +718,16 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
 
         var current = btcCandles[^1];
         var donchianLow = TradingIndicatorMath.DonchianLow(btcCandles, donchianPeriod);
-        if (donchianLow <= 0m || current.Close >= donchianLow)
+        var closes = btcCandles.Select(candle => candle.Close).ToArray();
+        var hasTrendFilter = closes.Length >= 200;
+        var ema50 = hasTrendFilter ? TradingIndicatorMath.Ema(closes, 50) : 0m;
+        var ema200 = hasTrendFilter ? TradingIndicatorMath.Ema(closes, 200) : 0m;
+        var donchianBreakdown = donchianLow > 0m && current.Close < donchianLow;
+        var bearishTrend = hasTrendFilter && current.Close < ema50 && ema50 < ema200;
+        if (!donchianBreakdown && !bearishTrend)
         {
-            return TurtleCrashShortGateDecision.Rejected($"BTC close {current.Close:0.########} is not below Donchian({donchianPeriod}) low {donchianLow:0.########}.");
+            return TurtleCrashShortGateDecision.Rejected(
+                $"BTC is not in crash trend: close {current.Close:0.########}, Donchian({donchianPeriod}) low {donchianLow:0.########}, EMA50 {ema50:0.########}, EMA200 {ema200:0.########}.");
         }
 
         var adx = TradingIndicatorMath.Adx(btcCandles, adxPeriod);
@@ -764,7 +771,7 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
         }
 
         return TurtleCrashShortGateDecision.Allowed(
-            $"BTC crash regime active: close {current.Close:0.########} < Donchian({donchianPeriod}) low {donchianLow:0.########}, ADX {adx:0.####}. {breadthDecision.Reason}");
+            $"BTC crash regime active: close {current.Close:0.########}, Donchian({donchianPeriod}) low {donchianLow:0.########}, EMA50 {ema50:0.########}, EMA200 {ema200:0.########}, ADX {adx:0.####}. {breadthDecision.Reason}");
     }
 
     private async Task<TurtleCrashShortGateDecision> EvaluateTurtleCrashShortBreadthAsync(
