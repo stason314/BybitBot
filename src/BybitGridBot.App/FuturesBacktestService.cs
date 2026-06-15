@@ -358,6 +358,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                 falseBreakoutCount,
                 trueBreakoutBlockedCount,
                 hardRiskCapBlockedCount,
+                btcMarketRegimeSeries,
                 settings,
                 timings.ToPublicTimings());
 
@@ -2814,6 +2815,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         int falseBreakoutCount,
         int trueBreakoutBlockedCount,
         int hardRiskCapBlockedCount,
+        BacktestCandleSeries btcMarketRegime,
         BacktestRunSettings settings,
         IReadOnlyList<FuturesBacktestTiming> timings)
     {
@@ -2875,6 +2877,11 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         var rollingWalkForwardMap = rollingWalkForwardDiagnostics.ToDictionary(
             item => item.Key,
             StringComparer.OrdinalIgnoreCase);
+        var turtleCrashShortGateKeys = BuildTurtleCrashShortPortfolioGateKeys(
+            outOfSampleTrades,
+            btcMarketRegime,
+            settings.InitialEquityUsdt);
+        var turtleCrashShortGateSet = turtleCrashShortGateKeys.ToHashSet(StringComparer.OrdinalIgnoreCase);
         var eligibleStrategySymbolDirections = optimizationStrategyGates
             .Where(item => IsLiveGateStrategyEnabled(item.StrategyName))
             .Where(item => IsLiveDirectionAllowed(item.Direction))
@@ -2891,6 +2898,8 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                 rollingWalkForwardMap.TryGetValue(BuildStrategyGateKey(item), out var rolling) &&
                 rolling.IsLiveAllowed)
             .Select(BuildStrategyGateKey)
+            .Concat(turtleCrashShortGateKeys)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
             .OrderBy(key => key)
             .ToArray();
         var openProfitableStrategySymbolDirections = BuildProfitableDiagnosticGateKeys(outOfSampleOpenStrategyGates, minTrades: 1);
@@ -2909,7 +2918,8 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             outOfSampleForcedClosedStrategyGateMap,
             robustnessPassedWindows,
             rollingWalkForwardMap,
-            eligibleStrategyGateSet);
+            eligibleStrategyGateSet,
+            turtleCrashShortGateSet);
         var walkForwardStrategyGates = BuildWalkForwardStrategyGates(
             optimizationTrades,
             outOfSampleTrades,
@@ -3258,6 +3268,114 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         gate.AverageR >= _strategyRoutingOptions.MinAverageRToEnable &&
         gate.NetPnl > 0m;
 
+    private IReadOnlyList<string> BuildTurtleCrashShortPortfolioGateKeys(
+        IReadOnlyList<BacktestTradeInternal> outOfSampleTrades,
+        BacktestCandleSeries btcMarketRegime,
+        decimal initialEquity)
+    {
+        if (!_strategyRoutingOptions.TurtleCrashShortGateEnabled ||
+            !IsLiveDirectionAllowed("Short") ||
+            btcMarketRegime.Count == 0)
+        {
+            return [];
+        }
+
+        var allowedSystems = ParseAllowedTexts(_strategyRoutingOptions.TurtleCrashShortAllowedSystems);
+        var crashTrades = outOfSampleTrades
+            .Where(trade => string.Equals(trade.Pattern, TurtleTrendStrategy.Name, StringComparison.OrdinalIgnoreCase))
+            .Where(trade => string.Equals(trade.Side, "Short", StringComparison.OrdinalIgnoreCase))
+            .Where(trade => allowedSystems.Count == 0 || allowedSystems.Contains(ResolveStrategyGateSystem(trade)))
+            .Where(trade => IsTurtleCrashShortBacktestRegimeAllowed(trade.EntryTime, btcMarketRegime))
+            .OrderBy(trade => trade.ExitTime)
+            .ToArray();
+        if (crashTrades.Length < _strategyRoutingOptions.TurtleCrashShortMinOosTrades)
+        {
+            return [];
+        }
+
+        var periodStart = crashTrades.Min(trade => trade.EntryTime);
+        var periodEnd = crashTrades.Max(trade => trade.ExitTime);
+        var metrics = BuildMetrics(crashTrades, periodStart, periodEnd, initialEquity);
+        if (metrics.NetPnl < _strategyRoutingOptions.TurtleCrashShortMinOosNetPnl ||
+            metrics.PnlWithoutTop1 <= 0m ||
+            (_strategyRoutingOptions.TurtleCrashShortRequireOosWithoutTop2Positive && metrics.PnlWithoutTop2 <= 0m) ||
+            (_strategyRoutingOptions.TurtleCrashShortMaxOosDrawdownPercent > 0m &&
+                metrics.MaxDrawdownPercent > _strategyRoutingOptions.TurtleCrashShortMaxOosDrawdownPercent))
+        {
+            return [];
+        }
+
+        return BuildStrategyGatePerformance(crashTrades, initialEquity)
+            .Where(gate => IsLiveGateStrategyEnabled(gate.StrategyName))
+            .Where(gate => IsLiveDirectionAllowed(gate.Direction))
+            .Where(gate => allowedSystems.Count == 0 || allowedSystems.Contains(gate.System))
+            .Where(gate => gate.NetPnl > 0m && gate.AverageR > 0m)
+            .Select(BuildStrategyGateKey)
+            .OrderBy(key => key)
+            .ToArray();
+    }
+
+    private bool IsTurtleCrashShortBacktestRegimeAllowed(
+        DateTimeOffset signalOpenTime,
+        BacktestCandleSeries btcMarketRegime)
+    {
+        var donchianPeriod = Math.Max(2, _strategyRoutingOptions.TurtleCrashShortBtcDonchianPeriod);
+        var adxPeriod = Math.Max(2, _strategyRoutingOptions.TurtleCrashShortBtcAdxPeriod);
+        var dropLookback = Math.Max(1, _strategyRoutingOptions.TurtleCrashShortBtcDropLookbackBars);
+        var requiredCandles = Math.Max(donchianPeriod + 1, Math.Max(adxPeriod + 2, dropLookback + 1));
+        var signalCloseTime = signalOpenTime.AddMinutes(ResolveIntervalMinutes(_turtleOptions.Timeframe));
+        var closed = btcMarketRegime.CopyClosedUntil(signalCloseTime)
+            .OrderBy(candle => candle.OpenTime)
+            .ToArray();
+        if (closed.Length < requiredCandles)
+        {
+            return false;
+        }
+
+        var current = closed[^1];
+        var donchianLow = TradingIndicatorMath.DonchianLow(closed, donchianPeriod);
+        if (donchianLow <= 0m || current.Close >= donchianLow)
+        {
+            return false;
+        }
+
+        var adx = TradingIndicatorMath.Adx(closed, adxPeriod);
+        if (adx < _strategyRoutingOptions.TurtleCrashShortBtcMinAdx)
+        {
+            return false;
+        }
+
+        var minDropPercent = _strategyRoutingOptions.TurtleCrashShortBtcMinDropPercent;
+        if (minDropPercent > 0m)
+        {
+            var previousIndex = closed.Length - 1 - dropLookback;
+            if (previousIndex < 0 || closed[previousIndex].Close <= 0m)
+            {
+                return false;
+            }
+
+            var previousClose = closed[previousIndex].Close;
+            var dropPercent = (previousClose - current.Close) / previousClose * 100m;
+            if (dropPercent < minDropPercent)
+            {
+                return false;
+            }
+        }
+
+        var volumeMultiplier = _strategyRoutingOptions.TurtleCrashShortBtcVolumeMultiplier;
+        if (volumeMultiplier > 0m)
+        {
+            var volumeWindow = closed.SkipLast(1).TakeLast(20).ToArray();
+            var volumeSma = volumeWindow.Length > 0 ? volumeWindow.Average(candle => candle.Volume) : 0m;
+            if (volumeSma > 0m && current.Volume < volumeSma * volumeMultiplier)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     private static decimal CalculatePnlWithoutLargestWinningTrade(IReadOnlyList<BacktestTradeInternal> trades)
     {
         var netPnl = trades.Sum(trade => trade.NetPnl);
@@ -3303,7 +3421,8 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         IReadOnlyDictionary<string, StrategyGatePerformance> oosForcedClosedGates,
         IReadOnlyDictionary<string, int> robustnessPassedWindows,
         IReadOnlyDictionary<string, FuturesBacktestRollingWalkForwardDiagnostic> rollingWalkForwardDiagnostics,
-        IReadOnlySet<string> liveAllowedKeys)
+        IReadOnlySet<string> liveAllowedKeys,
+        IReadOnlySet<string> turtleCrashShortGateKeys)
     {
         var keys = optimizationGates.Keys
             .Concat(oosClosedGates.Keys)
@@ -3325,6 +3444,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                 rollingWalkForwardDiagnostics.TryGetValue(key, out var rollingWalkForward);
                 var identity = optimization ?? oosClosed ?? oosOpen ?? oosMarkToMarket ?? oosForcedClosed;
                 var isLiveAllowed = liveAllowedKeys.Contains(key);
+                var isTurtleCrashShortAllowed = turtleCrashShortGateKeys.Contains(key);
                 robustnessPassedWindows.TryGetValue(key, out var passedWindows);
                 return new FuturesBacktestGateDiagnostic
                 {
@@ -3334,7 +3454,11 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                     Symbol = identity?.Symbol ?? string.Empty,
                     Direction = identity?.Direction ?? string.Empty,
                     IsLiveAllowed = isLiveAllowed,
-                    Reason = isLiveAllowed ? "Allowed by closed optimization, closed OOS edge, robustness windows, and rolling walk-forward." : BuildGateRejectReason(optimization, oosClosed, passedWindows, rollingWalkForward),
+                    Reason = isLiveAllowed
+                        ? isTurtleCrashShortAllowed
+                            ? "Allowed by Turtle crash-short portfolio gate: OOS crash profile passed without optimization/rolling WF."
+                            : "Allowed by closed optimization, closed OOS edge, robustness windows, and rolling walk-forward."
+                        : BuildGateRejectReason(optimization, oosClosed, passedWindows, rollingWalkForward),
                     OptimizationTrades = optimization?.TradesCount ?? 0,
                     OptimizationNetPnl = optimization?.NetPnl ?? 0m,
                     OptimizationProfitFactor = optimization?.ProfitFactor ?? 0m,

@@ -53,8 +53,75 @@ public sealed class StrategyRoutingOptions
     [ConfigurationKeyName("LIVE_ELIGIBLE_DIRECTIONS")]
     public string LiveEligibleDirections { get; init; } = "Long";
 
+    [ConfigurationKeyName("LIVE_ELIGIBLE_TURTLE_SYSTEMS")]
+    public string LiveEligibleTurtleSystems { get; init; } = string.Empty;
+
     [ConfigurationKeyName("NY_LIVE_ALLOWED_HOURS")]
     public string LiveAllowedHours { get; init; } = "10,11";
+
+    [ConfigurationKeyName("TURTLE_CRASH_SHORT_GATE_ENABLED")]
+    public bool TurtleCrashShortGateEnabled { get; init; } = false;
+
+    [ConfigurationKeyName("TURTLE_CRASH_SHORT_ALLOWED_SYSTEMS")]
+    public string TurtleCrashShortAllowedSystems { get; init; } = "S2";
+
+    [ConfigurationKeyName("TURTLE_CRASH_SHORT_SIZE_MULTIPLIER")]
+    [Range(typeof(decimal), "0", "100")]
+    public decimal TurtleCrashShortSizeMultiplier { get; init; } = 1m;
+
+    [ConfigurationKeyName("TURTLE_CRASH_SHORT_BTC_TIMEFRAME")]
+    public string TurtleCrashShortBtcTimeframe { get; init; } = "240";
+
+    [ConfigurationKeyName("TURTLE_CRASH_SHORT_BTC_DONCHIAN_PERIOD")]
+    [Range(2, 500)]
+    public int TurtleCrashShortBtcDonchianPeriod { get; init; } = 55;
+
+    [ConfigurationKeyName("TURTLE_CRASH_SHORT_BTC_ADX_PERIOD")]
+    [Range(2, 100)]
+    public int TurtleCrashShortBtcAdxPeriod { get; init; } = 14;
+
+    [ConfigurationKeyName("TURTLE_CRASH_SHORT_BTC_MIN_ADX")]
+    [Range(typeof(decimal), "0", "100")]
+    public decimal TurtleCrashShortBtcMinAdx { get; init; } = 18m;
+
+    [ConfigurationKeyName("TURTLE_CRASH_SHORT_BTC_DROP_LOOKBACK_BARS")]
+    [Range(1, 500)]
+    public int TurtleCrashShortBtcDropLookbackBars { get; init; } = 6;
+
+    [ConfigurationKeyName("TURTLE_CRASH_SHORT_BTC_MIN_DROP_PERCENT")]
+    [Range(typeof(decimal), "0", "100")]
+    public decimal TurtleCrashShortBtcMinDropPercent { get; init; } = 0m;
+
+    [ConfigurationKeyName("TURTLE_CRASH_SHORT_BTC_VOLUME_MULTIPLIER")]
+    [Range(typeof(decimal), "0", "100")]
+    public decimal TurtleCrashShortBtcVolumeMultiplier { get; init; } = 0m;
+
+    [ConfigurationKeyName("TURTLE_CRASH_SHORT_BREADTH_TOP_SYMBOLS")]
+    [Range(0, 100)]
+    public int TurtleCrashShortBreadthTopSymbols { get; init; } = 0;
+
+    [ConfigurationKeyName("TURTLE_CRASH_SHORT_BREADTH_MIN_BELOW_PERCENT")]
+    [Range(typeof(decimal), "0", "100")]
+    public decimal TurtleCrashShortBreadthMinBelowPercent { get; init; } = 0m;
+
+    [ConfigurationKeyName("TURTLE_CRASH_SHORT_BREADTH_MA_PERIOD")]
+    [Range(2, 500)]
+    public int TurtleCrashShortBreadthMaPeriod { get; init; } = 55;
+
+    [ConfigurationKeyName("TURTLE_CRASH_SHORT_MIN_OOS_TRADES")]
+    [Range(1, 10000)]
+    public int TurtleCrashShortMinOosTrades { get; init; } = 20;
+
+    [ConfigurationKeyName("TURTLE_CRASH_SHORT_MIN_OOS_NET_PNL")]
+    [Range(typeof(decimal), "-999999999", "999999999")]
+    public decimal TurtleCrashShortMinOosNetPnl { get; init; } = 0m;
+
+    [ConfigurationKeyName("TURTLE_CRASH_SHORT_REQUIRE_OOS_WITHOUT_TOP2_POSITIVE")]
+    public bool TurtleCrashShortRequireOosWithoutTop2Positive { get; init; } = true;
+
+    [ConfigurationKeyName("TURTLE_CRASH_SHORT_MAX_OOS_DRAWDOWN_PERCENT")]
+    [Range(typeof(decimal), "0", "10000")]
+    public decimal TurtleCrashShortMaxOosDrawdownPercent { get; init; } = 20m;
 
     [ConfigurationKeyName("MIN_TRADES_FOR_STRATEGY_SYMBOL_GATING")]
     [Range(1, 10000)]

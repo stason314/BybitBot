@@ -550,7 +550,22 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
                 continue;
             }
 
-            if (!_backtestService.IsStrategySymbolDirectionAllowedForTrading(
+            if (IsTurtleSignal(signal) && !IsLiveTurtleSystemAllowed(signal.TurtleSystem))
+            {
+                MarkSignalHandled(item.Symbol, signal.SignalCandleOpenTime);
+                AddEvent(item.Symbol, "warning", $"{signal.Pattern}:{signal.TurtleSystem}:{item.Symbol}:{signal.Side} skipped by Turtle system gate.");
+                continue;
+            }
+
+            var crashShortGate = await EvaluateTurtleCrashShortGateAsync(signal, cancellationToken);
+            if (crashShortGate.IsApplicable && !crashShortGate.IsAllowed)
+            {
+                MarkSignalHandled(item.Symbol, signal.SignalCandleOpenTime);
+                AddEvent(item.Symbol, "warning", $"{signal.Pattern}:{signal.TurtleSystem}:{item.Symbol}:{signal.Side} skipped by crash-regime gate. {crashShortGate.Reason}");
+                continue;
+            }
+
+            if (!crashShortGate.IsAllowed && !_backtestService.IsStrategySymbolDirectionAllowedForTrading(
                     signal.Pattern,
                     signal.TurtleSystem,
                     item.Symbol,
@@ -562,12 +577,14 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
                 continue;
             }
 
-            var edgeSizeMultiplier = _backtestService.ResolveStrategySymbolDirectionSizeMultiplier(
-                signal.Pattern,
-                signal.TurtleSystem,
-                item.Symbol,
-                signal.Side,
-                _options.RequireBacktestSymbolFilter);
+            var edgeSizeMultiplier = crashShortGate.IsAllowed
+                ? decimal.Max(0m, _strategyRoutingOptions.TurtleCrashShortSizeMultiplier)
+                : _backtestService.ResolveStrategySymbolDirectionSizeMultiplier(
+                    signal.Pattern,
+                    signal.TurtleSystem,
+                    item.Symbol,
+                    signal.Side,
+                    _options.RequireBacktestSymbolFilter);
             if (edgeSizeMultiplier <= 0m)
             {
                 MarkSignalHandled(item.Symbol, signal.SignalCandleOpenTime);
@@ -656,6 +673,182 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
         return allowedHours.Contains(nyHour);
     }
 
+    private bool IsLiveTurtleSystemAllowed(string system)
+    {
+        var allowed = ParseAllowedTexts(_strategyRoutingOptions.LiveEligibleTurtleSystems);
+        return allowed.Count == 0 || allowed.Contains(system.Trim());
+    }
+
+    private async Task<TurtleCrashShortGateDecision> EvaluateTurtleCrashShortGateAsync(
+        NySessionSignal signal,
+        CancellationToken cancellationToken)
+    {
+        if (!_strategyRoutingOptions.TurtleCrashShortGateEnabled || !IsTurtleSignal(signal))
+        {
+            return TurtleCrashShortGateDecision.NotApplicable;
+        }
+
+        if (!string.Equals(signal.Side, "Short", StringComparison.OrdinalIgnoreCase))
+        {
+            return TurtleCrashShortGateDecision.NotApplicable;
+        }
+
+        var allowedSystems = ParseAllowedTexts(_strategyRoutingOptions.TurtleCrashShortAllowedSystems);
+        if (allowedSystems.Count > 0 && !allowedSystems.Contains(signal.TurtleSystem.Trim()))
+        {
+            return TurtleCrashShortGateDecision.Rejected($"Turtle system {signal.TurtleSystem} is not in crash-short systems {_strategyRoutingOptions.TurtleCrashShortAllowedSystems}.");
+        }
+
+        var donchianPeriod = Math.Max(2, _strategyRoutingOptions.TurtleCrashShortBtcDonchianPeriod);
+        var adxPeriod = Math.Max(2, _strategyRoutingOptions.TurtleCrashShortBtcAdxPeriod);
+        var dropLookback = Math.Max(1, _strategyRoutingOptions.TurtleCrashShortBtcDropLookbackBars);
+        var lookback = Math.Max(donchianPeriod + adxPeriod + 5, dropLookback + 5);
+        var btcCandles = (await _bybitRestClient.GetKlinesAsync(
+                Category,
+                "BTCUSDT",
+                _strategyRoutingOptions.TurtleCrashShortBtcTimeframe,
+                lookback,
+                cancellationToken))
+            .OrderBy(candle => candle.OpenTime)
+            .ToArray();
+        if (btcCandles.Length < Math.Max(donchianPeriod + 1, adxPeriod + 2))
+        {
+            return TurtleCrashShortGateDecision.Rejected($"BTC crash-regime data is insufficient: {btcCandles.Length} candles.");
+        }
+
+        var current = btcCandles[^1];
+        var donchianLow = TradingIndicatorMath.DonchianLow(btcCandles, donchianPeriod);
+        if (donchianLow <= 0m || current.Close >= donchianLow)
+        {
+            return TurtleCrashShortGateDecision.Rejected($"BTC close {current.Close:0.########} is not below Donchian({donchianPeriod}) low {donchianLow:0.########}.");
+        }
+
+        var adx = TradingIndicatorMath.Adx(btcCandles, adxPeriod);
+        if (adx < _strategyRoutingOptions.TurtleCrashShortBtcMinAdx)
+        {
+            return TurtleCrashShortGateDecision.Rejected($"BTC ADX {adx:0.####} < {_strategyRoutingOptions.TurtleCrashShortBtcMinAdx:0.####}.");
+        }
+
+        var minDropPercent = _strategyRoutingOptions.TurtleCrashShortBtcMinDropPercent;
+        if (minDropPercent > 0m)
+        {
+            var previousIndex = btcCandles.Length - 1 - dropLookback;
+            if (previousIndex < 0 || btcCandles[previousIndex].Close <= 0m)
+            {
+                return TurtleCrashShortGateDecision.Rejected($"BTC drop lookback {dropLookback} bars is unavailable.");
+            }
+
+            var previousClose = btcCandles[previousIndex].Close;
+            var dropPercent = (previousClose - current.Close) / previousClose * 100m;
+            if (dropPercent < minDropPercent)
+            {
+                return TurtleCrashShortGateDecision.Rejected($"BTC drop {dropPercent:0.####}% < {minDropPercent:0.####}% over {dropLookback} bars.");
+            }
+        }
+
+        var volumeMultiplier = _strategyRoutingOptions.TurtleCrashShortBtcVolumeMultiplier;
+        if (volumeMultiplier > 0m)
+        {
+            var volumeWindow = btcCandles.SkipLast(1).TakeLast(20).ToArray();
+            var volumeSma = volumeWindow.Length > 0 ? volumeWindow.Average(candle => candle.Volume) : 0m;
+            if (volumeSma > 0m && current.Volume < volumeSma * volumeMultiplier)
+            {
+                return TurtleCrashShortGateDecision.Rejected($"BTC volume {current.Volume:0.####} < SMA20 {volumeSma:0.####} * {volumeMultiplier:0.####}.");
+            }
+        }
+
+        var breadthDecision = await EvaluateTurtleCrashShortBreadthAsync(donchianPeriod, cancellationToken);
+        if (!breadthDecision.IsAllowed)
+        {
+            return TurtleCrashShortGateDecision.Rejected(breadthDecision.Reason);
+        }
+
+        return TurtleCrashShortGateDecision.Allowed(
+            $"BTC crash regime active: close {current.Close:0.########} < Donchian({donchianPeriod}) low {donchianLow:0.########}, ADX {adx:0.####}. {breadthDecision.Reason}");
+    }
+
+    private async Task<TurtleCrashShortGateDecision> EvaluateTurtleCrashShortBreadthAsync(
+        int donchianPeriod,
+        CancellationToken cancellationToken)
+    {
+        var topSymbols = _strategyRoutingOptions.TurtleCrashShortBreadthTopSymbols;
+        var minBelowPercent = _strategyRoutingOptions.TurtleCrashShortBreadthMinBelowPercent;
+        if (topSymbols <= 0 || minBelowPercent <= 0m)
+        {
+            return TurtleCrashShortGateDecision.Allowed("Breadth filter disabled.");
+        }
+
+        var tickers = await _bybitRestClient.GetTickersAsync(Category, cancellationToken);
+        var symbols = tickers
+            .Where(ticker => ticker.Symbol.EndsWith("USDT", StringComparison.OrdinalIgnoreCase))
+            .Where(ticker => !string.Equals(ticker.Symbol, "BTCUSDT", StringComparison.OrdinalIgnoreCase))
+            .Where(ticker => ticker.LastPrice > 0m && ticker.Turnover24h > 0m)
+            .OrderByDescending(ticker => ticker.Turnover24h)
+            .Take(Math.Clamp(topSymbols, 1, 100))
+            .Select(ticker => ticker.Symbol)
+            .ToArray();
+        if (symbols.Length == 0)
+        {
+            return TurtleCrashShortGateDecision.Rejected("Crash breadth rejected: no top symbols available.");
+        }
+
+        var maPeriod = Math.Max(2, _strategyRoutingOptions.TurtleCrashShortBreadthMaPeriod);
+        var lookback = Math.Max(donchianPeriod, maPeriod) + 5;
+        var checks = await Task.WhenAll(symbols.Select(symbol =>
+            EvaluateTurtleCrashShortBreadthSymbolAsync(symbol, donchianPeriod, maPeriod, lookback, cancellationToken)));
+        var usable = checks.Where(item => item.HasValue).Select(item => item!.Value).ToArray();
+        if (usable.Length == 0)
+        {
+            return TurtleCrashShortGateDecision.Rejected("Crash breadth rejected: no symbol candles available.");
+        }
+
+        var belowCount = usable.Count(isBelow => isBelow);
+        var belowPercent = belowCount / (decimal)usable.Length * 100m;
+        if (belowPercent < minBelowPercent)
+        {
+            return TurtleCrashShortGateDecision.Rejected(
+                $"Crash breadth {belowPercent:0.##}% < {minBelowPercent:0.##}% below Donchian/MA across {usable.Length} top symbols.");
+        }
+
+        return TurtleCrashShortGateDecision.Allowed(
+            $"Crash breadth {belowPercent:0.##}% >= {minBelowPercent:0.##}% below Donchian/MA across {usable.Length} top symbols.");
+    }
+
+    private async Task<bool?> EvaluateTurtleCrashShortBreadthSymbolAsync(
+        string symbol,
+        int donchianPeriod,
+        int maPeriod,
+        int lookback,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var candles = (await _bybitRestClient.GetKlinesAsync(
+                    Category,
+                    symbol,
+                    _strategyRoutingOptions.TurtleCrashShortBtcTimeframe,
+                    lookback,
+                    cancellationToken))
+                .OrderBy(candle => candle.OpenTime)
+                .ToArray();
+            if (candles.Length < Math.Max(donchianPeriod + 1, maPeriod + 1))
+            {
+                return null;
+            }
+
+            var current = candles[^1];
+            var donchianLow = TradingIndicatorMath.DonchianLow(candles, donchianPeriod);
+            var maWindow = candles.SkipLast(1).TakeLast(Math.Min(maPeriod, candles.Length - 1)).ToArray();
+            var ma = maWindow.Length > 0 ? maWindow.Average(candle => candle.Close) : 0m;
+            return donchianLow > 0m && ma > 0m && current.Close < donchianLow && current.Close < ma;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogDebug(ex, "Skipping {Symbol} in Turtle crash-short breadth check.", symbol);
+            return null;
+        }
+    }
+
     private static IReadOnlySet<int> ParseAllowedHours(string value) =>
         string.IsNullOrWhiteSpace(value)
             ? new HashSet<int>()
@@ -663,6 +856,22 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
                 .Select(part => int.TryParse(part, out var hour) ? hour : -1)
                 .Where(hour => hour is >= 0 and <= 23)
                 .ToHashSet();
+
+    private static IReadOnlySet<string> ParseAllowedTexts(string value) =>
+        string.IsNullOrWhiteSpace(value)
+            ? new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            : value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Where(part => !string.IsNullOrWhiteSpace(part))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+    private sealed record TurtleCrashShortGateDecision(bool IsApplicable, bool IsAllowed, string Reason)
+    {
+        public static TurtleCrashShortGateDecision NotApplicable { get; } = new(false, false, string.Empty);
+
+        public static TurtleCrashShortGateDecision Allowed(string reason) => new(true, true, reason);
+
+        public static TurtleCrashShortGateDecision Rejected(string reason) => new(true, false, reason);
+    }
 
     private async Task<NySessionSignal?> TryResolveScoreBasedSignalAsync(
         NySessionPoolItem item,
