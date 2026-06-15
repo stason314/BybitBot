@@ -57,6 +57,22 @@ public static class FuturesBacktestPage
     .run-field select { width: 100%; min-height: 36px; border: 1px solid var(--line); border-radius: 7px; padding: 7px 9px; font: inherit; background: #fff; }
     .run-field.check { min-width: 92px; }
     .run-field.check input { width: 18px; min-height: 18px; align-self: center; }
+    .config-panel { margin-bottom: 14px; }
+    .config-body { display: grid; gap: 10px; padding: 14px 16px; }
+    .config-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+    .config-toolbar span { color: var(--muted); font-size: 12px; }
+    textarea {
+      width: 100%;
+      min-height: 156px;
+      resize: vertical;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      padding: 10px 12px;
+      font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      color: var(--ink);
+      background: #fff;
+    }
+    textarea:disabled { background: #f0f2ef; color: var(--muted); }
     .panel, .metric { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
     .metric { padding: 14px; min-width: 0; }
     .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
@@ -207,6 +223,17 @@ public static class FuturesBacktestPage
       </div>
     </header>
 
+    <section class="panel config-panel">
+      <h2>JSON config</h2>
+      <div class="config-body">
+        <textarea id="configJsonInput" spellcheck="false" placeholder="{&quot;days&quot;:365,&quot;symbols&quot;:30,&quot;mode&quot;:&quot;TurtleOnly&quot;}"></textarea>
+        <div class="config-toolbar">
+          <button class="btn secondary" id="applyConfigJson" type="button">Apply JSON</button>
+          <span id="configJsonStatus">-</span>
+        </div>
+      </div>
+    </section>
+
     <section class="panel" style="margin-bottom:14px">
       <div class="progress-wrap">
         <div class="progress-top">
@@ -297,6 +324,91 @@ public static class FuturesBacktestPage
     let latestStatus = null;
     let settingsHydrated = false;
     let settingsDirty = false;
+    let jsonOnlySettings = {};
+    const requestFieldNames = [
+      'days',
+      'symbols',
+      'mode',
+      'turtleAllowedWeekdays',
+      'turtleAllowedNyHours',
+      'runNyBounceRouter',
+      'turtleAllowedDirections',
+      'turtleAllowedSystems',
+      'turtleRiskPerUnitPercent',
+      'turtleBreakoutAtrBufferMultiplier',
+      'turtleMinAdx',
+      'turtleVolumeMultiplier',
+      'turtleUseMarketRegimeFilter',
+      'turtleMarketRegimeTimeframe',
+      'enableRollingWalkForwardGate',
+      'rollingWalkForwardOptimizationDays',
+      'rollingWalkForwardOutOfSampleDays',
+      'rollingWalkForwardStepDays',
+      'rollingWalkForwardMinWindows',
+      'rollingWalkForwardMinPassPercent',
+      'entryNotionalUsdt',
+      'takerFeePercent',
+      'makerFeePercent',
+      'slippagePercent',
+      'fundingPercentPer8h',
+      'initialEquityUsdt',
+      'leverage',
+      'minLiquidationBufferPercent',
+      'maxTradeLossEquityPercent',
+      'maxProjectedDrawdownEquityPercent'
+    ];
+    const fieldAliases = {
+      capital: 'initialEquityUsdt',
+      initialEquity: 'initialEquityUsdt',
+      pairs: 'symbols',
+      turtleSide: 'turtleAllowedDirections',
+      turtleSys: 'turtleAllowedSystems',
+      turtleSystem: 'turtleAllowedSystems',
+      turtleSystems: 'turtleAllowedSystems',
+      turtleRisk: 'turtleRiskPerUnitPercent',
+      atrBuffer: 'turtleBreakoutAtrBufferMultiplier',
+      minAdx: 'turtleMinAdx',
+      volumeMultiplier: 'turtleVolumeMultiplier',
+      marketRegime: 'turtleUseMarketRegimeFilter',
+      marketRegimeTf: 'turtleMarketRegimeTimeframe',
+      rollingWf: 'enableRollingWalkForwardGate',
+      wfOptDays: 'rollingWalkForwardOptimizationDays',
+      wfOosDays: 'rollingWalkForwardOutOfSampleDays',
+      wfStepDays: 'rollingWalkForwardStepDays',
+      wfMinWindows: 'rollingWalkForwardMinWindows',
+      wfPass: 'rollingWalkForwardMinPassPercent',
+      weekdays: 'turtleAllowedWeekdays',
+      nyHours: 'turtleAllowedNyHours',
+      maxTradeLoss: 'maxTradeLossEquityPercent',
+      maxProjectedDrawdown: 'maxProjectedDrawdownEquityPercent',
+      maxDrawdown: 'maxProjectedDrawdownEquityPercent',
+      minLiquidationBuffer: 'minLiquidationBufferPercent'
+    };
+    const visibleFields = {
+      days: { id: 'daysInput', type: 'int', min: 1, max: 365, fallback: 90 },
+      symbols: { id: 'symbolsInput', type: 'int', min: 1, max: 200, fallback: 20 },
+      mode: { id: 'modeInput', type: 'string' },
+      runNyBounceRouter: { id: 'nyBounceInput', type: 'bool' },
+      turtleAllowedDirections: { id: 'turtleDirectionsInput', type: 'string' },
+      turtleAllowedSystems: { id: 'turtleSystemsInput', type: 'string' },
+      turtleRiskPerUnitPercent: { id: 'turtleRiskInput', type: 'decimal', min: 0, max: 100, fallback: 0 },
+      turtleBreakoutAtrBufferMultiplier: { id: 'turtleAtrBufferInput', type: 'decimal', min: 0, max: 10, fallback: 0.2 },
+      turtleMinAdx: { id: 'turtleAdxInput', type: 'decimal', min: 0, max: 100, fallback: 0 },
+      turtleVolumeMultiplier: { id: 'turtleVolumeInput', type: 'decimal', min: 0, max: 100, fallback: 0 },
+      turtleUseMarketRegimeFilter: { id: 'marketRegimeInput', type: 'bool' },
+      turtleMarketRegimeTimeframe: { id: 'marketRegimeTfInput', type: 'string' },
+      enableRollingWalkForwardGate: { id: 'rollingWfInput', type: 'bool' },
+      rollingWalkForwardOptimizationDays: { id: 'wfOptDaysInput', type: 'int', min: 1, max: 365, fallback: 120 },
+      rollingWalkForwardOutOfSampleDays: { id: 'wfOosDaysInput', type: 'int', min: 1, max: 365, fallback: 30 },
+      rollingWalkForwardStepDays: { id: 'wfStepDaysInput', type: 'int', min: 1, max: 365, fallback: 30 },
+      rollingWalkForwardMinWindows: { id: 'wfMinWindowsInput', type: 'int', min: 1, max: 100, fallback: 3 },
+      rollingWalkForwardMinPassPercent: { id: 'wfPassInput', type: 'decimal', min: 0, max: 100, fallback: 60 },
+      initialEquityUsdt: { id: 'initialEquityInput', type: 'decimal', min: 0.00000001, max: 999999999, fallback: 1000 },
+      turtleAllowedWeekdays: { id: 'weekdaysInput', type: 'string' },
+      turtleAllowedNyHours: { id: 'hoursInput', type: 'string' },
+      maxTradeLossEquityPercent: { id: 'maxTradeLossInput', type: 'decimal', min: 0, max: 100, fallback: 0 },
+      maxProjectedDrawdownEquityPercent: { id: 'maxDrawdownInput', type: 'decimal', min: 0, max: 100, fallback: 0 }
+    };
     const settingsFieldIds = [
       'daysInput',
       'symbolsInput',
@@ -309,6 +421,7 @@ public static class FuturesBacktestPage
       'turtleAdxInput',
       'turtleVolumeInput',
       'marketRegimeInput',
+      'marketRegimeTfInput',
       'rollingWfInput',
       'wfOptDaysInput',
       'wfOosDaysInput',
@@ -342,7 +455,7 @@ public static class FuturesBacktestPage
     }
 
     function readSettings() {
-      return {
+      const settings = {
         days: clampInt(byId('daysInput').value, 1, 365, 90),
         symbols: clampInt(byId('symbolsInput').value, 1, 200, 20),
         mode: byId('modeInput').value || 'ScoreBasedRouter',
@@ -367,34 +480,107 @@ public static class FuturesBacktestPage
         maxTradeLossEquityPercent: clampDecimal(byId('maxTradeLossInput').value, 0, 100, 0),
         maxProjectedDrawdownEquityPercent: clampDecimal(byId('maxDrawdownInput').value, 0, 100, 0)
       };
+      return sanitizeSettings({ ...jsonOnlySettings, ...settings });
     }
 
     function applySettings(settings) {
       if (!settings) return;
-      setValue('daysInput', settings.days);
-      setValue('symbolsInput', settings.symbols);
-      setValue('modeInput', settings.mode);
-      setChecked('nyBounceInput', settings.runNyBounceRouter);
-      setValue('turtleDirectionsInput', settings.turtleAllowedDirections);
-      setValue('turtleSystemsInput', settings.turtleAllowedSystems);
-      setValue('turtleRiskInput', settings.turtleRiskPerUnitPercent);
-      setValue('turtleAtrBufferInput', settings.turtleBreakoutAtrBufferMultiplier);
-      setValue('turtleAdxInput', settings.turtleMinAdx);
-      setValue('turtleVolumeInput', settings.turtleVolumeMultiplier);
-      setChecked('marketRegimeInput', settings.turtleUseMarketRegimeFilter);
-      setValue('marketRegimeTfInput', settings.turtleMarketRegimeTimeframe);
-      setChecked('rollingWfInput', settings.enableRollingWalkForwardGate);
-      setValue('wfOptDaysInput', settings.rollingWalkForwardOptimizationDays);
-      setValue('wfOosDaysInput', settings.rollingWalkForwardOutOfSampleDays);
-      setValue('wfStepDaysInput', settings.rollingWalkForwardStepDays);
-      setValue('wfMinWindowsInput', settings.rollingWalkForwardMinWindows);
-      setValue('wfPassInput', settings.rollingWalkForwardMinPassPercent);
-      setValue('initialEquityInput', settings.initialEquityUsdt);
-      setValue('weekdaysInput', settings.turtleAllowedWeekdays);
-      setValue('hoursInput', settings.turtleAllowedNyHours);
-      setValue('maxTradeLossInput', settings.maxTradeLossEquityPercent);
-      setValue('maxDrawdownInput', settings.maxProjectedDrawdownEquityPercent);
+      const normalized = sanitizeSettings(settings);
+      jsonOnlySettings = {};
+      for (const key of requestFieldNames) {
+        if (!Object.prototype.hasOwnProperty.call(normalized, key)) continue;
+        const field = visibleFields[key];
+        if (field) {
+          setFieldValue(field, normalized[key]);
+        } else {
+          jsonOnlySettings[key] = normalized[key];
+        }
+      }
+
+      syncConfigJson();
       settingsHydrated = true;
+    }
+
+    function applyConfigJson() {
+      let parsed;
+      try {
+        parsed = JSON.parse(byId('configJsonInput').value || '{}');
+      } catch (error) {
+        byId('configJsonStatus').textContent = `JSON error: ${error.message}`;
+        return;
+      }
+
+      const settings = sanitizeSettings(parsed);
+      applySettings(settings);
+      settingsDirty = true;
+      byId('configJsonStatus').textContent = `Applied ${Object.keys(settings).length} fields`;
+    }
+
+    function syncConfigJson() {
+      const textarea = byId('configJsonInput');
+      if (!textarea || settingsDirty && document.activeElement === textarea) return;
+      textarea.value = JSON.stringify(readSettings(), null, 2);
+    }
+
+    function sanitizeSettings(source) {
+      if (!source || typeof source !== 'object' || Array.isArray(source)) return {};
+      const result = {};
+      for (const [rawKey, rawValue] of Object.entries(source)) {
+        const key = resolveFieldName(rawKey);
+        if (!key || rawValue === undefined || rawValue === null) continue;
+        const field = visibleFields[key];
+        result[key] = field ? coerceFieldValue(field, rawValue) : coerceJsonOnlyValue(key, rawValue);
+      }
+
+      return result;
+    }
+
+    function resolveFieldName(rawKey) {
+      if (fieldAliases[rawKey]) return fieldAliases[rawKey];
+      if (requestFieldNames.includes(rawKey)) return rawKey;
+      const camelKey = rawKey ? rawKey.charAt(0).toLowerCase() + rawKey.slice(1) : rawKey;
+      if (fieldAliases[camelKey]) return fieldAliases[camelKey];
+      if (requestFieldNames.includes(camelKey)) return camelKey;
+      const lowerKey = String(rawKey || '').toLowerCase();
+      return requestFieldNames.find(field => field.toLowerCase() === lowerKey) || null;
+    }
+
+    function coerceJsonOnlyValue(key, value) {
+      if (key === 'leverage') return clampDecimal(value, 1, 1000, 2);
+      if (key === 'entryNotionalUsdt' || key === 'initialEquityUsdt') return clampDecimal(value, 0.00000001, 999999999, key === 'entryNotionalUsdt' ? 100 : 1000);
+      if (key === 'minLiquidationBufferPercent') return clampDecimal(value, 0, 100, 15);
+      if (key === 'takerFeePercent' || key === 'makerFeePercent' || key === 'slippagePercent' || key === 'fundingPercentPer8h') return clampDecimal(value, 0, 10, 0);
+      return value;
+    }
+
+    function setFieldValue(field, value) {
+      if (field.type === 'bool') {
+        setChecked(field.id, value);
+      } else {
+        setValue(field.id, value);
+      }
+    }
+
+    function coerceFieldValue(field, value) {
+      if (field.type === 'bool') return toBool(value);
+      if (field.type === 'int') return clampInt(value, field.min, field.max, field.fallback);
+      if (field.type === 'decimal') return clampDecimal(value, field.min, field.max, field.fallback);
+      if (field.id === 'modeInput') return normalizeMode(value);
+      return String(value ?? '');
+    }
+
+    function normalizeMode(value) {
+      const normalized = String(value || '').trim().toLowerCase();
+      if (normalized.includes('turtle')) return 'TurtleOnly';
+      if (normalized.includes('router') || normalized.includes('score')) return 'ScoreBasedRouter';
+      return String(value || 'ScoreBasedRouter');
+    }
+
+    function toBool(value) {
+      if (typeof value === 'boolean') return value;
+      if (typeof value === 'number') return value !== 0;
+      const normalized = String(value || '').trim().toLowerCase();
+      return ['1', 'true', 'yes', 'y', 'on'].includes(normalized);
     }
 
     function setValue(id, value) {
@@ -453,6 +639,7 @@ public static class FuturesBacktestPage
       byId('turtleAdxInput').disabled = Boolean(data.isRunning);
       byId('turtleVolumeInput').disabled = Boolean(data.isRunning);
       byId('marketRegimeInput').disabled = Boolean(data.isRunning);
+      byId('marketRegimeTfInput').disabled = Boolean(data.isRunning);
       byId('rollingWfInput').disabled = Boolean(data.isRunning);
       byId('wfOptDaysInput').disabled = Boolean(data.isRunning);
       byId('wfOosDaysInput').disabled = Boolean(data.isRunning);
@@ -464,6 +651,8 @@ public static class FuturesBacktestPage
       byId('hoursInput').disabled = Boolean(data.isRunning);
       byId('maxTradeLossInput').disabled = Boolean(data.isRunning);
       byId('maxDrawdownInput').disabled = Boolean(data.isRunning);
+      byId('configJsonInput').disabled = Boolean(data.isRunning);
+      byId('applyConfigJson').disabled = Boolean(data.isRunning);
       byId('copyDiagnostics').disabled = !data.result;
 
       const result = data.result;
@@ -773,9 +962,10 @@ public static class FuturesBacktestPage
     byId('start').addEventListener('click', () => start().catch(error => { byId('status').textContent = error.message; }));
     byId('stop').addEventListener('click', () => stop().catch(error => { byId('status').textContent = error.message; }));
     byId('copyDiagnostics').addEventListener('click', () => copyDiagnostics());
+    byId('applyConfigJson').addEventListener('click', () => applyConfigJson());
     for (const id of settingsFieldIds) {
-      byId(id).addEventListener('input', () => { settingsDirty = true; });
-      byId(id).addEventListener('change', () => { settingsDirty = true; });
+      byId(id).addEventListener('input', () => { settingsDirty = true; syncConfigJson(); });
+      byId(id).addEventListener('change', () => { settingsDirty = true; syncConfigJson(); });
     }
 
     byId('copyDiagnostics').disabled = true;
