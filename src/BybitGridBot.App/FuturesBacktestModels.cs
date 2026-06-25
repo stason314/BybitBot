@@ -172,6 +172,8 @@ public sealed class FuturesBacktestResult
 
     public decimal TurtleCrashShortMaxDrawdownPercent { get; init; }
 
+    public decimal TurtleCrashShortOverrideSizeMultiplier { get; init; }
+
     public int OpenAtBacktestEndCount { get; init; }
 
     public decimal OpenAtBacktestEndUnrealizedPnl { get; init; }
@@ -200,11 +202,15 @@ public sealed class FuturesBacktestResult
 
     public int LiveAllowedStrategyGatesCount => EligibleStrategySymbolDirections.Count;
 
+    public int CrashOverrideStrategyGatesCount => CrashOverrideStrategySymbolDirections.Count;
+
     public IReadOnlyList<string> EligibleSymbols { get; init; } = [];
 
     public IReadOnlyList<string> ExcludedSymbols { get; init; } = [];
 
     public IReadOnlyList<string> EligibleStrategySymbolDirections { get; init; } = [];
+
+    public IReadOnlyList<string> CrashOverrideStrategySymbolDirections { get; init; } = [];
 
     public IReadOnlyList<string> ExcludedStrategySymbolDirections { get; init; } = [];
 
@@ -311,7 +317,11 @@ public sealed class FuturesBacktestGateDiagnostic
 
     public bool IsLiveAllowed { get; init; }
 
+    public bool IsCrashOverrideAllowed { get; init; }
+
     public string Reason { get; init; } = string.Empty;
+
+    public string CrashOverrideReason { get; init; } = string.Empty;
 
     public int OptimizationTrades { get; init; }
 

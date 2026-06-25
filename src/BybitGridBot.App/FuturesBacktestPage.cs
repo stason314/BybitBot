@@ -262,18 +262,18 @@ public static class FuturesBacktestPage
       <div class="metric"><div class="label">Average R</div><div class="value" id="averageR">-</div></div>
       <div class="metric"><div class="label">Trades/day</div><div class="value" id="tradesDay">-</div></div>
       <div class="metric"><div class="label">Breakouts</div><div class="value" id="breakouts">-</div></div>
-      <div class="metric"><div class="label">Live allowed</div><div class="value" id="eligibleCount">-</div></div>
+      <div class="metric"><div class="label">Live gates</div><div class="value" id="eligibleCount">-</div></div>
       <div class="metric"><div class="label">Open @ end</div><div class="value" id="openAtEnd">-</div></div>
     </section>
 
     <section class="grid">
       <div class="panel">
         <h2>Walk-forward gates</h2>
-        <table><thead><tr><th>Allowed strategy:symbol:direction</th><th>Excluded</th></tr></thead><tbody id="wfSymbols"><tr><td colspan="2" class="empty">Нет данных</td></tr></tbody></table>
+        <table><thead><tr><th>Standard live</th><th>Crash override</th><th>Excluded</th></tr></thead><tbody id="wfSymbols"><tr><td colspan="3" class="empty">Нет данных</td></tr></tbody></table>
       </div>
       <div class="panel">
         <h2>Gate diagnostics</h2>
-        <table><thead><tr><th>Gate</th><th>Live</th><th>Reason</th><th>Opt</th><th>OOS closed</th><th>OOS open</th><th>OOS forced</th></tr></thead><tbody id="gateDiagnostics"><tr><td colspan="7" class="empty">Нет данных</td></tr></tbody></table>
+        <table><thead><tr><th>Gate</th><th>Live</th><th>Crash</th><th>Reason</th><th>Opt</th><th>OOS closed</th><th>OOS open</th><th>OOS forced</th></tr></thead><tbody id="gateDiagnostics"><tr><td colspan="8" class="empty">Нет данных</td></tr></tbody></table>
       </div>
       <div class="panel">
         <h2>Walk-forward metrics</h2>
@@ -702,10 +702,11 @@ public static class FuturesBacktestPage
       byId('tradesDay').textContent = fmt.format(m.tradesPerDay || 0);
       byId('breakouts').textContent = `${result.falseBreakoutCount || 0} / ${result.trueBreakoutBlockedCount || 0}`;
       const eligibleGates = Array.isArray(result.eligibleStrategySymbolDirections) ? result.eligibleStrategySymbolDirections : [];
+      const crashOverrideGates = Array.isArray(result.crashOverrideStrategySymbolDirections) ? result.crashOverrideStrategySymbolDirections : [];
       const excludedGates = Array.isArray(result.excludedStrategySymbolDirections) ? result.excludedStrategySymbolDirections : [];
-      byId('eligibleCount').textContent = `${Number(result.liveAllowedStrategyGatesCount ?? eligibleGates.length)}`;
+      byId('eligibleCount').textContent = `${eligibleGates.length} + ${crashOverrideGates.length}`;
       byId('openAtEnd').textContent = `${result.openAtBacktestEndCount || 0} (${pnl(openUnrealizedPnl)})`;
-      byId('wfSymbols').innerHTML = walkForwardSymbolRows(eligibleGates, excludedGates);
+      byId('wfSymbols').innerHTML = walkForwardSymbolRows(eligibleGates, crashOverrideGates, excludedGates);
       byId('gateDiagnostics').innerHTML = gateDiagnosticRows(result.gateDiagnostics || []);
       byId('wfMetrics').innerHTML = walkForwardMetricRows(result);
       byId('timings').innerHTML = timingRows(result.timings || []);
@@ -741,9 +742,9 @@ public static class FuturesBacktestPage
         </tr>`).join('') : '<tr><td colspan="5" class="empty">Нет данных</td></tr>';
     }
 
-    function walkForwardSymbolRows(eligible, excluded) {
-      if (!eligible.length && !excluded.length) return '<tr><td colspan="2" class="empty">Нет данных</td></tr>';
-      return `<tr><td>${eligible.slice(0, 60).join(', ') || '-'}</td><td>${excluded.slice(0, 60).join(', ') || '-'}</td></tr>`;
+    function walkForwardSymbolRows(eligible, crashOverride, excluded) {
+      if (!eligible.length && !crashOverride.length && !excluded.length) return '<tr><td colspan="3" class="empty">Нет данных</td></tr>';
+      return `<tr><td>${eligible.slice(0, 60).join(', ') || '-'}</td><td>${crashOverride.slice(0, 60).join(', ') || '-'}</td><td>${excluded.slice(0, 60).join(', ') || '-'}</td></tr>`;
     }
 
     function walkForwardMetricRows(result) {
@@ -755,7 +756,7 @@ public static class FuturesBacktestPage
       return [
         [optimizationLabel, optimization],
         [outOfSampleLabel, outOfSample],
-        [`${outOfSampleLabel} live-gated`, filteredOutOfSample]
+        [`${outOfSampleLabel} tradable`, filteredOutOfSample]
       ].map(([label, item]) => `
         <tr>
           <td>${label}</td>
@@ -770,12 +771,13 @@ public static class FuturesBacktestPage
         <tr>
           <td>${item.key || '-'}</td>
           <td>${item.isLiveAllowed ? 'yes' : 'no'}</td>
+          <td>${item.isCrashOverrideAllowed ? 'yes' : 'no'}</td>
           <td>${item.reason || '-'}</td>
           <td>${item.optimizationTrades || 0} / ${pnl(item.optimizationNetPnl)} / PF ${fmt.format(item.optimizationProfitFactor || 0)}</td>
           <td>${item.oosClosedTrades || 0} / ${pnl(item.oosClosedNetPnl)} / PF ${fmt.format(item.oosClosedProfitFactor || 0)} / DD ${pct(item.oosClosedMaxDrawdownPercent)} / medR ${fmt.format(item.oosClosedMedianR || 0)}</td>
           <td>${item.oosOpenTrades || 0} / ${pnl(item.oosOpenNetPnl)} / MTM ${pnl(item.oosMarkToMarketNetPnl)} / RWF ${item.rollingWalkForwardPassedWindows || 0}/${item.rollingWalkForwardWindows || 0} ${pct(item.rollingWalkForwardPassPercent)}</td>
           <td>${item.oosForcedClosedTrades || 0} / ${pnl(item.oosForcedClosedNetPnl)} / DD ${pct(item.oosForcedClosedMaxDrawdownPercent)}</td>
-        </tr>`).join('') : '<tr><td colspan="7" class="empty">Нет данных</td></tr>';
+        </tr>`).join('') : '<tr><td colspan="8" class="empty">Нет данных</td></tr>';
     }
 
     function timingRows(items) {
@@ -867,10 +869,12 @@ public static class FuturesBacktestPage
         `turtleCrashShortPnlWithoutTop1=${Number(result.turtleCrashShortPnlWithoutTop1 || 0)}`,
         `turtleCrashShortPnlWithoutTop2=${Number(result.turtleCrashShortPnlWithoutTop2 || 0)}`,
         `turtleCrashShortMaxDrawdownPercent=${Number(result.turtleCrashShortMaxDrawdownPercent || 0)}`,
+        `turtleCrashShortOverrideSizeMultiplier=${Number(result.turtleCrashShortOverrideSizeMultiplier || 0)}`,
         `optimizationWindow=${result.optimizationWindowLabel || '-'}`,
         `outOfSampleWindow=${result.outOfSampleWindowLabel || '-'}`,
         `liveUseEligibleStrategyGatesOnly=${Boolean(result.liveUseEligibleStrategyGatesOnly)}`,
-        `liveAllowedStrategyGatesCount=${Number(result.liveAllowedStrategyGatesCount || 0)}`,
+        `standardLiveAllowedStrategyGatesCount=${(result.eligibleStrategySymbolDirections || []).length}`,
+        `crashOverrideStrategyGatesCount=${(result.crashOverrideStrategySymbolDirections || []).length}`,
         `liveEligibleGateSizeMultiplier=${Number(result.liveEligibleGateSizeMultiplier || 0)}`,
         `liveIneligibleGateSizeMultiplier=${Number(result.liveIneligibleGateSizeMultiplier || 0)}`,
         `liveEligibleDirections=${result.liveEligibleDirections || '-'}`,
@@ -881,9 +885,10 @@ public static class FuturesBacktestPage
         metricBlock('MAIN_OOS_ALL_SYMBOLS', result.metrics || {}),
         metricBlock('OPTIMIZATION', result.optimizationMetrics || {}),
         metricBlock('OUT_OF_SAMPLE_ALL_SYMBOLS', result.outOfSampleMetrics || {}),
-        metricBlock('OUT_OF_SAMPLE_LIVE_GATED', result.filteredOutOfSampleMetrics || {}),
+        metricBlock('OUT_OF_SAMPLE_TRADABLE_STANDARD_PLUS_CRASH_OVERRIDE', result.filteredOutOfSampleMetrics || {}),
         '',
-        `liveAllowedClosedStrategySymbolDirections(${(result.eligibleStrategySymbolDirections || []).length})=${(result.eligibleStrategySymbolDirections || []).join(', ') || '-'}`,
+        `standardLiveAllowedClosedStrategySymbolDirections(${(result.eligibleStrategySymbolDirections || []).length})=${(result.eligibleStrategySymbolDirections || []).join(', ') || '-'}`,
+        `crashOverrideStrategySymbolDirections(${(result.crashOverrideStrategySymbolDirections || []).length})=${(result.crashOverrideStrategySymbolDirections || []).join(', ') || '-'}`,
         `diagnosticOpenProfitableStrategySymbolDirections(${(result.openProfitableStrategySymbolDirections || []).length})=${(result.openProfitableStrategySymbolDirections || []).join(', ') || '-'}`,
         `diagnosticMarkToMarketProfitableStrategySymbolDirections(${(result.markToMarketProfitableStrategySymbolDirections || []).length})=${(result.markToMarketProfitableStrategySymbolDirections || []).join(', ') || '-'}`,
         `watchlistStrategySymbolDirections(${(result.watchlistStrategySymbolDirections || []).length})=${(result.watchlistStrategySymbolDirections || []).join(', ') || '-'}`,

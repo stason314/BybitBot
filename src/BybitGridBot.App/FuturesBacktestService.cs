@@ -23,6 +23,8 @@ public interface IFuturesBacktestService
 
     bool IsStrategySymbolDirectionAllowedForTrading(string strategyName, string system, string symbol, string direction, bool requireCompletedBacktest);
 
+    bool IsStrategySymbolDirectionAllowedForCrashOverride(string strategyName, string system, string symbol, string direction, bool requireCompletedBacktest);
+
     decimal ResolveStrategySymbolDirectionSizeMultiplier(string strategyName, string symbol, string direction, bool requireCompletedBacktest);
 
     decimal ResolveStrategySymbolDirectionSizeMultiplier(string strategyName, string system, string symbol, string direction, bool requireCompletedBacktest);
@@ -154,9 +156,11 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                 return !RequiresEligibleStrategyGates(requireCompletedBacktest);
             }
 
-            if (result.EligibleStrategySymbolDirections.Count > 0)
+            if (result.EligibleStrategySymbolDirections.Count > 0 ||
+                result.CrashOverrideStrategySymbolDirections.Count > 0)
             {
                 return result.EligibleStrategySymbolDirections
+                    .Concat(result.CrashOverrideStrategySymbolDirections)
                     .Any(key => IsStrategyGateKeyForSymbol(key, symbol));
             }
 
@@ -225,6 +229,42 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             }
 
             return false;
+        }
+    }
+
+    public bool IsStrategySymbolDirectionAllowedForCrashOverride(
+        string strategyName,
+        string system,
+        string symbol,
+        string direction,
+        bool requireCompletedBacktest)
+    {
+        if (CanBypassStrategyGatesForPaper())
+        {
+            return true;
+        }
+
+        if (!IsLiveDirectionAllowed(direction))
+        {
+            return false;
+        }
+
+        lock (_sync)
+        {
+            var result = _status.Result;
+            if (result is null)
+            {
+                return false;
+            }
+
+            var key = BuildStrategyGateKey(strategyName, system, symbol, direction);
+            if (result.CrashOverrideStrategySymbolDirections.Contains(key, StringComparer.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            return string.IsNullOrWhiteSpace(system) &&
+                result.CrashOverrideStrategySymbolDirections.Any(item => IsStrategyGateKeyForIdentity(item, strategyName, symbol, direction));
         }
     }
 
@@ -3015,8 +3055,8 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             outOfSampleTrades,
             btcMarketRegime,
             settings.InitialEquityUsdt);
-        var turtleCrashShortGateKeys = turtleCrashShortGate.Keys;
-        var turtleCrashShortGateSet = turtleCrashShortGateKeys.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var crashOverrideStrategySymbolDirections = turtleCrashShortGate.Keys;
+        var crashOverrideStrategyGateSet = crashOverrideStrategySymbolDirections.ToHashSet(StringComparer.OrdinalIgnoreCase);
         var eligibleStrategySymbolDirections = optimizationStrategyGates
             .Where(item => IsLiveGateStrategyEnabled(item.StrategyName))
             .Where(item => IsLiveDirectionAllowed(item.Direction))
@@ -3033,7 +3073,6 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                 rollingWalkForwardMap.TryGetValue(BuildStrategyGateKey(item), out var rolling) &&
                 rolling.IsLiveAllowed)
             .Select(BuildStrategyGateKey)
-            .Concat(turtleCrashShortGateKeys)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .OrderBy(key => key)
             .ToArray();
@@ -3042,9 +3081,12 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             outOfSampleMarkToMarketStrategyGates,
             _strategyRoutingOptions.MinOosTradesForStrategySymbolGating);
         var eligibleStrategyGateSet = eligibleStrategySymbolDirections.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var tradableStrategyGateSet = eligibleStrategySymbolDirections
+            .Concat(crashOverrideStrategySymbolDirections)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
         var watchlistStrategySymbolDirections = BuildWatchlistStrategyGateKeys(
             outOfSampleStrategyGates,
-            eligibleStrategyGateSet);
+            tradableStrategyGateSet);
         var gateDiagnostics = BuildGateDiagnostics(
             optimizationStrategyGateMap,
             outOfSampleStrategyGates,
@@ -3054,7 +3096,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             robustnessPassedWindows,
             rollingWalkForwardMap,
             eligibleStrategyGateSet,
-            turtleCrashShortGateSet,
+            crashOverrideStrategyGateSet,
             turtleCrashShortGate);
         var walkForwardStrategyGates = BuildWalkForwardStrategyGates(
             optimizationTrades,
@@ -3065,11 +3107,11 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             periodEnd,
             settings.InitialEquityUsdt);
         var filteredOutOfSampleTrades = outOfSampleTrades
-            .Where(trade => eligibleStrategyGateSet.Contains(BuildStrategyGateKey(trade)))
+            .Where(trade => tradableStrategyGateSet.Contains(BuildStrategyGateKey(trade)))
             .OrderBy(trade => trade.EntryTime)
             .ToArray();
         var filteredOutOfSampleOpenTrades = outOfSampleOpenTrades
-            .Where(trade => eligibleStrategyGateSet.Contains(BuildStrategyGateKey(trade)))
+            .Where(trade => tradableStrategyGateSet.Contains(BuildStrategyGateKey(trade)))
             .OrderBy(trade => trade.EntryTime)
             .ToArray();
         var tradedSymbols = closedTrades
@@ -3085,7 +3127,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
         var excludedStrategySymbolDirections = tradedStrategyGates
-            .Where(key => !eligibleStrategyGateSet.Contains(key))
+            .Where(key => !tradableStrategyGateSet.Contains(key))
             .OrderBy(key => key)
             .ToArray();
         var publicTrades = outOfSampleTrades.Select(ToPublicTrade).ToArray();
@@ -3137,6 +3179,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             TurtleCrashShortPnlWithoutTop1 = turtleCrashShortGate.PnlWithoutTop1,
             TurtleCrashShortPnlWithoutTop2 = turtleCrashShortGate.PnlWithoutTop2,
             TurtleCrashShortMaxDrawdownPercent = turtleCrashShortGate.MaxDrawdownPercent,
+            TurtleCrashShortOverrideSizeMultiplier = _strategyRoutingOptions.TurtleCrashShortSizeMultiplier,
             OpenAtBacktestEndCount = openAtBacktestEndTrades.Length,
             OpenAtBacktestEndUnrealizedPnl = openAtBacktestEndTrades.Sum(trade => trade.NetPnl),
             InitialEquityUsdt = settings.InitialEquityUsdt,
@@ -3159,6 +3202,7 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
             EligibleSymbols = eligibleSymbols,
             ExcludedSymbols = excludedSymbols,
             EligibleStrategySymbolDirections = eligibleStrategySymbolDirections,
+            CrashOverrideStrategySymbolDirections = crashOverrideStrategySymbolDirections,
             ExcludedStrategySymbolDirections = excludedStrategySymbolDirections,
             OpenProfitableStrategySymbolDirections = openProfitableStrategySymbolDirections,
             MarkToMarketProfitableStrategySymbolDirections = markToMarketProfitableStrategySymbolDirections,
@@ -3500,35 +3544,118 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
 
         var allOosGateMap = BuildStrategyGatePerformance(candidateTrades, initialEquity)
             .ToDictionary(BuildStrategyGateKey, StringComparer.OrdinalIgnoreCase);
-        var keys = BuildStrategyGatePerformance(crashTrades, initialEquity)
-            .Where(gate => IsLiveGateStrategyEnabled(gate.StrategyName))
-            .Where(gate => IsLiveDirectionAllowed(gate.Direction))
-            .Where(gate => allowedSystems.Count == 0 || allowedSystems.Contains(gate.System))
-            .Where(gate => gate.NetPnl > 0m && gate.AverageR > 0m)
-            .Where(gate =>
-                allOosGateMap.TryGetValue(BuildStrategyGateKey(gate), out var allOosGate) &&
-                (allOosGate.NetPnl >= 0m || allOosGate.MaxDrawdownPercent < 1.5m))
-            .Select(BuildStrategyGateKey)
+        var crashTradesByKey = GroupTradesByGate(crashTrades);
+        var perSymbolReasons = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var keys = new List<string>();
+        foreach (var gate in BuildStrategyGatePerformance(crashTrades, initialEquity).OrderBy(BuildStrategyGateKey))
+        {
+            var key = BuildStrategyGateKey(gate);
+            crashTradesByKey.TryGetValue(key, out var symbolCrashTrades);
+            var rejectReason = BuildTurtleCrashShortPerSymbolRejectReason(
+                gate,
+                symbolCrashTrades ?? [],
+                allOosGateMap,
+                allowedSystems);
+            if (string.IsNullOrWhiteSpace(rejectReason))
+            {
+                keys.Add(key);
+                perSymbolReasons[key] =
+                    $"Crash override selected: crashTrades={gate.TradesCount}, netPnl={gate.NetPnl:0.####}, avgR={gate.AverageR:0.####}, largestWin={gate.LargestWinGrossProfitPercent:0.####}% of gross profit.";
+            }
+            else
+            {
+                perSymbolReasons[key] = rejectReason;
+            }
+        }
+
+        var allowedKeys = keys
             .OrderBy(key => key)
             .ToArray();
-        if (keys.Length == 0)
+        if (allowedKeys.Length == 0)
         {
             return TurtleCrashShortPortfolioGateResult.Rejected(
                 "Crash OOS profile passed, but no per-symbol Turtle Short gate passed crash-regime and all-OOS filters.",
                 candidateTrades.Length,
                 crashTrades.Length,
-                metrics);
+                metrics,
+                perSymbolReasons);
         }
 
         return new TurtleCrashShortPortfolioGateResult(
-            keys,
+            allowedKeys,
             $"Allowed by Turtle crash-short portfolio gate: regimeTrades={crashTrades.Length}, netPnl={metrics.NetPnl:0.####}, pnlWithoutTop1={metrics.PnlWithoutTop1:0.####}, pnlWithoutTop2={metrics.PnlWithoutTop2:0.####}, maxDD={metrics.MaxDrawdownPercent:0.####}%.",
             candidateTrades.Length,
             crashTrades.Length,
             metrics.NetPnl,
             metrics.PnlWithoutTop1,
             metrics.PnlWithoutTop2,
-            metrics.MaxDrawdownPercent);
+            metrics.MaxDrawdownPercent,
+            perSymbolReasons);
+    }
+
+    private string BuildTurtleCrashShortPerSymbolRejectReason(
+        StrategyGatePerformance gate,
+        IReadOnlyList<BacktestTradeInternal> symbolCrashTrades,
+        IReadOnlyDictionary<string, StrategyGatePerformance> allOosGateMap,
+        IReadOnlySet<string> allowedSystems)
+    {
+        if (!IsLiveGateStrategyEnabled(gate.StrategyName))
+        {
+            return "Crash override rejected: strategy is not live-gate enabled.";
+        }
+
+        if (!IsLiveDirectionAllowed(gate.Direction))
+        {
+            return "Crash override rejected: direction is not live-eligible.";
+        }
+
+        if (allowedSystems.Count > 0 && !allowedSystems.Contains(gate.System))
+        {
+            return $"Crash override rejected: Turtle system {gate.System} is not in crash-short systems {_strategyRoutingOptions.TurtleCrashShortAllowedSystems}.";
+        }
+
+        var minPerSymbolTrades = Math.Max(1, _strategyRoutingOptions.TurtleCrashShortMinPerSymbolOosTrades);
+        if (gate.TradesCount < minPerSymbolTrades)
+        {
+            return $"Crash override rejected: per-symbol crash OOS trades {gate.TradesCount} < {minPerSymbolTrades}.";
+        }
+
+        if (gate.NetPnl <= 0m)
+        {
+            return $"Crash override rejected: per-symbol crash OOS PnL {gate.NetPnl:0.####} <= 0.";
+        }
+
+        if (gate.AverageR <= 0m)
+        {
+            return $"Crash override rejected: per-symbol crash AvgR {gate.AverageR:0.####} <= 0.";
+        }
+
+        var pnlWithoutTop1 = CalculatePnlWithoutLargestWinningTrade(symbolCrashTrades);
+        if (_strategyRoutingOptions.TurtleCrashShortRequirePerSymbolOosWithoutTop1Positive &&
+            pnlWithoutTop1 <= 0m)
+        {
+            return $"Crash override rejected: per-symbol crash PnL without top1 {pnlWithoutTop1:0.####} <= 0.";
+        }
+
+        var maxLargestWinPercent = _strategyRoutingOptions.TurtleCrashShortMaxPerSymbolLargestWinGrossProfitPercent;
+        if (maxLargestWinPercent > 0m &&
+            gate.LargestWinGrossProfitPercent > maxLargestWinPercent)
+        {
+            return $"Crash override rejected: per-symbol largest win {gate.LargestWinGrossProfitPercent:0.####}% of gross profit > {maxLargestWinPercent:0.####}%.";
+        }
+
+        var key = BuildStrategyGateKey(gate);
+        if (!allOosGateMap.TryGetValue(key, out var allOosGate))
+        {
+            return "Crash override rejected: no all-OOS per-symbol profile.";
+        }
+
+        if (allOosGate.NetPnl < 0m && allOosGate.MaxDrawdownPercent >= 1.5m)
+        {
+            return $"Crash override rejected: all-OOS PnL {allOosGate.NetPnl:0.####} < 0 and DD {allOosGate.MaxDrawdownPercent:0.####}% >= 1.5%.";
+        }
+
+        return string.Empty;
     }
 
     private bool IsTurtleCrashShortBacktestRegimeAllowed(
@@ -3606,13 +3733,15 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
         decimal NetPnl,
         decimal PnlWithoutTop1,
         decimal PnlWithoutTop2,
-        decimal MaxDrawdownPercent)
+        decimal MaxDrawdownPercent,
+        IReadOnlyDictionary<string, string> PerSymbolReasons)
     {
         public static TurtleCrashShortPortfolioGateResult Rejected(
             string reason,
             int candidateTrades = 0,
             int regimeTrades = 0,
-            FuturesBacktestMetrics? metrics = null) =>
+            FuturesBacktestMetrics? metrics = null,
+            IReadOnlyDictionary<string, string>? perSymbolReasons = null) =>
             new(
                 [],
                 reason,
@@ -3621,7 +3750,8 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                 metrics?.NetPnl ?? 0m,
                 metrics?.PnlWithoutTop1 ?? 0m,
                 metrics?.PnlWithoutTop2 ?? 0m,
-                metrics?.MaxDrawdownPercent ?? 0m);
+                metrics?.MaxDrawdownPercent ?? 0m,
+                perSymbolReasons ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase));
     }
 
     private static decimal CalculatePnlWithoutLargestWinningTrade(IReadOnlyList<BacktestTradeInternal> trades)
@@ -3701,9 +3831,11 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                     (turtleCrashShortAllowedSystems.Count == 0 || turtleCrashShortAllowedSystems.Contains(identity.System));
                 robustnessPassedWindows.TryGetValue(key, out var passedWindows);
                 var standardGateReason = BuildGateRejectReason(optimization, oosClosed, passedWindows, rollingWalkForward);
-                var turtleCrashShortRejectReason = turtleCrashShortGate.Keys.Count > 0
-                    ? "Portfolio crash gate passed, but this symbol was not selected by per-symbol crash gate."
-                    : $"Turtle crash-short portfolio gate rejected: {turtleCrashShortGate.Reason}";
+                var crashOverrideReason = turtleCrashShortGate.PerSymbolReasons.TryGetValue(key, out var perSymbolCrashReason)
+                    ? perSymbolCrashReason
+                    : turtleCrashShortGate.Keys.Count > 0
+                        ? "Portfolio crash gate passed, but this symbol was not selected by per-symbol crash gate."
+                        : $"Turtle crash-short portfolio gate rejected: {turtleCrashShortGate.Reason}";
                 return new FuturesBacktestGateDiagnostic
                 {
                     Key = key,
@@ -3712,13 +3844,17 @@ public sealed class FuturesBacktestService : IFuturesBacktestService
                     Symbol = identity?.Symbol ?? string.Empty,
                     Direction = identity?.Direction ?? string.Empty,
                     IsLiveAllowed = isLiveAllowed,
+                    IsCrashOverrideAllowed = isTurtleCrashShortAllowed,
                     Reason = isLiveAllowed
-                        ? isTurtleCrashShortAllowed
-                            ? "Allowed by Turtle crash-short portfolio gate: OOS crash profile passed without optimization/rolling WF."
-                            : "Allowed by closed optimization, closed OOS edge, robustness windows, and rolling walk-forward."
+                        ? "Allowed by closed optimization, closed OOS edge, robustness windows, and rolling walk-forward."
+                        : isTurtleCrashShortAllowed
+                            ? $"Crash override allowed separately; standard gate: {standardGateReason}"
                         : isTurtleCrashShortCandidate && _strategyRoutingOptions.TurtleCrashShortGateEnabled
-                            ? $"{turtleCrashShortRejectReason} Standard gate: {standardGateReason}"
+                            ? $"{crashOverrideReason} Standard gate: {standardGateReason}"
                             : standardGateReason,
+                    CrashOverrideReason = isTurtleCrashShortCandidate && _strategyRoutingOptions.TurtleCrashShortGateEnabled
+                        ? crashOverrideReason
+                        : string.Empty,
                     OptimizationTrades = optimization?.TradesCount ?? 0,
                     OptimizationNetPnl = optimization?.NetPnl ?? 0m,
                     OptimizationProfitFactor = optimization?.ProfitFactor ?? 0m,

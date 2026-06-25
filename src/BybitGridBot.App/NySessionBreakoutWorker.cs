@@ -543,41 +543,56 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
                 continue;
             }
 
-            if (!IsLiveHourAllowed(signal.SignalCandleOpenTime))
+            var isCrashShortCandidate = IsTurtleCrashShortCandidate(signal);
+            var isStandardHourAllowed = IsLiveHourAllowed(signal.SignalCandleOpenTime);
+            var isCrashShortHourAllowed = isCrashShortCandidate && IsTurtleCrashShortLiveHourAllowed(signal.SignalCandleOpenTime);
+            if (!isStandardHourAllowed && !isCrashShortHourAllowed)
             {
                 MarkSignalHandled(item.Symbol, signal.SignalCandleOpenTime);
                 AddEvent(item.Symbol, "warning", $"{signal.Pattern}:{item.Symbol}:{signal.Side} skipped by NY hour gate.");
                 continue;
             }
 
-            if (IsTurtleSignal(signal) && !IsLiveTurtleSystemAllowed(signal.TurtleSystem))
+            var isStandardTurtleSystemAllowed = !IsTurtleSignal(signal) || IsLiveTurtleSystemAllowed(signal.TurtleSystem);
+            var isCrashShortTurtleSystemAllowed = isCrashShortCandidate && IsTurtleCrashShortSystemAllowed(signal.TurtleSystem);
+            if (!isStandardTurtleSystemAllowed && !isCrashShortTurtleSystemAllowed)
             {
                 MarkSignalHandled(item.Symbol, signal.SignalCandleOpenTime);
                 AddEvent(item.Symbol, "warning", $"{signal.Pattern}:{signal.TurtleSystem}:{item.Symbol}:{signal.Side} skipped by Turtle system gate.");
                 continue;
             }
 
-            var crashShortGate = await EvaluateTurtleCrashShortGateAsync(signal, cancellationToken);
-            if (crashShortGate.IsApplicable && !crashShortGate.IsAllowed)
-            {
-                MarkSignalHandled(item.Symbol, signal.SignalCandleOpenTime);
-                AddEvent(item.Symbol, "warning", $"{signal.Pattern}:{signal.TurtleSystem}:{item.Symbol}:{signal.Side} skipped by crash-regime gate. {crashShortGate.Reason}");
-                continue;
-            }
-
-            if (!crashShortGate.IsAllowed && !_backtestService.IsStrategySymbolDirectionAllowedForTrading(
+            var isStandardBacktestGateAllowed =
+                isStandardHourAllowed &&
+                isStandardTurtleSystemAllowed &&
+                _backtestService.IsStrategySymbolDirectionAllowedForTrading(
                     signal.Pattern,
                     signal.TurtleSystem,
                     item.Symbol,
                     signal.Side,
-                    _options.RequireBacktestSymbolFilter))
+                    _options.RequireBacktestSymbolFilter);
+            var crashShortGate = await EvaluateTurtleCrashShortGateAsync(signal, cancellationToken);
+            var isCrashOverrideBacktestGateAllowed =
+                isCrashShortHourAllowed &&
+                isCrashShortTurtleSystemAllowed &&
+                crashShortGate.IsAllowed &&
+                _backtestService.IsStrategySymbolDirectionAllowedForCrashOverride(
+                    signal.Pattern,
+                    signal.TurtleSystem,
+                    item.Symbol,
+                    signal.Side,
+                    _options.RequireBacktestSymbolFilter);
+            if (!isStandardBacktestGateAllowed && !isCrashOverrideBacktestGateAllowed)
             {
                 MarkSignalHandled(item.Symbol, signal.SignalCandleOpenTime);
-                AddEvent(item.Symbol, "warning", $"{signal.Pattern}:{item.Symbol}:{signal.Side} skipped by walk-forward strategy gate.");
+                var reason = crashShortGate.IsApplicable && !crashShortGate.IsAllowed
+                    ? $"crash-regime gate rejected. {crashShortGate.Reason}"
+                    : "walk-forward strategy gate rejected and crash override is not enabled for this key.";
+                AddEvent(item.Symbol, "warning", $"{signal.Pattern}:{signal.TurtleSystem}:{item.Symbol}:{signal.Side} skipped: {reason}");
                 continue;
             }
 
-            var edgeSizeMultiplier = crashShortGate.IsAllowed
+            var edgeSizeMultiplier = isCrashOverrideBacktestGateAllowed && !isStandardBacktestGateAllowed
                 ? decimal.Max(0m, _strategyRoutingOptions.TurtleCrashShortSizeMultiplier)
                 : _backtestService.ResolveStrategySymbolDirectionSizeMultiplier(
                     signal.Pattern,
@@ -673,9 +688,33 @@ public sealed class NySessionBreakoutWorker : BackgroundService, INySessionBreak
         return allowedHours.Contains(nyHour);
     }
 
+    private bool IsTurtleCrashShortLiveHourAllowed(DateTimeOffset signalTime)
+    {
+        var allowedHours = ParseAllowedHours(_strategyRoutingOptions.TurtleCrashShortAllowedHours);
+        if (allowedHours.Count == 0)
+        {
+            return IsLiveHourAllowed(signalTime);
+        }
+
+        var nyHour = TimeZoneInfo.ConvertTime(signalTime, ResolveNewYorkTimeZone()).Hour;
+        return allowedHours.Contains(nyHour);
+    }
+
     private bool IsLiveTurtleSystemAllowed(string system)
     {
         var allowed = ParseAllowedTexts(_strategyRoutingOptions.LiveEligibleTurtleSystems);
+        return allowed.Count == 0 || allowed.Contains(system.Trim());
+    }
+
+    private bool IsTurtleCrashShortCandidate(NySessionSignal signal) =>
+        _strategyRoutingOptions.TurtleCrashShortGateEnabled &&
+        IsTurtleSignal(signal) &&
+        string.Equals(signal.Side, "Short", StringComparison.OrdinalIgnoreCase) &&
+        IsTurtleCrashShortSystemAllowed(signal.TurtleSystem);
+
+    private bool IsTurtleCrashShortSystemAllowed(string system)
+    {
+        var allowed = ParseAllowedTexts(_strategyRoutingOptions.TurtleCrashShortAllowedSystems);
         return allowed.Count == 0 || allowed.Contains(system.Trim());
     }
 

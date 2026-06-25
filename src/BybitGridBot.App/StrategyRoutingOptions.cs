@@ -67,7 +67,10 @@ public sealed class StrategyRoutingOptions
 
     [ConfigurationKeyName("TURTLE_CRASH_SHORT_SIZE_MULTIPLIER")]
     [Range(typeof(decimal), "0", "100")]
-    public decimal TurtleCrashShortSizeMultiplier { get; init; } = 1m;
+    public decimal TurtleCrashShortSizeMultiplier { get; init; } = 0.25m;
+
+    [ConfigurationKeyName("TURTLE_CRASH_SHORT_ALLOWED_HOURS")]
+    public string TurtleCrashShortAllowedHours { get; init; } = string.Empty;
 
     [ConfigurationKeyName("TURTLE_CRASH_SHORT_BTC_TIMEFRAME")]
     public string TurtleCrashShortBtcTimeframe { get; init; } = "240";
@@ -122,6 +125,17 @@ public sealed class StrategyRoutingOptions
     [ConfigurationKeyName("TURTLE_CRASH_SHORT_MAX_OOS_DRAWDOWN_PERCENT")]
     [Range(typeof(decimal), "0", "10000")]
     public decimal TurtleCrashShortMaxOosDrawdownPercent { get; init; } = 20m;
+
+    [ConfigurationKeyName("TURTLE_CRASH_SHORT_MIN_PER_SYMBOL_OOS_TRADES")]
+    [Range(1, 10000)]
+    public int TurtleCrashShortMinPerSymbolOosTrades { get; init; } = 2;
+
+    [ConfigurationKeyName("TURTLE_CRASH_SHORT_REQUIRE_PER_SYMBOL_OOS_WITHOUT_TOP1_POSITIVE")]
+    public bool TurtleCrashShortRequirePerSymbolOosWithoutTop1Positive { get; init; } = false;
+
+    [ConfigurationKeyName("TURTLE_CRASH_SHORT_MAX_PER_SYMBOL_LARGEST_WIN_GROSS_PROFIT_PERCENT")]
+    [Range(typeof(decimal), "0", "100")]
+    public decimal TurtleCrashShortMaxPerSymbolLargestWinGrossProfitPercent { get; init; } = 100m;
 
     [ConfigurationKeyName("MIN_TRADES_FOR_STRATEGY_SYMBOL_GATING")]
     [Range(1, 10000)]
